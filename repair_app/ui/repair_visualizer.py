@@ -1,0 +1,481 @@
+"""
+repair_visualizer.py — 论文级修复结果可视化
+v3.0: 增材/修复双模式色系 + 实时同步逐步渲染
+"""
+
+from __future__ import annotations
+from enum import Enum, auto
+from typing import Optional
+import numpy as np
+
+import matplotlib
+matplotlib.use("QtAgg")
+import matplotlib.pyplot as plt
+import matplotlib.tri as mtri
+from repair_app.platform.fonts import get_matplotlib_fonts
+plt.rcParams["font.sans-serif"] = get_matplotlib_fonts()
+plt.rcParams["axes.unicode_minus"] = False
+
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from matplotlib.colors import LinearSegmentedColormap
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
+    QComboBox, QSlider, QCheckBox,
+)
+from PySide6.QtCore import Qt, QTimer
+
+# ---- 色温图 ----
+# 默认色温图（用于基体）
+_COLORMAP = LinearSegmentedColormap.from_list(
+    "deposit_height",
+    ["#1E40AF", "#3B82F6", "#10B981", "#F59E0B", "#EF4444"],
+    N=256,
+)
+# 修复模式专用色温图（暖色系：橙-红）
+_COLORMAP_REPAIR = LinearSegmentedColormap.from_list(
+    "repair_height",
+    ["#F59E0B", "#F97316", "#EF4444", "#DC2626", "#991B1B"],
+    N=256,
+)
+# 增材模式专用色温图（冷色系：绿-青-蓝）
+_COLORMAP_ADDITIVE = LinearSegmentedColormap.from_list(
+    "additive_height",
+    ["#10B981", "#06B6D4", "#3B82F6", "#6366F1", "#8B5CF6"],
+    N=256,
+)
+
+# 暗色主题色
+_BG = "#0F172A"
+_GRID = "#1E293B"
+_TEXT = "#94A3B8"
+
+
+class ViewMode(Enum):
+    ISOMETRIC = "isometric"
+    TOP = "top"
+    SIDE = "side"
+    FRONT = "front"
+
+
+class RepairMode(Enum):
+    ADDITIVE = auto()
+    REPAIRING = auto()
+
+
+def _triangulate_xy(pts: np.ndarray, max_pts: int = 3000) -> Optional[tuple]:
+    """用 matplotlib.tri 对点云 XY 投影做 Delaunay 三角剖分。"""
+    if len(pts) < 3:
+        return None
+    if len(pts) > max_pts:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(pts), max_pts, replace=False)
+        pts = pts[idx]
+    try:
+        tri = mtri.Triangulation(pts[:, 0], pts[:, 1])
+        return tri.triangles, pts
+    except Exception:
+        return None
+
+
+class RepairVisualizer(QWidget):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._substrate_pts: Optional[np.ndarray] = None
+        self._defect_mask: Optional[np.ndarray] = None
+        self._repair_pts: Optional[np.ndarray] = None
+        self._waypoints: Optional[np.ndarray] = None
+        self._layer_data: Optional[list[np.ndarray]] = None
+        self._current_layer: int = 0
+        self._view_mode: ViewMode = ViewMode.ISOMETRIC
+        self._anim_timer: Optional[QTimer] = None
+        self._animating: bool = False
+        self._show_before: bool = True
+        self._show_mesh: bool = True
+        self._show_waypoints: bool = True
+        self._show_nozzle: bool = False
+        self._show_colormap: bool = True
+        self._repair_mode: RepairMode = RepairMode.REPAIRING
+        # 实时同步: 部分航点和部分沉积点
+        self._partial_waypoints: Optional[np.ndarray] = None
+        self._partial_repair: Optional[np.ndarray] = None
+        self._init_ui()
+
+    def set_mode(self, mode: RepairMode) -> None:
+        """设置修复模式（增材/修复），自动切换色系。"""
+        self._repair_mode = mode
+        self._render()
+
+    @property
+    def mode(self) -> RepairMode:
+        return self._repair_mode
+
+    def _init_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        toolbar = QHBoxLayout()
+        self._cb_view = QComboBox()
+        self._cb_view.addItems(["等距视图", "俯视图", "侧视图", "正视图"])
+        self._cb_view.setToolTip("切换3D视图视角")
+        self._cb_view.currentIndexChanged.connect(self._on_view_changed)
+        toolbar.addWidget(QLabel("视角:"))
+        toolbar.addWidget(self._cb_view)
+
+        self._chk_mesh = QCheckBox("曲面")
+        self._chk_mesh.setChecked(True)
+        self._chk_mesh.setToolTip("显示/隐藏基体曲面")
+        self._chk_mesh.toggled.connect(self._on_toggle_mesh)
+        toolbar.addWidget(self._chk_mesh)
+
+        self._chk_before = QCheckBox("缺陷")
+        self._chk_before.setChecked(True)
+        self._chk_before.setToolTip("高亮显示缺陷区域")
+        self._chk_before.toggled.connect(self._on_toggle_before)
+        toolbar.addWidget(self._chk_before)
+
+        self._chk_waypoints = QCheckBox("路径")
+        self._chk_waypoints.setChecked(True)
+        self._chk_waypoints.setToolTip("显示/隐藏喷涂路径航点")
+        self._chk_waypoints.toggled.connect(self._on_toggle_waypoints)
+        toolbar.addWidget(self._chk_waypoints)
+
+        self._chk_nozzle = QCheckBox("喷嘴")
+        self._chk_nozzle.setChecked(False)
+        self._chk_nozzle.setToolTip("在路径中点显示喷嘴锥体示意")
+        self._chk_nozzle.toggled.connect(self._on_toggle_nozzle)
+        toolbar.addWidget(self._chk_nozzle)
+
+        self._chk_colormap = QCheckBox("色温")
+        self._chk_colormap.setChecked(True)
+        self._chk_colormap.setToolTip("按高度着色显示沉积层")
+        self._chk_colormap.toggled.connect(self._on_toggle_colormap)
+        toolbar.addWidget(self._chk_colormap)
+
+        toolbar.addStretch()
+
+        self._btn_anim = QPushButton("▶ 逐层动画")
+        self._btn_anim.setToolTip("逐层播放沉积动画，查看每层修复效果")
+        self._btn_anim.clicked.connect(self._toggle_animation)
+        toolbar.addWidget(self._btn_anim)
+
+        self._slider_layer = QSlider(Qt.Horizontal)
+        self._slider_layer.setRange(0, 100)
+        self._slider_layer.setValue(100)
+        self._slider_layer.valueChanged.connect(self._on_layer_slider)
+        self._slider_layer.setFixedWidth(120)
+        toolbar.addWidget(QLabel("层:"))
+        toolbar.addWidget(self._slider_layer)
+        self._lb_layer = QLabel("全部")
+        self._lb_layer.setFixedWidth(40)
+        toolbar.addWidget(self._lb_layer)
+
+        # 模式标签
+        self._lb_mode = QLabel("🔧 修复模式")
+        self._lb_mode.setStyleSheet(
+            "color:#F59E0B; font-size:12px; font-weight:bold; "
+            "padding:2px 8px; background:#1E293B; border-radius:4px;"
+        )
+        toolbar.addWidget(self._lb_mode)
+
+        layout.addLayout(toolbar)
+
+        self._fig = Figure(figsize=(7, 5), dpi=100)
+        self._fig.set_facecolor(_BG)
+        self._canvas = FigureCanvas(self._fig)
+        layout.addWidget(self._canvas)
+        self._ax = self._fig.add_subplot(111, projection="3d")
+        self._ax.set_facecolor(_BG)
+        for pane in [self._ax.xaxis, self._ax.yaxis, self._ax.zaxis]:
+            pane.set_pane_color(_BG)
+        self._ax.xaxis._axinfo["grid"]["color"] = _GRID
+        self._ax.yaxis._axinfo["grid"]["color"] = _GRID
+        self._ax.zaxis._axinfo["grid"]["color"] = _GRID
+
+    # ========== 槽 ==========
+    def _on_view_changed(self, idx: int) -> None:
+        views = [ViewMode.ISOMETRIC, ViewMode.TOP, ViewMode.SIDE, ViewMode.FRONT]
+        if idx < len(views):
+            self._view_mode = views[idx]
+            self._render()
+
+    def _on_toggle_mesh(self, checked: bool) -> None:
+        self._show_mesh = checked
+        self._render()
+
+    def _on_toggle_before(self, checked: bool) -> None:
+        self._show_before = checked
+        self._render()
+
+    def _on_toggle_waypoints(self, checked: bool) -> None:
+        self._show_waypoints = checked
+        self._render()
+
+    def _on_toggle_nozzle(self, checked: bool) -> None:
+        self._show_nozzle = checked
+        self._render()
+
+    def _on_toggle_colormap(self, checked: bool) -> None:
+        self._show_colormap = checked
+        self._render()
+
+    def _on_layer_slider(self, val: int) -> None:
+        if self._layer_data:
+            n = len(self._layer_data) - 1
+            if n > 0:
+                self._current_layer = int(val / 100 * n)
+                self._lb_layer.setText(str(self._current_layer + 1))
+            else:
+                self._current_layer = 0
+                self._lb_layer.setText("全部")
+            self._render()
+
+    def _toggle_animation(self) -> None:
+        if self._animating:
+            self._anim_timer.stop()
+            self._anim_timer = None
+            self._animating = False
+            self._btn_anim.setText("▶ 逐层动画")
+            return
+        if not self._layer_data or len(self._layer_data) < 2:
+            return
+        self._animating = True
+        self._btn_anim.setText("⏸ 停止")
+        self._current_layer = 0
+        self._render()
+        self._anim_timer = QTimer(self)
+        def _step():
+            if self._current_layer < len(self._layer_data) - 1:
+                self._current_layer += 1
+                self._lb_layer.setText(str(self._current_layer + 1))
+                self._render()
+            else:
+                self._anim_timer.stop()
+                self._anim_timer = None
+                self._animating = False
+                self._btn_anim.setText("▶ 逐层动画")
+        self._anim_timer.timeout.connect(_step)
+        self._anim_timer.start(400)
+
+    # ========== 数据设置 ==========
+    def set_data(
+        self,
+        substrate: np.ndarray,
+        defect_mask: Optional[np.ndarray] = None,
+        repair: Optional[np.ndarray] = None,
+        waypoints: Optional[np.ndarray] = None,
+        layers: Optional[list[np.ndarray]] = None,
+    ) -> None:
+        self._substrate_pts = substrate
+        self._defect_mask = defect_mask
+        self._repair_pts = repair
+        self._waypoints = waypoints
+        self._layer_data = layers
+        self._current_layer = len(layers) - 1 if layers else 0
+        self._partial_waypoints = None
+        self._partial_repair = None
+        self._render()
+
+    def set_partial_waypoints(self, waypoints: np.ndarray) -> None:
+        """设置部分航点（用于实时同步显示）。"""
+        self._partial_waypoints = waypoints
+        self._render()
+
+    def set_partial_repair(self, repair_pts: np.ndarray) -> None:
+        """设置部分沉积点（用于实时同步显示）。"""
+        self._partial_repair = repair_pts
+        self._render()
+
+    # ========== 内部渲染 ==========
+    def _render(self) -> None:
+        self._ax.clear()
+        self._ax.set_title(
+            "增材制造 3D 预览" if self._repair_mode == RepairMode.ADDITIVE else "缺陷修复 3D 预览",
+            color=_TEXT, fontsize=11
+        )
+        legend_items: list = []
+
+        self._render_substrate_and_defect(legend_items)
+        self._render_repair_result(legend_items)
+        self._render_path_and_waypoints(legend_items)
+        self._render_nozzle_if_needed()
+        self._update_mode_label()
+        self._render_axes_and_legend(legend_items)
+
+        self._canvas.draw_idle()
+
+    def _render_substrate_and_defect(self, legend_items: list) -> None:
+        """渲染基体曲面和缺陷区域高亮。"""
+        if self._substrate_pts is None or not self._show_before:
+            return
+        if self._defect_mask is not None and np.any(self._defect_mask):
+            base = self._substrate_pts[~self._defect_mask]
+        else:
+            base = self._substrate_pts
+        if len(base) >= 3:
+            if self._show_colormap:
+                legend_items.append(self._render_surface(base, "基体", None, 0.55, colormap=True))
+            else:
+                legend_items.append(self._render_surface(base, "基体", "#64748B", 0.55))
+
+        if self._defect_mask is not None and np.any(self._defect_mask):
+            dp = self._substrate_pts[self._defect_mask]
+            if len(dp) > 3:
+                if self._repair_mode == RepairMode.REPAIRING:
+                    color, label = "#EF4444", "缺陷区域"
+                else:
+                    color, label = "#10B981", "增材目标区"
+                l2, = self._ax.plot(dp[:, 0], dp[:, 1], dp[:, 2],
+                                    'o', color=color, markersize=2.0, alpha=0.6)
+                legend_items.append((l2, label))
+
+    def _render_repair_result(self, legend_items: list) -> None:
+        """渲染修复/增材结果。"""
+        display_repair = (
+            self._partial_repair
+            if self._partial_repair is not None and len(self._partial_repair) > 0
+            else self._repair_pts
+        )
+        if display_repair is None or len(display_repair) == 0:
+            return
+        if self._repair_mode == RepairMode.ADDITIVE:
+            cmap, label, plain_color = _COLORMAP_ADDITIVE, "增材层", "#10B981"
+        else:
+            cmap, label, plain_color = _COLORMAP_REPAIR, "修复填充", "#F59E0B"
+        if self._show_colormap:
+            legend_items.append(
+                self._render_surface(display_repair, label, None, 0.85, colormap=True, custom_cmap=cmap))
+        else:
+            legend_items.append(
+                self._render_surface(display_repair, label, plain_color, 0.85))
+
+    def _render_path_and_waypoints(self, legend_items: list) -> None:
+        """渲染路径线和航点标记。"""
+        display_wp = (
+            self._partial_waypoints
+            if self._partial_waypoints is not None and len(self._partial_waypoints) > 1
+            else self._waypoints
+        )
+        if not self._show_waypoints or display_wp is None or len(display_wp) <= 1:
+            return
+        wp = display_wp
+        path_color = "#10B981" if self._repair_mode == RepairMode.ADDITIVE else "#F59E0B"
+        path_label = "增材路径" if self._repair_mode == RepairMode.ADDITIVE else "修复路径"
+        l1, = self._ax.plot(wp[:, 0], wp[:, 1], wp[:, 2],
+                            path_color, linewidth=2.0, alpha=0.9)
+        legend_items.append((l1, path_label))
+        step = max(1, len(wp) // 30)
+        self._ax.scatter(wp[::step, 0], wp[::step, 1], wp[::step, 2],
+                         s=20, c="#EF4444", marker="o", alpha=0.9, zorder=5)
+        self._ax.scatter(*wp[0], s=60, c="#10B981", marker="s",
+                         edgecolors="white", linewidth=0.8, zorder=6)
+        self._ax.scatter(*wp[-1], s=60, c="#8B5CF6", marker="s",
+                         edgecolors="white", linewidth=0.8, zorder=6)
+
+    def _render_nozzle_if_needed(self) -> None:
+        """需要时渲染喷嘴位置指示。"""
+        if (self._show_nozzle and self._waypoints is not None
+                and len(self._waypoints) > 1):
+            self._render_nozzle(self._waypoints[len(self._waypoints) // 2])
+
+    def _update_mode_label(self) -> None:
+        """更新模式标签文本和样式。"""
+        if self._repair_mode == RepairMode.ADDITIVE:
+            self._lb_mode.setText("🏗️ 增材模式")
+            self._lb_mode.setStyleSheet(
+                "color:#10B981; font-size:12px; font-weight:bold; "
+                "padding:2px 8px; background:#1E293B; border-radius:4px;"
+            )
+        else:
+            self._lb_mode.setText("🔧 修复模式")
+            self._lb_mode.setStyleSheet(
+                "color:#F59E0B; font-size:12px; font-weight:bold; "
+                "padding:2px 8px; background:#1E293B; border-radius:4px;"
+            )
+
+    def _render_axes_and_legend(self, legend_items: list) -> None:
+        """设置坐标轴样式和图例。"""
+        self._apply_view()
+        self._ax.set_xlabel("X (mm)", color=_TEXT)
+        self._ax.set_ylabel("Y (mm)", color=_TEXT)
+        self._ax.set_zlabel("Z (mm)", color=_TEXT)
+        self._ax.tick_params(colors=_TEXT, labelsize=8)
+
+        if legend_items:
+            handles = [h for h, _ in legend_items]
+            labels = [l for _, l in legend_items]
+            self._ax.legend(handles, labels, loc="upper right",
+                            fontsize=7, markerscale=0.6, ncol=2,
+                            facecolor=_BG, edgecolor="#334155",
+                            labelcolor="#E2E8F0")
+
+    def _render_surface(self, pts: np.ndarray, label: str,
+                         color: Optional[str],
+                         alpha: float,
+                         colormap: bool = False,
+                         custom_cmap=None):
+        """渲染点云：优先三角网格曲面，退化为散点。"""
+        if self._show_mesh and len(pts) >= 3:
+            result = _triangulate_xy(pts)
+            if result is not None:
+                tris, verts = result
+                if colormap:
+                    h = verts[:, 2]
+                    norm = plt.Normalize(h.min(), h.max())
+                    cm = custom_cmap if custom_cmap is not None else _COLORMAP
+                    fc = cm(norm(h))
+                    avg = np.mean(fc[tris], axis=1)
+                    mesh = Poly3DCollection(verts[tris], alpha=alpha,
+                                            edgecolor="none", facecolor=avg)
+                else:
+                    mesh = Poly3DCollection(verts[tris], alpha=alpha,
+                                            edgecolor="none", facecolor=color)
+                self._ax.add_collection3d(mesh)
+                from matplotlib.lines import Line2D
+                c = "#10B981" if not colormap and color is None else (color if not colormap else "#10B981")
+                return Line2D([0], [0], color=c, lw=4, alpha=alpha), label
+
+        # 散点回退
+        s = max(0.5, min(3, 2000 / max(len(pts), 1)))
+        if colormap:
+            h = pts[:, 2]
+            cm = custom_cmap if custom_cmap is not None else _COLORMAP
+            sc = self._ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                                  s=s, c=h, cmap=cm, alpha=alpha)
+        else:
+            sc = self._ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                                  s=s, c=color, alpha=alpha)
+        return sc, label
+
+    def _render_nozzle(self, center: np.ndarray) -> None:
+        """喷嘴锥体示意。"""
+        r, h = 3.0, 15.0
+        n = np.array([0, 0, 1])
+        n_theta = 20
+        theta = np.linspace(0, 2 * np.pi, n_theta, endpoint=False)
+        v1 = np.array([1, 0, 0]) if abs(n[0]) < 0.8 else np.array([0, 1, 0])
+        v1 = v1 - np.dot(v1, n) * n
+        v1 = v1 / np.linalg.norm(v1)
+        v2 = np.cross(n, v1)
+        disk = np.array([center + r * (np.cos(t) * v1 + np.sin(t) * v2) for t in theta])
+        tip = center - h * n
+        for i in range(n_theta):
+            j = (i + 1) % n_theta
+            tri = np.array([disk[i], disk[j], tip])
+            self._ax.add_collection3d(
+                Poly3DCollection([tri], alpha=0.25, facecolor="#3B82F6", edgecolor="none"))
+        self._ax.add_collection3d(
+            Poly3DCollection([disk], alpha=0.4, facecolor="#EF4444", edgecolor="#FCA5A5"))
+
+    def _apply_view(self) -> None:
+        mode = self._view_mode
+        if mode == ViewMode.TOP:
+            self._ax.view_init(elev=90, azim=-90)
+        elif mode == ViewMode.SIDE:
+            self._ax.view_init(elev=0, azim=-90)
+        elif mode == ViewMode.FRONT:
+            self._ax.view_init(elev=0, azim=0)
+        else:
+            self._ax.view_init(elev=30, azim=-60)
