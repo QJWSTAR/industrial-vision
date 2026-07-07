@@ -196,7 +196,7 @@ csam-repair/
 │   ├── platform/              # Platform abstractions (ZMQ transport, CJK fonts)
 │   ├── repository/            # File I/O + material data access
 │   ├── service/               # Business logic orchestration
-│   ├── tests/                 # Test suites (145 tests)
+│   ├── tests/                 # 测试套件（199 个测试）
 │   ├── tools/                 # Profiler + benchmark
 │   ├── ui/                    # GUI (PySide6)
 │   │   └── panels/            # UI panel components
@@ -213,7 +213,7 @@ csam-repair/
 ### 运行测试
 
 ```bash
-# 全部测试（145 个测试）
+# 全部测试（199 个测试）
 pytest repair_app/tests/ -v
 
 # 仅单元测试

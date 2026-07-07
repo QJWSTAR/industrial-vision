@@ -56,9 +56,9 @@ if %errorlevel% neq 0 (
     echo [错误] 打包失败！请检查上面的错误信息。
     echo.
     echo 常见问题：
-echo - PySide6 插件缺失：尝试 pip install PySide6 --force-reinstall
-echo - 中文路径问题：确保项目路径不含中文/空格
-echo - 模块缺失：检查 repair_app.spec 中 hiddenimports 列表
+    echo - PySide6 插件缺失：尝试 pip install PySide6 --force-reinstall
+    echo - 中文路径问题：确保项目路径不含中文/空格
+    echo - 模块缺失：检查 repair_app.spec 中 hiddenimports 列表
     pause
     exit /b 1
 )

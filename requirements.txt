@@ -1,5 +1,5 @@
 # Minimal runtime dependencies for cold spray defect repair software.
-# For full-featured install (Open3D, PyVista, loguru): pip install -e ".[full]"
+# For full-featured install (loguru): pip install -e ".[full]"
 # For development: pip install -e ".[dev]"
 numpy>=1.21
 scipy>=1.7
