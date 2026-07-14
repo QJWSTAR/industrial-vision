@@ -129,8 +129,13 @@ class MatlabEngineProxy:
                     last_err = exc
                     logger.warning("连接默认会话失败: %s", exc)
 
-            # 策略 3：独立启动新引擎（最慢，仅用于独立测试）
-            if not self._connected:
+            # 策略 3：独立启动新引擎（最慢，仅强制 matlab 模式或独立测试使用）
+            # auto 模式下跳过：独立启动耗时 30-60s 且无算法路径，应降级到 Python
+            engine_mode = os.environ.get("CSAM_ALGORITHM_ENGINE", "auto").lower()
+            allow_standalone = engine_mode == "matlab" or os.environ.get(
+                "CSAM_MATLAB_ALLOW_STANDALONE", "0"
+            ) == "1"
+            if not self._connected and allow_standalone:
                 try:
                     logger.info("尝试独立启动 MATLAB 引擎（可能需要 30-60s）")
                     self._eng = me.start_matlab()
@@ -143,6 +148,11 @@ class MatlabEngineProxy:
                     raise RuntimeError(
                         f"无法连接 MATLAB 引擎: {last_err}"
                     ) from last_err
+
+            if not self._connected:
+                raise RuntimeError(
+                    f"无可用 MATLAB 共享会话（auto 模式跳过独立启动）: {last_err}"
+                )
 
             # 添加算法路径（仅独立启动时需要；共享会话由 matlab_bridge_server.m 已 addpath）
             # 注意：matlab.engine 跨语言传中文路径会触发 "Unknown exception"，

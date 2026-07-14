@@ -75,8 +75,8 @@ class MatlabAdapter(BridgeServer):
                     "空点云请求", "输入点云为空",
                 )
 
-            # 调用算法（MATLAB 作为计算引擎，返回航点+法向量+层号）
-            waypoints = self._invoke_algorithm(xyz, meta)
+            # 调用算法（MATLAB 作为计算引擎，auto 模式失败时自动降级到 Python）
+            waypoints = self._invoke_with_fallback(xyz, meta)
 
             if len(waypoints) == 0:
                 return self._build_error_result(
@@ -121,6 +121,8 @@ class MatlabAdapter(BridgeServer):
             uniformity = self._compute_uniformity(waypoints)
             layer_profiles = self._build_layer_profiles(waypoints, meta)
             particle_dist = self._build_particle_distribution(meta)
+            # Python 降级路径也生成 mesh（Delaunay 三角剖分 → 二进制 STL）
+            mesh_data, mesh_format = self._build_mesh_from_cloud(xyz)
 
             return Serializer.build_repair_result(
                 waypoints,
@@ -136,6 +138,8 @@ class MatlabAdapter(BridgeServer):
                 feasibility_reason="MATLAB adapter path generated (heuristic viz)",
                 layer_profiles=layer_profiles,
                 particle_dist=particle_dist,
+                mesh_data=mesh_data,
+                mesh_format=mesh_format,
             )
 
         except MatlabAlgorithmError as exc:
@@ -163,6 +167,9 @@ class MatlabAdapter(BridgeServer):
         """
         engine_mode = os.environ.get("CSAM_ALGORITHM_ENGINE", "auto").lower()
         if engine_mode == "python":
+            return None
+        # 若路径规划已降级到 Python（MATLAB 不可用），跳过形貌预测避免重复连接延迟
+        if self._algorithm_fn is self._default_algorithm:
             return None
 
         try:
@@ -377,12 +384,60 @@ class MatlabAdapter(BridgeServer):
             dep_efficiency=dep_eff,
         )
 
+    @staticmethod
+    def _build_mesh_from_cloud(xyz: np.ndarray) -> tuple[bytes, str]:
+        """从点云生成 Delaunay 三角网格，编码为二进制 STL bytes。
+
+        降级路径使用：MATLAB 不可用时仍为 GUI 提供 mesh 数据。
+        """
+        if len(xyz) < 3:
+            return b"", ""
+        try:
+            from scipy.spatial import Delaunay
+            from .matlab_engine_proxy import _triangles_to_binary_stl
+
+            pts = np.asarray(xyz, dtype=np.float32)
+            # 限制点数避免大网格性能问题
+            if len(pts) > 5000:
+                rng = np.random.default_rng(42)
+                idx = rng.choice(len(pts), 5000, replace=False)
+                pts = pts[idx]
+            # XY 投影 Delaunay
+            tri = Delaunay(pts[:, :2])
+            triangles = pts[tri.simplices].reshape(-1, 9)  # (N, 9)
+            stl_bytes = _triangles_to_binary_stl(triangles)
+            return stl_bytes, "stl_binary" if stl_bytes else ""
+        except Exception as exc:
+            logger.warning("Python 降级 mesh 生成失败: %s", exc)
+            return b"", ""
+
     def _invoke_algorithm(self, xyz: np.ndarray, meta: dict[str, Any]) -> np.ndarray:
         """调用算法函数（可被子类/配置覆盖）。"""
         try:
             return self._algorithm_fn(xyz=xyz, meta=meta)
         except Exception as exc:
             raise MatlabAlgorithmError(f"算法执行失败: {exc}") from exc
+
+    def _invoke_with_fallback(self, xyz: np.ndarray, meta: dict[str, Any]) -> np.ndarray:
+        """调用算法，auto 模式下 MATLAB 失败时自动降级到 Python 原型。
+
+        工业可靠性保证：MATLAB 不可用或算法异常时，生产连续性优先，
+        降级到 Python 本地路径规划器，不中断服务。
+        降级后切换 _algorithm_fn 到 Python，避免后续请求重复尝试 MATLAB。
+        """
+        try:
+            return self._invoke_algorithm(xyz, meta)
+        except MatlabAlgorithmError as exc:
+            engine_mode = os.environ.get("CSAM_ALGORITHM_ENGINE", "auto").lower()
+            # 仅当当前算法不是 Python 默认算法时才降级（避免无限递归）
+            if engine_mode == "auto" and self._algorithm_fn is not self._default_algorithm:
+                logger.warning(
+                    "MATLAB 算法失败，auto 模式降级到 Python 原型: %s", exc
+                )
+                # 切换到 Python，后续请求（含 _try_profile_prediction）直接跳过 MATLAB
+                self._algorithm_fn = self._default_algorithm
+                return self._default_algorithm(xyz=xyz, meta=meta)
+            raise
 
     def _select_algorithm(self) -> Callable[..., np.ndarray]:
         """选择算法实现：MATLAB 引擎优先，不可用时降级到 Python。"""
