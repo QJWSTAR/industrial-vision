@@ -85,11 +85,36 @@ class MatlabAdapter(BridgeServer):
                 )
 
             elapsed_ms = int((time.time() - started) * 1000)
+
+            # ---- 优先尝试 MATLAB 形貌预测，填充真实可视化字段 ----
+            viz = self._try_profile_prediction(xyz, meta)
+
+            if viz is not None:
+                # MATLAB 形貌预测成功：使用真实计算结果
+                density_gcm3 = float(meta.get("material_density_gcm3", 7.99)) or 7.99
+                return Serializer.build_repair_result(
+                    waypoints,
+                    request_id=request_id,
+                    status_code=RepairStatusCode.SUCCESS,
+                    predicted_volume_mm3=viz["predicted_volume_mm3"],
+                    material_density_gcm3=density_gcm3,
+                    estimated_mass_g=viz["estimated_mass_g"],
+                    estimated_time_s=viz["estimated_time_s"],
+                    compute_time_ms=elapsed_ms,
+                    uniformity_score=viz["uniformity"],
+                    is_feasible=True,
+                    feasibility_reason="MATLAB profile prediction completed",
+                    layer_profiles=viz["layer_profiles"],
+                    particle_dist=viz["particle_dist"],
+                    mesh_data=viz["mesh_data"],
+                    mesh_format=viz["mesh_format"],
+                )
+
+            # ---- 降级：Python 启发式派生可视化字段 ----
             path_length = self._compute_path_length(waypoints)
             speed = max(float(meta.get("traversing_speed_mms", 500.0)), 1e-6)
             estimated_time_s = path_length / speed
 
-            # ---- 可视化数据：由计算结果派生，GUI 原生渲染 ----
             density_gcm3 = self._material_density_gcm3(meta)
             volume_mm3 = self._estimate_volume_mm3(waypoints, meta)
             mass_g = volume_mm3 * density_gcm3 * 1e-3  # mm3*g/cm3 -> g
@@ -108,7 +133,7 @@ class MatlabAdapter(BridgeServer):
                 compute_time_ms=elapsed_ms,
                 uniformity_score=uniformity,
                 is_feasible=True,
-                feasibility_reason="MATLAB adapter path generated",
+                feasibility_reason="MATLAB adapter path generated (heuristic viz)",
                 layer_profiles=layer_profiles,
                 particle_dist=particle_dist,
             )
@@ -125,6 +150,96 @@ class MatlabAdapter(BridgeServer):
                 request_id, RepairStatusCode.ERR_UNKNOWN,
                 str(exc), str(exc),
             )
+
+    # ====== MATLAB 形貌预测 ======
+
+    def _try_profile_prediction(
+        self, xyz: np.ndarray, meta: dict[str, Any]
+    ) -> Optional[dict[str, Any]]:
+        """尝试调用 MATLAB run_profile_prediction 填充可视化字段。
+
+        成功返回 dict（含 layer_profiles/particle_dist/mesh_data 等），
+        失败返回 None（调用方降级到 Python 启发式）。
+        """
+        engine_mode = os.environ.get("CSAM_ALGORITHM_ENGINE", "auto").lower()
+        if engine_mode == "python":
+            return None
+
+        try:
+            from .matlab_engine_proxy import MatlabEngineProxy
+            proxy = MatlabEngineProxy()
+            proxy._ensure_connected()
+            raw = proxy.call_profile_prediction(xyz, meta)
+            return self._build_viz_from_profile(raw, meta)
+        except Exception as exc:
+            if engine_mode == "matlab":
+                logger.warning("MATLAB 形貌预测失败（强制模式，降级到启发式）: %s", exc)
+            else:
+                logger.info("MATLAB 形貌预测不可用，降级到 Python 启发式: %s", exc)
+            return None
+
+    @staticmethod
+    def _build_viz_from_profile(
+        raw: dict[str, Any], meta: dict[str, Any]
+    ) -> dict[str, Any]:
+        """将 MATLAB 形貌预测结果转换为 RepairResult 可视化字段。"""
+        from repair_app.communication.repair_serialization import (
+            build_layer_profile,
+            build_particle_distribution,
+        )
+
+        # layer_profiles: N×4 [layer_idx, max_h, avg_h, dep_eff] → List[LayerProfile]
+        lp_arr = raw.get("layer_profiles")
+        layer_profiles = []
+        if lp_arr is not None and len(lp_arr) > 0:
+            lp = np.asarray(lp_arr, dtype=np.float32)
+            if lp.ndim == 2 and lp.shape[1] >= 4:
+                for row in lp:
+                    layer_profiles.append(
+                        build_layer_profile(
+                            int(row[0]),
+                            max_height_mm=float(row[1]),
+                            avg_height_mm=float(row[2]),
+                            dep_efficiency=float(row[3]),
+                        )
+                    )
+
+        # particle_distribution: dict → ParticleDistribution
+        pd_raw = raw.get("particle_distribution")
+        particle_dist = None
+        if pd_raw is not None:
+            px = np.asarray(pd_raw.get("px", []), dtype=np.float32)
+            py = np.asarray(pd_raw.get("py", []), dtype=np.float32)
+            vx = np.asarray(pd_raw.get("vx", []), dtype=np.float32)
+            vy = np.asarray(pd_raw.get("vy", []), dtype=np.float32)
+            vz = np.asarray(pd_raw.get("vz", []), dtype=np.float32)
+            vcr = np.asarray(pd_raw.get("vcr", []), dtype=np.float32)
+            diameter = np.asarray(pd_raw.get("diameter", []), dtype=np.float32)
+            temperature = np.asarray(pd_raw.get("temperature", []), dtype=np.float32)
+            dep_eff = float(pd_raw.get("dep_efficiency", 0.0) or 0.0)
+            if len(px) > 0:
+                particle_dist = build_particle_distribution(
+                    px, py, vx, vy, vz,
+                    temperature=temperature if len(temperature) == len(px) else None,
+                    diameter=diameter if len(diameter) == len(px) else None,
+                    vcr=vcr if len(vcr) == len(px) else None,
+                    dep_efficiency=dep_eff,
+                )
+
+        # mesh_data: 二进制 STL bytes
+        mesh_data = raw.get("mesh_stl_bytes", b"")
+        mesh_format = "stl_binary" if mesh_data else ""
+
+        return {
+            "predicted_volume_mm3": float(raw.get("predicted_volume_mm3", 0.0) or 0.0),
+            "estimated_mass_g": float(raw.get("estimated_mass_g", 0.0) or 0.0),
+            "estimated_time_s": float(raw.get("estimated_time_s", 0.0) or 0.0),
+            "uniformity": float(raw.get("uniformity", 0.78) or 0.78),
+            "layer_profiles": layer_profiles,
+            "particle_dist": particle_dist,
+            "mesh_data": mesh_data,
+            "mesh_format": mesh_format,
+        }
 
     # ====== 可视化数据派生 ======
 

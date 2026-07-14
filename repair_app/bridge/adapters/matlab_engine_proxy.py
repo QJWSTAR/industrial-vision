@@ -198,6 +198,157 @@ class MatlabEngineProxy:
                 pass
 
     # ================================================================
+    # 形貌预测（run_profile_prediction）
+    # ================================================================
+
+    def call_profile_prediction(
+        self, xyz: np.ndarray, meta: dict[str, Any]
+    ) -> dict[str, Any]:
+        """调用 MATLAB run_profile_prediction，返回形貌预测完整结果。
+
+        流程：
+        1. 将点云写为临时 STL 文件
+        2. 构造 MATLAB params struct
+        3. 调用 eng.run_profile_prediction(stl_path, excel_path, params)
+        4. 将返回的 struct 解析为 Python dict（含 mesh、layer_profiles、
+           particle_distribution、uniformity、estimated_mass_g、estimated_time_s、
+           warnings）
+        """
+        self._ensure_connected()
+
+        stl_path = self._write_xyz_as_stl(xyz)
+        params = self._meta_to_profile_params(meta)
+        # CFD Excel 路径：优先用 meta 中的 cfd_excel_path，否则传空让 MATLAB 自动查找
+        excel_path = str(meta.get("cfd_excel_path", ""))
+
+        try:
+            raw = self._eng.run_profile_prediction(
+                stl_path, excel_path, params, nargout=1,
+            )
+            result = self._parse_profile_result(raw)
+            logger.info(
+                "MATLAB 形貌预测完成: mesh=%d 三角形, 航点=%d, 耗时 %.2fs",
+                len(result.get("mesh", [])),
+                result.get("waypoint_count", 0),
+                result.get("compute_time_s", 0.0),
+            )
+            return result
+        finally:
+            try:
+                os.remove(stl_path)
+            except OSError:
+                pass
+
+    def _meta_to_profile_params(self, meta: dict[str, Any]) -> dict:
+        """将 Python meta dict 转为 MATLAB run_profile_prediction 兼容的 struct dict。"""
+        def safe_float(val, default):
+            try:
+                return float(val) if val is not None else default
+            except (TypeError, ValueError):
+                return default
+
+        # 路径规划相关参数复用 _meta_to_matlab_struct 的映射
+        base = self._meta_to_matlab_struct(meta)
+
+        # 形貌预测特有参数
+        base["standoff_distance_mm"] = safe_float(
+            meta.get("standoff_distance_mm"), 30.0
+        )
+        base["spot_step_size_mm"] = safe_float(
+            meta.get("spot_step_size_mm"),
+            safe_float(meta.get("scanning_step_mm"), 2.0),
+        )
+        base["subdivide_max_edge"] = safe_float(
+            meta.get("subdivide_max_edge"), 5.0
+        )
+        base["improve_short_edge"] = safe_float(
+            meta.get("improve_short_edge"), 1.5
+        )
+        base["octree_max_depth"] = safe_float(
+            meta.get("octree_max_depth"), 6.0
+        )
+        base["octree_max_tris"] = safe_float(
+            meta.get("octree_max_tris"), 8.0
+        )
+        base["nozzle_diameter_mm"] = safe_float(
+            meta.get("nozzle_diameter_mm"), 6.0
+        )
+        base["material_density_gcm3"] = safe_float(
+            meta.get("material_density_gcm3"), 7.99
+        )
+        base["particle_velocity_ms"] = safe_float(
+            meta.get("particle_velocity_ms"), 500.0
+        )
+        base["critical_velocity_ms"] = safe_float(
+            meta.get("critical_velocity_ms"), 400.0
+        )
+        base["particle_size_um"] = safe_float(
+            meta.get("particle_size_um"), 25.0
+        )
+        base["num_layers"] = safe_float(
+            meta.get("num_layers"), 3.0
+        )
+        return base
+
+    @staticmethod
+    def _parse_profile_result(raw: Any) -> dict[str, Any]:
+        """将 MATLAB 返回的 struct（Python dict）解析为标准化 dict。
+
+        处理 matlab.double → numpy.ndarray 转换，处理空数组与嵌套 struct。
+        """
+        def to_np(val) -> np.ndarray:
+            if val is None:
+                return np.zeros((0,), dtype=np.float32)
+            arr = np.asarray(val, dtype=np.float64)
+            return arr.astype(np.float32)
+
+        def to_list(val) -> list:
+            if val is None:
+                return []
+            if isinstance(val, (list, tuple)):
+                return [str(v) for v in val]
+            return [str(val)]
+
+        result: dict[str, Any] = {
+            "mesh": to_np(raw.get("mesh", [])),
+            "substrate_triangles": to_np(raw.get("substrate_triangles", [])),
+            "layer_profiles": to_np(raw.get("layer_profiles", [])),
+            "uniformity": float(raw.get("uniformity", 0.78) or 0.78),
+            "estimated_mass_g": float(raw.get("estimated_mass_g", 0.0) or 0.0),
+            "estimated_time_s": float(raw.get("estimated_time_s", 0.0) or 0.0),
+            "predicted_volume_mm3": float(raw.get("predicted_volume_mm3", 0.0) or 0.0),
+            "compute_time_s": float(raw.get("compute_time_s", 0.0) or 0.0),
+            "waypoint_count": int(raw.get("waypoint_count", 0) or 0),
+            "warnings": to_list(raw.get("warnings", [])),
+        }
+
+        # 解析嵌套的 particle_distribution struct
+        pd_raw = raw.get("particle_distribution", None)
+        if pd_raw is not None:
+            result["particle_distribution"] = {
+                "px": to_np(pd_raw.get("px", [])),
+                "py": to_np(pd_raw.get("py", [])),
+                "vx": to_np(pd_raw.get("vx", [])),
+                "vy": to_np(pd_raw.get("vy", [])),
+                "vz": to_np(pd_raw.get("vz", [])),
+                "vcr": to_np(pd_raw.get("vcr", [])),
+                "dep_efficiency": float(pd_raw.get("dep_efficiency", 0.0) or 0.0),
+                "diameter": to_np(pd_raw.get("diameter", [])),
+                "temperature": to_np(pd_raw.get("temperature", [])),
+            }
+        else:
+            result["particle_distribution"] = None
+
+        # 将 mesh（N×9）转为二进制 STL bytes
+        mesh = result["mesh"]
+        if mesh.ndim == 2 and mesh.shape[1] == 9 and len(mesh) > 0:
+            result["mesh_stl_bytes"] = _triangles_to_binary_stl(mesh)
+        else:
+            result["mesh_stl_bytes"] = b""
+
+        return result
+
+    # ================================================================
     # 数据转换
     # ================================================================
 
@@ -328,3 +479,48 @@ class MatlabEngineProxy:
         if cls._instance is not None:
             cls._instance.shutdown()
         cls._instance = None
+
+
+def _triangles_to_binary_stl(triangles: np.ndarray) -> bytes:
+    """将 N×9 三角形矩阵转换为二进制 STL bytes。
+
+    每行格式：[x1,y1,z1, x2,y2,z2, x3,y3,z3]
+    输出符合二进制 STL 规范：80 字节头 + 三角面数 + 每面 50 字节。
+    """
+    import struct
+
+    triangles = np.asarray(triangles, dtype=np.float32)
+    if triangles.ndim != 2 or triangles.shape[1] != 9:
+        return b""
+
+    n = triangles.shape[0]
+    if n == 0:
+        return b""
+
+    # 80 字节头 + 4 字节三角形数
+    buf = bytearray(b"\x00" * 80)
+    buf += struct.pack("<I", n)
+
+    for i in range(n):
+        v0 = triangles[i, 0:3]
+        v1 = triangles[i, 3:6]
+        v2 = triangles[i, 6:9]
+
+        # 计算法向量
+        e1 = v1 - v0
+        e2 = v2 - v0
+        normal = np.cross(e1, e2)
+        norm_len = float(np.linalg.norm(normal))
+        if norm_len > 1e-12:
+            normal = normal / norm_len
+        else:
+            normal = np.zeros(3, dtype=np.float32)
+
+        # 50 字节：12(法向) + 12*3(三顶点) + 2(属性)
+        buf += struct.pack("<3f", float(normal[0]), float(normal[1]), float(normal[2]))
+        buf += struct.pack("<3f", float(v0[0]), float(v0[1]), float(v0[2]))
+        buf += struct.pack("<3f", float(v1[0]), float(v1[1]), float(v1[2]))
+        buf += struct.pack("<3f", float(v2[0]), float(v2[1]), float(v2[2]))
+        buf += struct.pack("<H", 0)
+
+    return bytes(buf)
