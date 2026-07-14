@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+*.spec.bak
+
+# Virtual environments
+venv/
+.venv/
+env/
+.conda/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.trae/
+
+# Logs
+logs/
+*.log
+
+# Datasets & Experiments
+repair_app/datasets/
+repair_app/experiments/
+
+# License & Secrets
+config/license.key
+config/public_key.pem
+config/private_key.pem
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MATLAB
+*.m~
+
+# Generated artifacts
+*.pdf
+*.png
+*.jpg
+!p1.jpg
+!Matlab图片保存/*.jpg
+
+# PyInstaller
+*.spec.bak
+
+# pytest
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# matplotlib
+.matplotlib_cache/
+
+# Misc
+*.zip
+*.tar.gz

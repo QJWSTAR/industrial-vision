@@ -1,0 +1,372 @@
+"""
+license_manager.py — RSA License 管理系统
+Stage 4.1 v2.1：RSA-2048 公钥验证 / 机器码绑定 / 到期提醒 / HMAC 防篡改
+"""
+
+from __future__ import annotations
+import os
+import json
+import hashlib
+import hmac
+import uuid
+import platform
+from datetime import datetime, timedelta
+from typing import Optional
+
+try:
+    from cryptography.hazmat.primitives.asymmetric import rsa, padding
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.backends import default_backend
+    _CRYPTO_AVAILABLE = True
+except ImportError:
+    _CRYPTO_AVAILABLE = False
+
+try:
+    from repair_app.utils.logger_config import warning as _log_warning, error as _log_error
+except ImportError:
+    _log_warning = lambda msg: None
+    _log_error = lambda msg: None
+
+try:
+    from repair_app.utils.resource_path import get_config_dir, is_frozen
+except ImportError:
+    is_frozen = lambda: False
+    def get_config_dir():
+        from pathlib import Path
+        return Path(__file__).resolve().parent.parent.parent / 'config'
+
+
+LICENSE_FILE = "license.key"
+PUBLIC_KEY_FILE = "public_key.pem"
+PRIVATE_KEY_FILE = "private_key.pem"
+_DEV_HMAC_FALLBACK = "csam_dev_secret_2026"
+_DEFAULT_HMAC_SECRET = os.environ.get("CSAM_HMAC_SECRET")
+if _DEFAULT_HMAC_SECRET is None:
+    if is_frozen():
+        _log_error("CSAM_HMAC_SECRET 未设置，生产环境 HMAC 验证将失败")
+        _DEFAULT_HMAC_SECRET = ""
+    else:
+        _log_warning("使用开发模式 HMAC 密钥，请勿用于生产环境")
+        _DEFAULT_HMAC_SECRET = _DEV_HMAC_FALLBACK
+
+
+def _get_machine_id() -> str:
+    """获取机器唯一标识。
+
+    基于 MAC 地址 (uuid.getnode) 与主机名的组合哈希，比纯 hostname 方案
+    更稳定且更难伪造。异常时退化为 UNKNOWN_MACHINE。
+    """
+    try:
+        node = uuid.getnode()
+        raw = f"{node}:{platform.node()}"
+        return str(uuid.UUID(bytes=hashlib.sha256(raw.encode()).digest()[:16]))
+    except Exception as e:
+        _log_warning(f"_get_machine_id failed: {e}")
+        return "UNKNOWN_MACHINE"
+
+
+def _get_machine_id_legacy() -> str:
+    """旧版机器码算法 — 仅用于向后兼容已签发 license 的校验。
+
+    基于 platform.node() + platform.machine() 的哈希，稳定性较差，
+    保留此函数以支持过渡期内已有 license 的平滑迁移。
+    """
+    try:
+        return str(uuid.UUID(bytes=hashlib.sha256(
+            (platform.node() + platform.machine()).encode()
+        ).digest()[:16]))
+    except Exception as e:
+        _log_warning(f"_get_machine_id_legacy failed: {e}")
+        return "UNKNOWN_MACHINE"
+
+
+class LicenseData:
+    """License 数据封装。"""
+
+    def __init__(self, raw: dict) -> None:
+        self.machine_id: str = raw.get("machine_id", "")
+        self.issued_to: str = raw.get("issued_to", "Unknown")
+        self.issued_at: str = raw.get("issued_at", "")
+        self.expires_at: str = raw.get("expires_at", "")
+        self.features: list[str] = raw.get("features", ["basic"])
+        self.max_layers: int = raw.get("max_layers", 20)
+        self.signature: str = raw.get("signature", "")
+
+    @property
+    def expired(self) -> bool:
+        if not self.expires_at:
+            return False
+        try:
+            exp = datetime.fromisoformat(self.expires_at)
+            return datetime.now() > exp
+        except ValueError:
+            return True
+
+    @property
+    def days_remaining(self) -> int:
+        if not self.expires_at:
+            return -1  # -1 表示永久授权（无到期日）
+        try:
+            exp = datetime.fromisoformat(self.expires_at)
+            return max(0, (exp - datetime.now()).days)
+        except ValueError:
+            return 0
+
+    @property
+    def expiring_soon(self) -> bool:
+        return 0 < self.days_remaining <= 7
+
+
+class LicenseManager:
+    """License 验证管理器。"""
+
+    def __init__(self) -> None:
+        self._public_key = self._load_public_key()
+        self._license: Optional[LicenseData] = None
+        self._valid: bool = False
+        self._error: str = ""
+
+    def _load_public_key(self):
+        if not _CRYPTO_AVAILABLE:
+            return None
+        pub_path = str(get_config_dir() / PUBLIC_KEY_FILE)
+        if not os.path.exists(pub_path):
+            return None
+        try:
+            with open(pub_path, "rb") as f:
+                return serialization.load_pem_public_key(f.read(), backend=default_backend())
+        except Exception as e:
+            _log_warning(f"Failed to load public key: {e}")
+            return None
+
+    def load_license(self) -> bool:
+        """加载并验证 License 文件。"""
+        lic_path = str(get_config_dir() / LICENSE_FILE)
+        if not os.path.exists(lic_path):
+            self._error = "License 文件不存在"
+            return False
+
+        try:
+            with open(lic_path, "r") as f:
+                raw = json.load(f)
+        except json.JSONDecodeError:
+            self._error = "License 文件格式错误"
+            return False
+
+        lic = LicenseData(raw)
+
+        # 机器码校验 — 接受新版 (uuid.getnode) 或旧版 (platform.node) 机器码
+        mid = _get_machine_id()
+        legacy_mid = _get_machine_id_legacy()
+        if lic.machine_id and lic.machine_id != mid and lic.machine_id != legacy_mid:
+            self._error = f"机器码不匹配 (license: {lic.machine_id[:8]}..., 本机: {mid[:8]}...)"
+            return False
+
+        # 过期检查
+        if lic.expired:
+            self._error = f"License 已过期 ({lic.expires_at})"
+            return False
+
+        # 签名验证
+        if not self._verify_signature(raw):
+            self._error = "License 签名验证失败（可能被篡改）"
+            return False
+
+        self._license = lic
+        self._valid = True
+        self._error = ""
+        return True
+
+    def _verify_signature(self, raw: dict) -> bool:
+        """RSA 签名验证 + HMAC 完整性校验。"""
+        signature = raw.pop("signature", None)
+        if not signature:
+            raw["signature"] = None
+            return False
+
+        if not _CRYPTO_AVAILABLE or self._public_key is None:
+            raw["signature"] = signature
+            if is_frozen():
+                _log_error("生产环境缺少 cryptography 或公钥，HMAC 退化校验不安全")
+            return self._verify_hmac(raw, signature)
+
+        try:
+            payload = json.dumps({k: v for k, v in raw.items() if k != "signature"},
+                                 sort_keys=True).encode()
+            self._public_key.verify(
+                bytes.fromhex(signature),
+                payload,
+                padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                           salt_length=padding.PSS.MAX_LENGTH),
+                hashes.SHA256(),
+            )
+            raw["signature"] = signature
+            return True
+        except Exception as e:
+            _log_warning(f"RSA signature verification failed: {e}")
+            raw["signature"] = signature
+            return False
+
+    def _verify_hmac(self, raw: dict, signature: str) -> bool:
+        """退化 HMAC 校验（开发/测试用途）。"""
+        secret = _DEFAULT_HMAC_SECRET.encode() if isinstance(_DEFAULT_HMAC_SECRET, str) else _DEFAULT_HMAC_SECRET
+        payload = json.dumps({k: v for k, v in raw.items() if k != "signature"},
+                             sort_keys=True).encode()
+        expected = hmac.new(secret, payload, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, signature)
+
+    @property
+    def is_valid(self) -> bool:
+        return self._valid
+
+    @property
+    def error(self) -> str:
+        return self._error
+
+    @property
+    def license_data(self) -> Optional[LicenseData]:
+        return self._license
+
+    @property
+    def expiring_soon(self) -> bool:
+        return self._license is not None and self._license.expiring_soon
+
+    @property
+    def days_remaining(self) -> int:
+        return self._license.days_remaining if self._license else 0
+
+
+def _load_private_key():
+    """加载 RSA 私钥（仅用于签发 License）。"""
+    if not _CRYPTO_AVAILABLE:
+        return None
+    key_path = str(get_config_dir() / PRIVATE_KEY_FILE)
+    if not os.path.exists(key_path):
+        return None
+    try:
+        with open(key_path, "rb") as f:
+            return serialization.load_pem_private_key(
+                f.read(), password=None, backend=default_backend()
+            )
+    except Exception as e:
+        _log_warning(f"Failed to load private key: {e}")
+        return None
+
+
+def generate_keypair(output_dir: Optional[str] = None) -> tuple[str, str]:
+    """生成 RSA-2048 密钥对，写入 public_key.pem 和 private_key.pem。
+
+    Args:
+        output_dir: 输出目录，默认为 config 目录。
+
+    Returns:
+        (public_key_path, private_key_path)
+    """
+    if not _CRYPTO_AVAILABLE:
+        raise RuntimeError("cryptography 未安装，无法生成密钥对")
+
+    out = output_dir or str(get_config_dir())
+    os.makedirs(out, exist_ok=True)
+
+    private_key = rsa.generate_private_key(
+        public_exponent=65537, key_size=2048, backend=default_backend()
+    )
+    pub_path = os.path.join(out, PUBLIC_KEY_FILE)
+    priv_path = os.path.join(out, PRIVATE_KEY_FILE)
+
+    with open(priv_path, "wb") as f:
+        f.write(private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ))
+    os.chmod(priv_path, 0o600)
+
+    with open(pub_path, "wb") as f:
+        f.write(private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        ))
+
+    print(f"密钥对已生成:")
+    print(f"  公钥: {pub_path}")
+    print(f"  私钥: {priv_path} (权限 0600)")
+    return pub_path, priv_path
+
+
+def generate_license(
+    output_path: str,
+    machine_id: Optional[str] = None,
+    issued_to: str = "User",
+    days_valid: int = 365,
+    features: Optional[list[str]] = None,
+) -> None:
+    """签发 License 文件。
+
+    优先使用 RSA 私钥签名（与验证端算法匹配）；
+    无私钥时退化为 HMAC 签名（仅限开发模式）。
+    """
+    mid = machine_id or _get_machine_id()
+    now = datetime.now()
+
+    payload = {
+        "machine_id": mid,
+        "issued_to": issued_to,
+        "issued_at": now.isoformat(),
+        "expires_at": (now + timedelta(days=days_valid)).isoformat(),
+        "features": features or ["basic"],
+        "max_layers": 50,
+    }
+
+    msg = json.dumps(payload, sort_keys=True).encode()
+
+    private_key = _load_private_key()
+    if _CRYPTO_AVAILABLE and private_key is not None:
+        signature = private_key.sign(
+            msg,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH),
+            hashes.SHA256(),
+        ).hex()
+        sign_mode = "RSA-PSS"
+    else:
+        if not _CRYPTO_AVAILABLE:
+            print("⚠️ cryptography 未安装，使用 HMAC 签名（开发模式）")
+        else:
+            print("⚠️ 未找到私钥文件，使用 HMAC 签名（开发模式）")
+            print(f"   生成密钥对: python -m repair_app.utils.license_manager keygen")
+        secret = _DEFAULT_HMAC_SECRET.encode() if isinstance(_DEFAULT_HMAC_SECRET, str) else _DEFAULT_HMAC_SECRET
+        signature = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+        sign_mode = "HMAC"
+
+    payload["signature"] = signature
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    print(f"License 已签发 [{sign_mode}]: {output_path}")
+    print(f"  机器码: {mid}")
+    print(f"  到期: {payload['expires_at']}")
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "keygen":
+        generate_keypair()
+    elif len(sys.argv) > 1 and sys.argv[1] == "issue":
+        generate_license(
+            str(get_config_dir() / LICENSE_FILE),
+            issued_to=sys.argv[2] if len(sys.argv) > 2 else "Developer",
+            days_valid=int(sys.argv[3]) if len(sys.argv) > 3 else 365,
+        )
+    else:
+        lm = LicenseManager()
+        ok = lm.load_license()
+        if ok:
+            days = lm.days_remaining
+            if days < 0:
+                print(f"✅ License 有效 (永久授权)")
+            else:
+                print(f"✅ License 有效 ({days} 天后到期)")
+        else:
+            print(f"❌ {lm.error}")

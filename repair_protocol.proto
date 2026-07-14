@@ -1,0 +1,270 @@
+// ============================================================
+// 协议版本: 2026-06-v2.1
+// 用途：冷喷涂缺陷修复软件 —— 前端 ↔ MATLAB/Python 黑盒通信
+//
+// v2.1 变更：
+//   - 新增 ParticleDistribution、LayerProfile、MaterialParams、
+//     CalibrationData、GCodeOutput 五个消息体
+//   - RepairRequest 新增冷喷涂工艺参数 + 路径规划参数
+//   - RepairResult 新增逐层轮廓、颗粒分布、修复前后截图、
+//     均匀性评分、可行性判断
+//   - 新增材料类型：铜、Al6061
+//
+// 修改此文件后，必须同步：
+//   1. Python: python -m grpcio_tools.protoc -I. --python_out=. repair_protocol.proto
+//   2. MATLAB: 重新编译 Java Protobuf 绑定
+//   3. 更新本文件版本号
+// ============================================================
+
+syntax = "proto3";
+
+package defect_repair;
+
+// ============================================================
+// 枚举定义
+// ============================================================
+
+// 修复请求中的材料类型
+enum MaterialType {
+  MATERIAL_UNSPECIFIED = 0;  // 未指定（使用默认材料）
+  STEEL_316L           = 1;  // 316L 不锈钢
+  INCONEL_718          = 2;  // Inconel 718 镍基合金
+  TITANIUM_TI64        = 3;  // Ti-6Al-4V 钛合金
+  ALUMINUM_6061        = 4;  // 6061 铝合金
+  COPPER               = 5;  // 纯铜 (v2.1)
+  ALUMINUM_AL6061      = 6;  // Al6061 (v2.1，与 ALUMINUM_6061 等价别名)
+}
+
+// 修复结果状态码
+enum RepairStatusCode {
+  SUCCESS             = 0;   // 修复路径计算成功
+  ERR_INVALID_INPUT   = 1;   // 输入参数无效（空点云、NaN 值等）
+  ERR_NO_DEFECT_FOUND = 2;   // 未检测到可修复的缺陷区域
+  ERR_ALGORITHM_FAIL  = 3;   // 算法内部异常
+  ERR_TIMEOUT         = 4;   // 计算超时
+  ERR_NOT_FEASIBLE    = 5;   // 修复不可行（v2.1 新增）
+  ERR_UNKNOWN         = 99;  // 未知错误
+}
+
+// ============================================================
+// 输入消息：缺陷区域点云 + 修复参数
+// ============================================================
+
+message RepairRequest {
+
+  // ---- 点云数据 (SoA 布局) ----
+  repeated float x  = 1;   // 点云 X 坐标，单位：毫米 (mm)
+  repeated float y  = 2;   // 点云 Y 坐标，单位：毫米 (mm)
+  repeated float z  = 3;   // 点云 Z 坐标，单位：毫米 (mm)
+  repeated float nx = 4;   // 曲面法向量 I 分量，无量纲，模长 ≈ 1.0
+  repeated float ny = 5;   // 曲面法向量 J 分量，无量纲，模长 ≈ 1.0
+  repeated float nz = 6;   // 曲面法向量 K 分量，无量纲，模长 ≈ 1.0
+
+  // ---- 扫描元数据 ----
+  string scan_id      = 10;  // 扫描编号，全局唯一
+  int64  timestamp_ms = 11;  // 扫描时刻，Unix 毫秒时间戳 (UTC)
+
+  // ---- 基础修复参数 (v1.0) ----
+  float  depth_compensation = 20;  // 深度补偿系数 [0.0, 2.0]，1.0=无补偿
+  float  smooth_threshold   = 21;  // 路径平滑阈值 (mm)，典型值 0.2–2.0
+  int32  max_layers         = 22;  // 最大修复层数 [1, 20]
+  MaterialType material     = 23;  // 填充材料类型
+
+  // ---- 冷喷涂工艺参数 (v2.1) ----
+  // 对应形貌预测模块 particleFitting / profilePredict
+  float particle_velocity_ms  = 40;  // 粒子名义速度 (m/s)
+  float critical_velocity_ms  = 41;  // 临界速度 v_cr (m/s)
+  float nozzle_diameter_mm    = 42;  // 喷嘴出口直径 (mm)
+  float spray_angle_deg       = 43;  // 喷涂角度 (°)
+  float standoff_distance_mm  = 44;  // 喷涂距离 SoD (mm)
+  float particle_size_um      = 45;  // 粉末平均粒径 (μm)
+  float track_overlap_ratio   = 46;  // 道次搭接率 [0, 1]
+  float traversing_speed_mms  = 47;  // 喷枪移动速度 (mm/s)
+  string material_id          = 48;  // 材料标识符字符串（如 "Cu", "Al6061"）
+  int32  num_layers           = 49;  // 形貌预测层数
+
+  // ---- 路径规划参数 (v2.1) ----
+  // 对应路径规划模块 generate_path / layer_slice
+  float layer_height_mm        = 50;  // 分层厚度 (mm)
+  float scanning_angle_deg     = 51;  // Zig-Zag 填充方向 (°)
+  float scanning_step_mm       = 52;  // 扫描线间距 (mm)
+  float edge_step_size_mm      = 53;  // 边缘补偿步长 (mm)
+  float tilt_angle_deg         = 54;  // 边缘倾斜喷涂角度 (°)
+  float buffer_additive_mm     = 55;  // 增材区缓冲距离 (mm)
+  float buffer_repairing_mm    = 56;  // 修复区缓冲距离 (mm)
+  float link_path_free_dist_mm = 57;  // 过渡路径活动范围 (mm)
+  float obstacle_resolution_mm = 58;  // 基体障碍地图分辨率 (mm)
+
+  // ---- 请求元数据 ----
+  string request_id    = 30;  // 请求唯一标识
+  string client_version = 31;  // 客户端版本号
+}
+
+// ============================================================
+// 中间数据：颗粒分布（CFD 查表 / Excel 查表结果）
+// v2.1 新增
+// ============================================================
+
+message ParticleDistribution {
+  repeated float px          = 1;   // 颗粒概率位置 X 分布 (mm)
+  repeated float py          = 2;   // 颗粒概率位置 Y 分布 (mm)
+  repeated float vx          = 3;   // 颗粒速度 X 分量 (m/s)
+  repeated float vy          = 4;   // 颗粒速度 Y 分量 (m/s)
+  repeated float vz          = 5;   // 颗粒速度 Z 分量 (m/s)
+  repeated float temperature = 6;   // 颗粒温度 (K)
+  repeated float diameter    = 7;   // 颗粒粒径 (μm)
+  repeated float vcr         = 8;   // 临界速度判断 (1=沉积, 0=弹开)
+  float dep_efficiency       = 9;   // 总体沉积效率 [0, 1]
+  int32 total_particles      = 10;  // 总颗粒数
+}
+
+// ============================================================
+// 中间数据：逐层沉积轮廓
+// v2.1 新增
+// ============================================================
+
+message LayerProfile {
+  int32 layer_index      = 1;   // 层序号，从 1 开始
+  bytes heightmap_png     = 2;   // 高度图 PNG 图像数据
+  bytes contour_geojson   = 3;   // 轮廓线 GeoJSON
+  float max_height_mm     = 4;   // 该层最大沉积高度 (mm)
+  float avg_height_mm     = 5;   // 该层平均沉积高度 (mm)
+  float dep_efficiency    = 6;   // 该层沉积效率 [0, 1]
+}
+
+// ============================================================
+// 配置数据：材料物理参数
+// v2.1 新增
+// ============================================================
+
+message MaterialParams {
+  string material_id            = 1;   // 材料标识符，如 "Cu", "Al6061"
+  string material_name          = 2;   // 材料中文名
+  float density_gcm3            = 3;   // 密度 (g/cm³)
+  float critical_velocity_ms    = 4;   // 临界速度 v_cr 基准值 (m/s)
+  float dep_efficiency_max      = 5;   // 最大沉积效率 [0, 1]
+  float preheat_temp_c          = 6;   // 建议预热温度 (°C)
+  float max_single_layer_mm     = 7;   // 单层最大沉积厚度 (mm)
+  float min_track_width_mm      = 8;   // 最小道次宽度 (mm)
+  repeated float vcr_curve_angle = 9;  // v_cr 随角度变化曲线——角度值 (°)
+  repeated float vcr_curve_value = 10; // v_cr 随角度变化曲线——v_cr 值 (m/s)
+}
+
+// ============================================================
+// 标定数据：单道实测 → 模型校准
+// v2.1 新增
+// ============================================================
+
+message CalibrationData {
+  string material_id           = 1;   // 材料标识符
+  float measured_width_mm      = 2;   // 实测单道宽度 (mm)
+  float measured_height_mm     = 3;   // 实测单道高度 (mm)
+  float predicted_width_mm     = 4;   // 预测单道宽度 (mm)
+  float predicted_height_mm    = 5;   // 预测单道高度 (mm)
+  float corrected_dep_eff      = 6;   // 校准后的沉积效率
+  int64 timestamp_ms           = 7;   // 标定时间戳
+}
+
+// ============================================================
+// 输出数据：G-code
+// v2.1 新增
+// ============================================================
+
+message GCodeOutput {
+  string gcode_text       = 1;   // G-code 完整文本
+  int32  total_lines      = 2;   // 总行数
+  float  estimated_time_s = 3;   // 预估加工时间 (s)
+}
+
+// ============================================================
+// 输出消息：修复路径 + 体积预测 + 填充网格
+// ============================================================
+
+message RepairResult {
+
+  // ---- 修复路径航点 (AoS 布局) ----
+  message Waypoint {
+    float x  = 1;   // 航点 X 坐标 (mm)
+    float y  = 2;   // 航点 Y 坐标 (mm)
+    float z  = 3;   // 航点 Z 坐标 (mm)
+    float nx = 4;   // 工具轴线方向 I 分量，归一化
+    float ny = 5;   // 工具轴线方向 J 分量
+    float nz = 6;   // 工具轴线方向 K 分量
+    float feed_rate = 7;   // 进给速度 (mm/s)
+    int32 layer_index = 8; // 所属层序号，从 1 开始
+  }
+
+  repeated Waypoint waypoints = 1;  // 有序航点序列
+
+  // ---- 体积与材料预测 ----
+  float predicted_volume_mm3   = 10;  // 预测填充体积 (mm³)
+  float material_density_gcm3  = 11;  // 填充材料密度 (g/cm³)
+  float estimated_mass_g       = 12;  // 估算材料用量 (g)
+  float estimated_time_s       = 13;  // 预估修复耗时 (s)
+
+  // ---- 填充区域网格 ----
+  bytes  mesh_data   = 20;  // 填充区域三维网格（二进制 STL 格式）
+  string mesh_format = 21;  // 网格格式标签："stl_binary"
+
+  // ---- 状态信息 ----
+  RepairStatusCode status_code    = 30;  // 结果状态码
+  string           error_message  = 31;  // 错误详情
+  int64            compute_time_ms = 32; // 算法计算耗时 (ms)
+
+  // ---- 回显 ----
+  string request_id = 40;  // 与请求中的 request_id 对应
+
+  // ---- v2.1 新增字段 ----
+  repeated LayerProfile layer_profiles  = 50;  // 逐层沉积轮廓
+  ParticleDistribution particle_dist    = 51;  // 颗粒分布数据
+  bytes before_snapshot_png             = 52;  // 修复前截图 PNG
+  bytes after_snapshot_png              = 53;  // 修复后截图 PNG
+  float uniformity_score                = 54;  // 表面均匀性 [0, 1]
+  bool  is_feasible                     = 55;  // 修复是否可行
+  string feasibility_reason             = 56;  // 不可行原因说明
+}
+
+// ============================================================
+// 服务治理消息
+// ============================================================
+
+message ProgressUpdate {
+  enum Stage {
+    STAGE_UNSPECIFIED = 0;
+    PATH_PLANNING     = 1;
+    PARTICLE_LOOKUP   = 2;
+    MORPH_PREDICTION  = 3;
+    VALIDATION        = 4;
+    EXPORTING         = 5;
+    COMPLETE          = 6;
+  }
+
+  string request_id     = 1;   // 与请求中的 request_id 对应
+  Stage  stage          = 2;   // 当前计算阶段
+  int32  layer_index    = 3;   // 当前层，从 1 开始；非逐层阶段为 0
+  int32  total_layers   = 4;   // 总层数；未知为 0
+  float  progress       = 5;   // 总进度 [0, 1]
+  string message        = 6;   // 面向 UI 的状态说明
+
+  repeated RepairResult.Waypoint partial_waypoints = 10; // 当前累计航点
+  bytes  partial_mesh_data   = 11; // 当前累计网格（二进制 STL 等）
+  string partial_mesh_format = 12; // partial_mesh_data 格式
+  repeated LayerProfile layer_profiles = 13; // 当前可用的逐层轮廓
+}
+
+message HealthCheckRequest {
+  string client_version = 1;  // 客户端版本号
+}
+
+message HealthCheckResponse {
+  enum Status {
+    OK        = 0;  // 正常运行
+    DEGRADED  = 1;  // 降级运行
+    DOWN      = 2;  // 不可用
+  }
+  Status status           = 1;  // 当前服务状态
+  string service_version  = 2;  // 服务端版本号
+  float  memory_usage_mb  = 3;  // 进程内存占用 (MB)
+  int64  uptime_s         = 4;  // 服务运行时间 (s)
+  int32  pending_requests = 5;  // 当前排队请求数
+}

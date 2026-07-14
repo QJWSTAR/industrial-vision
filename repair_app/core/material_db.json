@@ -1,0 +1,239 @@
+{
+  "version": "2026-06-v2.1",
+  "description": "冷喷涂材料参数数据库，基于邢词皓/李文亚课题组论文数据",
+  "references": [
+    "Additive Manufacturing 2025 (邢词皓)",
+    "硕士论文 2024 (邢词皓)",
+    "开题报告 (邢词皓)"
+  ],
+  "materials": {
+    "COPPER": {
+      "name": "纯铜 (Cu)",
+      "density_kgm3": 8960,
+      "v_cr_base_ms": 340,
+      "v_cr_angle_decay": [
+        [
+          0,
+          1.0
+        ],
+        [
+          15,
+          1.0
+        ],
+        [
+          30,
+          1.05
+        ],
+        [
+          45,
+          1.12
+        ],
+        [
+          60,
+          1.25
+        ],
+        [
+          75,
+          1.45
+        ],
+        [
+          90,
+          1.6674999999999998
+        ]
+      ],
+      "max_deposition_efficiency": 0.95,
+      "recommend_preheat_temp_c": 200,
+      "single_layer_max_thickness_mm": 0.5,
+      "min_spray_spot_width_mm": 2.0,
+      "max_defect_depth_mm": 10.0,
+      "max_sidewall_angle_deg": 50,
+      "thermal_conductivity_wmk": 401,
+      "yield_strength_mpa": 70,
+      "melting_point_c": 1085
+    },
+    "ALUMINUM_6061": {
+      "name": "6061 铝合金",
+      "density_kgm3": 2700,
+      "v_cr_base_ms": 590,
+      "v_cr_angle_decay": [
+        [
+          0,
+          1.0
+        ],
+        [
+          15,
+          1.0
+        ],
+        [
+          30,
+          1.06
+        ],
+        [
+          45,
+          1.15
+        ],
+        [
+          60,
+          1.3
+        ],
+        [
+          75,
+          1.55
+        ],
+        [
+          90,
+          1.7825
+        ]
+      ],
+      "max_deposition_efficiency": 0.85,
+      "recommend_preheat_temp_c": 150,
+      "single_layer_max_thickness_mm": 0.3,
+      "min_spray_spot_width_mm": 2.5,
+      "max_defect_depth_mm": 5.0,
+      "max_sidewall_angle_deg": 45,
+      "thermal_conductivity_wmk": 167,
+      "yield_strength_mpa": 276,
+      "melting_point_c": 652
+    },
+    "STEEL_316L": {
+      "name": "316L 不锈钢",
+      "density_kgm3": 7980,
+      "v_cr_base_ms": 600,
+      "v_cr_angle_decay": [
+        [
+          0,
+          1.0
+        ],
+        [
+          15,
+          1.0
+        ],
+        [
+          30,
+          1.05
+        ],
+        [
+          45,
+          1.12
+        ],
+        [
+          60,
+          1.28
+        ],
+        [
+          75,
+          1.5
+        ],
+        [
+          90,
+          1.7249999999999999
+        ]
+      ],
+      "max_deposition_efficiency": 0.8,
+      "recommend_preheat_temp_c": 250,
+      "single_layer_max_thickness_mm": 0.25,
+      "min_spray_spot_width_mm": 2.0,
+      "max_defect_depth_mm": 5.0,
+      "max_sidewall_angle_deg": 45,
+      "thermal_conductivity_wmk": 16.3,
+      "yield_strength_mpa": 290,
+      "melting_point_c": 1400
+    },
+    "TITANIUM_TI64": {
+      "name": "Ti-6Al-4V 钛合金",
+      "density_kgm3": 4430,
+      "v_cr_base_ms": 680,
+      "v_cr_angle_decay": [
+        [
+          0,
+          1.0
+        ],
+        [
+          15,
+          1.0
+        ],
+        [
+          30,
+          1.05
+        ],
+        [
+          45,
+          1.14
+        ],
+        [
+          60,
+          1.3
+        ],
+        [
+          75,
+          1.55
+        ],
+        [
+          90,
+          1.7825
+        ]
+      ],
+      "max_deposition_efficiency": 0.75,
+      "recommend_preheat_temp_c": 350,
+      "single_layer_max_thickness_mm": 0.2,
+      "min_spray_spot_width_mm": 2.5,
+      "max_defect_depth_mm": 4.0,
+      "max_sidewall_angle_deg": 40,
+      "thermal_conductivity_wmk": 6.7,
+      "yield_strength_mpa": 880,
+      "melting_point_c": 1660
+    },
+    "INCONEL_718": {
+      "name": "Inconel 718 镍基合金",
+      "density_kgm3": 8190,
+      "v_cr_base_ms": 640,
+      "v_cr_angle_decay": [
+        [
+          0,
+          1.0
+        ],
+        [
+          15,
+          1.0
+        ],
+        [
+          30,
+          1.05
+        ],
+        [
+          45,
+          1.13
+        ],
+        [
+          60,
+          1.3
+        ],
+        [
+          75,
+          1.52
+        ],
+        [
+          90,
+          1.7479999999999998
+        ]
+      ],
+      "max_deposition_efficiency": 0.78,
+      "recommend_preheat_temp_c": 300,
+      "single_layer_max_thickness_mm": 0.2,
+      "min_spray_spot_width_mm": 2.0,
+      "max_defect_depth_mm": 4.0,
+      "max_sidewall_angle_deg": 40,
+      "thermal_conductivity_wmk": 11.4,
+      "yield_strength_mpa": 1034,
+      "melting_point_c": 1336
+    }
+  },
+  "default_material": "STEEL_316L",
+  "feasibility_thresholds": {
+    "min_defect_size_to_spot_ratio": 0.8,
+    "max_over_spray_ratio": 2.0,
+    "min_spray_angle_deg": 30,
+    "max_depth_to_width_ratio": 2.0,
+    "min_depth_mm": 0.05
+  }
+}

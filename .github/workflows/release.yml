@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: csam-repair-windows
+            asset_suffix: windows-x64
+          - os: macos-latest
+            artifact_name: csam-repair-macos
+            asset_suffix: macos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-release-pip-${{ hashFiles('requirements*.txt', 'pyproject.toml') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e ".[dev]"
+          pip install pyinstaller
+
+      - name: Run tests
+        run: |
+          pytest repair_app/tests/ -q --tb=short
+
+      - name: Build with PyInstaller
+        run: |
+          python -m PyInstaller --clean repair_app.spec
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/
+          retention-days: 30
+
+      - name: Create zip for release (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Compress-Archive -Path dist/* -DestinationPath csam-repair-${{ matrix.asset_suffix }}.zip
+
+      - name: Create zip for release (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist && zip -r -y ../csam-repair-${{ matrix.asset_suffix }}.zip . && cd ..
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: csam-repair-${{ matrix.asset_suffix }}.zip
+          draft: true
+          generate_release_notes: true

@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "csam-repair"
+dynamic = ["version"]
+description = "Cold Spray Additive Manufacturing - Defect Repair Software"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "CSAM Team"},
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Manufacturing",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Manufacturing",
+]
+dependencies = [
+    "numpy>=1.21,<3.0",
+    "scipy>=1.7,<2.0",
+    "shapely>=1.8,<3.0",
+    "PySide6>=6.4,<7.0",
+    "matplotlib>=3.5,<4.0",
+    "pyzmq>=24,<26",
+    "protobuf>=5.26,<7.0",  # repair_protocol_pb2.py generated with protoc v6.31.1
+    "reportlab>=4.0,<5.0",  # PDF 报告生成 (report_generator.py)
+    "cryptography>=41.0,<46.0",  # RSA 许可证验证 (license_manager.py)
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-benchmark>=4.0",
+    "flake8>=5.0",
+    "bandit>=1.7",
+    "pyinstaller>=6.0",
+]
+full = [
+    "loguru>=0.7",
+]
+
+[project.scripts]
+csam-repair = "run_app:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["repair_app*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "repair_app.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["repair_app/tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+
+[tool.bandit]
+exclude_dirs = ["repair_app/tests"]
+
+[tool.flake8]
+max-line-length = 120
+exclude = ["repair_app/tests", ".git", "__pycache__", "repair_app/communication/repair_protocol_pb2.py"]
