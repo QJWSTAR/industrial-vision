@@ -101,9 +101,7 @@ a = Analysis(
         # V1.0: bridge 通信层 + MATLAB 执行平台
         'repair_app.bridge', 'repair_app.bridge.adapters.legacy_adapter',
         'repair_app.bridge.services.matlab_service',
-        'repair_app.engine.matlab_engine', 'repair_app.engine.factory',
-        'repair_app.engine.lifecycle',
-        'repair_app.bridge.protocol_v3',
+        'repair_app.engine.local_engine',
     ],
     hookspath=[],
     hooksconfig={},

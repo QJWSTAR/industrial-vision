@@ -15,7 +15,7 @@ GUI → CoordinationService → LegacyZmqClient → BridgeClient
 ```
 
 **唯一生产入口**：`matlab_bridge_server.m`（项目根目录）。
-**不要**使用 `matlab_server/startup.m`（已弃用，TCP/JSON/v3.0/5570）。
+**不要**使用旧的 `matlab_server/` 目录（已删除，原 TCP/JSON/v3.0/5570 路径已废弃）。
 
 ---
 
@@ -199,6 +199,7 @@ exist('java.net.ServerSocket', 'class') % 应返回 8（类存在）
 | `pyenv` 报错找不到模块 | Python 路径未配置或依赖缺失 | 重新设置 `pyenv`，确认 venv 已安装 pyzmq/protobuf |
 | 算法返回 ERR_DEPS | 缺少工具箱 | 安装 Mapping Toolbox / Curve Fitting Toolbox |
 | 健康检查返回 DEGRADED | 部分工具箱缺失或内存高 | 检查 `license('test', ...)`，执行 `pack` 释放内存 |
+| MATLAB 找不到 matlab_bridge_server | 工作目录错误 | 在 MATLAB 中 cd 到项目根目录后再运行 matlab_bridge_server |
 
 ---
 
@@ -206,6 +207,5 @@ exist('java.net.ServerSocket', 'class') % 应返回 8（类存在）
 
 - [COMMUNICATION.md](COMMUNICATION.md) — 通信架构最终版
 - [BRIDGE_ARCHITECTURE.md](BRIDGE_ARCHITECTURE.md) — Bridge 层架构
-- [MATLAB_ENVIRONMENT_TEST_GUIDE.md](MATLAB_ENVIRONMENT_TEST_GUIDE.md) — MATLAB 环境测试指南
-- [MATLAB_DEPLOYMENT_GUIDE.md](MATLAB_DEPLOYMENT_GUIDE.md) — MATLAB 部署指南
-- [端到端仿真验证报告.md](端到端仿真验证报告.md) — 全链路验证报告
+- [MATLAB_CALL_GRAPH.md](MATLAB_CALL_GRAPH.md) — MATLAB 算法调用图
+- [archive/](archive/) — 历史文档归档

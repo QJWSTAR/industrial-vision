@@ -1,6 +1,6 @@
 # CSAM Repair — 冷喷涂增材制造缺陷修复软件
 
-**版本**：1.0.0 | **状态**：发布就绪
+**版本**：1.0.0 | **状态**：Release Candidate
 
 ## 概述
 
@@ -66,6 +66,37 @@ python run_app.py
 pip install -e .
 csam-repair
 ```
+
+## 连接 MATLAB（可选但推荐）
+
+软件支持 MATLAB R2025b 作为工业算法引擎。连接后可获得真实的路径规划和形貌预测计算结果。
+
+### 启动 MATLAB Bridge 服务
+
+1. 打开 MATLAB R2025b
+2. 将工作目录切换到项目根目录
+3. 运行以下命令：
+
+```matlab
+matlab_bridge_server
+```
+
+MATLAB 会共享引擎会话并启动 Bridge 服务（默认端口 5555）。
+
+### 验证连接
+
+启动 Python GUI 后，执行路径规划时软件会自动连接 MATLAB。如果 MATLAB 不可用，软件会自动降级到 Python 启发式算法（日志中会显示降级信息）。
+
+> 详细 MATLAB 集成说明请参阅 [docs/MATLAB_INTEGRATION.md](docs/MATLAB_INTEGRATION.md)
+
+### 环境变量配置
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `CSAM_ALGORITHM_ENGINE` | 算法引擎模式（auto/matlab/python） | auto |
+| `CSAM_ZMQ_ADDRESS` | ZeroMQ 通信地址 | tcp://127.0.0.1:5555 |
+| `CSAM_MATLAB_SHARED_NAME` | MATLAB 共享会话名称 | matlab_bridge |
+| `CSAM_LOG_LEVEL` | 日志级别 | INFO |
 
 ## 使用指南
 
@@ -171,41 +202,51 @@ bash build_macos.sh
 
 ### 安装程序建议
 
-- **Windows**：使用 [Inno Setup](https://jrsoftware.org/isinfo.php) 或 [NSIS](https://nsis.sourceforge.io/) 创建用户友好的安装程序。`docs/DEVELOPER.md` 中提供了 Inno Setup 脚本模板示例。
+- **Windows**：使用 [Inno Setup](https://jrsoftware.org/isinfo.php) 或 [NSIS](https://nsis.sourceforge.io/) 创建用户友好的安装程序。`docs/07_开发者文档.md` 中提供了 Inno Setup 脚本模板示例。
 - **macOS**：以签名 `.dmg` 磁盘映像形式分发。分发前运行 `codesign` 和 `notarize`。
 
 ### 图标配置
 
 构建脚本会通过在项目根目录搜索 `p1.ico`、`p1.png` 或 `p1.jpg` 来自动检测应用图标。请在构建前将图标文件放置在该目录。
 
-详细安装说明请参阅 `docs/INSTALL.md`，开发者文档（包括 Nuitka 评估和 CI/CD 流水线详情）请参阅 `docs/DEVELOPER.md`。
+详细安装说明请参阅 [docs/UserManual/02_安装指南.md](docs/UserManual/02_安装指南.md)，开发者文档请参阅 [docs/07_开发者文档.md](docs/07_开发者文档.md)。
 
 ## 架构
 
 ```
 csam-repair/
-├── run_app.py                 # Application entry point
-├── setup.py                   # Backward-compat for pip < 21.3
+├── run_app.py                 # 应用入口
+├── matlab_bridge_server.m     # MATLAB Bridge 服务入口
 ├── repair_app/
-│   ├── core/                  # Core algorithms (path planning, morphology)
-│   ├── communication/         # ZMQ client for MATLAB engine (legacy, deprecated)
-│   ├── controller/            # App controller + workflow state machine
-│   ├── domain/                # Domain models + engine interfaces
-│   ├── engine/                # Engine implementations (LocalEngine; MatlabEngine deprecated)
-│   ├── export/                # G-code export + PDF report generation
-│   ├── platform/              # Platform abstractions (ZMQ transport, CJK fonts)
-│   ├── repository/            # File I/O + material data access
-│   ├── service/               # Business logic orchestration
-│   ├── tests/                 # 测试套件（305 个测试）
-│   ├── tools/                 # Profiler + benchmark
-│   ├── ui/                    # GUI (PySide6)
-│   │   └── panels/            # UI panel components
-│   ├── utils/                 # Config, logging, license, crash handler
-│   └── validation/            # Scientific validation pipeline
-├── .github/workflows/ci.yml   # CI/CD pipeline
-├── pyproject.toml             # Build configuration
-├── requirements.txt           # Runtime dependencies
-└── README.md                  # This file
+│   ├── core/                  # 核心算法（路径规划、形貌预测 Python 原型）
+│   ├── bridge/                # Bridge 通信层（ZeroMQ + Protobuf v2.1）
+│   │   ├── adapters/          # MatlabAdapter + LegacyZmqClient + MatlabEngineProxy
+│   │   ├── communication/     # ZMQ REP/REQ 服务端/客户端
+│   │   └── services/          # MATLAB 服务封装
+│   ├── communication/         # 旧版通信层（已弃用，保留兼容）
+│   ├── domain/                # 领域模型 + 引擎接口
+│   ├── engine/                # LocalEngine（Python 原型引擎）
+│   ├── export/                # G-code 导出 + PDF 报告生成
+│   ├── platform/              # 平台抽象（ZMQ 传输、CJK 字体）
+│   ├── repository/            # 文件 I/O + 材料数据访问
+│   ├── service/               # 业务逻辑编排
+│   ├── tests/                 # 测试套件（276 个测试）
+│   ├── tools/                 # Profiler + Benchmark
+│   ├── ui/                    # GUI（PySide6）
+│   │   ├── main_window.py     # 主窗口
+│   │   ├── repair_visualizer.py    # 3D 可视化
+│   │   ├── profile_result_panel.py # MATLAB 结果原生渲染面板
+│   │   └── workers.py         # 后台工作线程
+│   └── utils/                 # 配置、日志、许可证、崩溃处理
+├── 路径规划/                   # MATLAB 路径规划 + 形貌预测算法
+├── 形貌预测/                   # MATLAB 形貌预测算法
+├── morphology_prediction/     # CFD 数据（pointlist/velocitylist）
+├── docs/                      # 完整文档体系
+├── scripts/                   # 验证脚本
+├── .github/workflows/ci.yml  # CI/CD 流水线
+├── pyproject.toml             # 构建配置
+├── requirements.txt           # 运行时依赖
+└── README.md                  # 本文件
 ```
 
 ## 开发
@@ -213,8 +254,8 @@ csam-repair/
 ### 运行测试
 
 ```bash
-# 全部测试（305 个测试）
-pytest repair_app/tests/ -v
+# 全部测试（276 个测试）
+pytest repair_app/tests/ repair_app/bridge/tests/ -v
 
 # 仅单元测试
 pytest repair_app/tests/test_stage1.py -v
@@ -245,6 +286,26 @@ pre-commit run --all-files
 flake8 repair_app/ --count --max-complexity=15
 bandit -r repair_app/ -x repair_app/tests/ -ll
 ```
+
+## 文档导航
+
+| 文档 | 说明 | 适合读者 |
+|------|------|---------|
+| [docs/UserManual/](docs/UserManual/) | 完整用户手册（11 篇，从安装到术语解释） | 操作员、工程师 |
+| [docs/07_开发者文档.md](docs/07_开发者文档.md) | 项目结构、模块职责、测试、构建 | 开发者 |
+| [docs/08_运维手册.md](docs/08_运维手册.md) | 日志、备份、升级、性能调优 | 运维人员 |
+| [docs/10_架构文档.md](docs/10_架构文档.md) | 系统架构图、模块关系、部署拓扑 | 架构师 |
+| [docs/09_API文档.md](docs/09_API文档.md) | 公开接口签名、异常层次 | 开发者 |
+| [docs/MATLAB_INTEGRATION.md](docs/MATLAB_INTEGRATION.md) | MATLAB R2025b 集成快速指南 | 算法工程师 |
+| [docs/MATLAB_R2025B_Validation_Playbook.md](docs/MATLAB_R2025B_Validation_Playbook.md) | MATLAB 验证手册（19 章） | QA 工程师 |
+| [docs/COMMUNICATION.md](docs/COMMUNICATION.md) | 通信架构决策（ZeroMQ + Protobuf v2.1） | 架构师 |
+| [docs/BRIDGE_ARCHITECTURE.md](docs/BRIDGE_ARCHITECTURE.md) | Bridge 层详细架构 | 开发者 |
+| [docs/PACKAGING_GUIDE.md](docs/PACKAGING_GUIDE.md) | PyInstaller 打包指南 | 发布工程师 |
+| [docs/CHANGELOG.md](docs/CHANGELOG.md) | 版本变更记录 | 所有人 |
+| [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | 发布检查清单 | 发布工程师 |
+| [docs/RELEASE_NOTES_V1.0.md](docs/RELEASE_NOTES_V1.0.md) | v1.0 发布说明 | 所有人 |
+| [docs/checklists/](docs/checklists/) | 验收/兼容性/部署/回归/冒烟测试清单 | QA |
+| [docs/archive/](docs/archive/) | 历史文档归档（迁移报告、集成报告等） | 历史参考 |
 
 ## 许可证
 

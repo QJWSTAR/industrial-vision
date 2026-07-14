@@ -22,7 +22,7 @@ python -m PyInstaller --clean repair_app.spec
 
 ### spec 文件说明 (`repair_app.spec`)
 - **单文件模式**：所有依赖打包进单个 exe
-- **hiddenimports**：显式声明所有运行时导入的模块（含 bridge/engine/protocol_v3）
+- **hiddenimports**：显式声明所有运行时导入的模块（含 bridge/engine）
 - **datas**：材料数据库 (`material_db.json`)、标定配置 (`calibration_db.json`)、proto 文件
 - **excludes**：排除未使用的 PySide6 模块（QtQml/QtQuick 等）以减小体积
 - **UPX 压缩**：启用，排除 Qt DLL（压缩会导致加载失败）
@@ -37,6 +37,51 @@ python -m PyInstaller --clean repair_app.spec
 - [ ] G-code 导出正常
 - [ ] PDF 报告生成正常
 - [ ] ZMQ 联调正常（需 MATLAB 环境）
+
+## Linux 部署（从源码运行）
+
+> **注意**：Linux 未提供官方打包安装包，仅支持从源码运行。以下说明适用于 Ubuntu 22.04+ / CentOS 8+。
+
+### 前置条件
+
+- Linux 发行版：Ubuntu 22.04+ 或 CentOS 8+
+- Python 3.10-3.12
+- 系统依赖：`libgl1`、`libxkbcommon0`、`libdbus-1-3`（PySide6 运行时依赖）
+
+### 安装系统依赖
+
+```bash
+# Ubuntu / Debian
+sudo apt update
+sudo apt install -y libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libfreetype6
+
+# CentOS / RHEL
+sudo yum install -y mesa-libGL libxkbcommon dbus-libs fontconfig freetype
+```
+
+### 安装 Python 依赖
+
+```bash
+git clone <repo>
+cd industrial-vision
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+pip install -e ".[dev]"
+```
+
+### 运行
+
+```bash
+python run_app.py
+```
+
+### Linux 已知限制
+
+- ZMQ 默认使用 `ipc:///tmp/csam_engine`（Unix 域套接字），如需 TCP 可设置 `CSAM_ZMQ_ADDRESS=tcp://127.0.0.1:5555`
+- matplotlib 3D 渲染在无 GPU 的服务器上可能较慢
+- MATLAB Engine API for Linux 需单独配置（参考 MathWorks 官方文档）
+- 不提供 PyInstaller 打包的 .deb/.rpm 安装包
 
 ## macOS 打包
 
