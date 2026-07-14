@@ -16,7 +16,10 @@ from repair_app.platform.fonts import get_matplotlib_fonts
 plt.rcParams["font.sans-serif"] = get_matplotlib_fonts()
 plt.rcParams["axes.unicode_minus"] = False
 
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import (
+    FigureCanvasQTAgg as FigureCanvas,
+    NavigationToolbar2QT as NavigationToolbar,
+)
 from matplotlib.figure import Figure
 from matplotlib.colors import LinearSegmentedColormap
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -188,6 +191,9 @@ class RepairVisualizer(QWidget):
         self._fig = Figure(figsize=(7, 5), dpi=100)
         self._fig.set_facecolor(_BG)
         self._canvas = FigureCanvas(self._fig)
+        # matplotlib 原生工具栏：缩放、平移、旋转、刷新、导出 PNG
+        self._toolbar = NavigationToolbar(self._canvas, self)
+        layout.addWidget(self._toolbar)
         layout.addWidget(self._canvas)
         self._ax = self._fig.add_subplot(111, projection="3d")
         self._ax.set_facecolor(_BG)

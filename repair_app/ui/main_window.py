@@ -25,6 +25,7 @@ from PySide6.QtGui import QPixmap
 from repair_app.service.coordination_service import CoordinationService as _Coord
 from repair_app.ui.defect_selector import DefectSelector
 from repair_app.ui.repair_visualizer import RepairVisualizer
+from repair_app.ui.profile_result_panel import ProfileResultPanel
 
 _ZMQ_AVAILABLE = _Coord.zmq_available
 
@@ -819,8 +820,24 @@ class MainWindow(QMainWindow):
 
         self._visualizer = RepairVisualizer()
 
+        # ---- 中心区 Tab 切换：3D 预览 / MATLAB 形貌分析 ----
+        self._center_tabs = QTabWidget()
+        self._center_tabs.setStyleSheet("""
+            QTabWidget::pane { border:1px solid #1E293B; border-radius:8px; background:#0B1120; top:-1px; }
+            QTabBar::tab { background:#0F172A; color:#94A3B8; padding:6px 14px; margin-right:2px;
+                           border:1px solid #1E293B; border-bottom:none;
+                           border-top-left-radius:6px; border-top-right-radius:6px; font-weight:600; }
+            QTabBar::tab:selected { background:#1D4ED8; color:#FFFFFF; }
+            QTabBar::tab:hover:!selected { background:#1E293B; color:#E2E8F0; }
+        """)
+        self._center_tabs.addTab(self._visualizer, "3D 预览（基体/路径/喷嘴）")
+
+        self._profile_panel = ProfileResultPanel()
+        self._center_tabs.addTab(self._profile_panel, "MATLAB 形貌分析")
+        self._center_tabs.setCurrentIndex(0)
+
         self._main_splitter = QSplitter(Qt.Horizontal)
-        self._main_splitter.addWidget(self._visualizer)
+        self._main_splitter.addWidget(self._center_tabs)
 
         right_panel = QWidget()
         right_panel.setObjectName("AuxPanel")
@@ -1241,7 +1258,9 @@ class MainWindow(QMainWindow):
                 f"✅ 路径规划完成！\n\n"
                 f"• 航点数: {n_wp:,}\n"
                 f"• 文件: {file_msg}\n\n"
-                f"👉 点击左侧「02 形貌预测」进入下一步。")
+                f"👉 点击中心区「MATLAB 形貌分析」Tab 查看原生渲染结果\n"
+                f"   （沉积网格 / 逐层轮廓 / 粒子分布 / 均匀性仪表盘）\n"
+                f"👉 或点击左侧「02 形貌预测」进入下一步。")
 
     def _build_layers_from_waypoints(
         self, waypoints: np.ndarray, waypoint_layers: np.ndarray
@@ -1819,6 +1838,23 @@ class MainWindow(QMainWindow):
                 "layer_profiles": result.get("layer_profiles", []),
                 "particle_dist": result.get("particle_dist"),
             }
+            # 将完整 MATLAB 形貌预测结果转发到原生可视化面板
+            try:
+                self._profile_panel.set_profile_result({
+                    "mesh_bytes": result.get("mesh_bytes", b"") or b"",
+                    "mesh_format": result.get("mesh_format", ""),
+                    "layer_profiles": result.get("layer_profiles", []),
+                    "particle_dist": result.get("particle_dist"),
+                    "uniformity_score": result.get("uniformity_score", 0.0),
+                    "estimated_mass_g": result.get("estimated_mass_g", 0.0),
+                    "estimated_time_s": result.get("estimated_time_s", 0.0),
+                    "predicted_volume_mm3": result.get("predicted_volume_mm3", 0.0),
+                    "material_density_gcm3": result.get("material_density_gcm3", 0.0),
+                    "compute_time_ms": result.get("compute_time_ms", 0),
+                    "warnings": [],
+                })
+            except Exception as exc:
+                log_error(f"形貌预测面板刷新失败: {exc}")
             waypoint_layers = result.get("waypoint_layers")
             # 保留完整航点（含法向量）供喷嘴方向可视化
             full_waypoints = waypoints if waypoints.shape[1] >= 6 else None
