@@ -1,318 +1,213 @@
 # CSAM Repair — 冷喷涂增材制造缺陷修复软件
 
-**版本**：1.0.0 | **状态**：Release Candidate
+**版本**：1.0.0 (Release Candidate) | **协议**：v2.1 (ZeroMQ + Protobuf) | **MATLAB**：R2025b
 
-## 概述
+## 这是什么
 
-CSAM Repair 是一款工业级桌面应用，用于冷喷涂增材制造（CSAM）缺陷修复。它提供了从点云加载到 G-code 导出的完整工作流程，集成了路径规划、形貌预测和 3D 可视化功能。
+CSAM Repair 是一款工业级桌面软件，用于冷喷涂增材制造（Cold Spray Additive Manufacturing，CSAM）的缺陷修复。它将 MATLAB 工业算法与 Python GUI 结合，提供从点云加载到 G-code 导出的完整工作流。
 
-### 主要特性
+## 能做什么
 
-- **点云处理**：加载带法线的 CSV/TXT/XYZ 点云数据
-- **缺陷选取**：交互式 3D 缺陷区域选取
-- **演示数据**：内置合成缺陷生成 — 无需外部数据即可上手
-- **路径规划**：基于可配置扫描参数生成最优修复路径
-- **形貌预测**：逐层预测沉积形貌
-- **G-Code 导出**：将修复路径导出为工业级 G-code（.nc）
-- **PDF 报告**：生成包含修复前后对比的专业修复报告
-- **MATLAB 集成**：基于 ZeroMQ + Protocol Buffers 的 MATLAB R2025b 算法服务（唯一生产通信路径，详见 [docs/COMMUNICATION.md](docs/COMMUNICATION.md)）
-- **许可证管理**：RSA-2048 许可证验证，带机器绑定
+- **加载点云**：支持 CSV / TXT / XYZ / ASC 格式，内置演示数据
+- **选取缺陷**：交互式 3D 缺陷区域选取（矩形框选 / 自由选区 / 笔刷）
+- **路径规划**：调用 MATLAB `run_path_planning.m` 生成修复航点
+- **形貌预测**：调用 MATLAB `run_profile_prediction.m` 预测沉积形貌
+- **原生渲染**：Python GUI 直接渲染 MATLAB 结果（沉积网格 / 逐层轮廓 / 粒子分布 / 均匀性仪表盘）
+- **导出结果**：G-code（.nc 刀具路径）+ PDF 修复报告
+- **自动降级**：MATLAB 不可用时自动降级到 Python 启发式算法
 
-## 快速开始
+## 5 分钟快速开始
 
-### 前置条件
+### 1. 安装 Python 依赖
 
-- Python 3.10+
-- pip
-
-### 安装
-
-**建议：使用虚拟环境。**
-
-```bash
+```powershell
 # 克隆仓库
 git clone <repository-url>
-cd <project-directory>
+cd industrial-vision
 
-#（推荐）创建并激活虚拟环境
-python3 -m venv venv
-source venv/bin/activate        # macOS / Linux
-# venv\Scripts\activate         # Windows
+# 创建虚拟环境
+python -m venv venv
+.\venv\Scripts\Activate.ps1          # Windows
+# source venv/bin/activate           # macOS / Linux
 
-# 升级 pip（可编辑安装所需）
-pip install --upgrade pip
-
-# 安装基础依赖
+# 安装依赖
 pip install -r requirements.txt
-
-# 可选：安装全功能版本（loguru）
-pip install -e ".[full]"
-
-# 可选：安装开发工具（pytest、flake8、bandit）
-pip install -e ".[dev]"
 ```
 
-> **macOS 用户注意事项**：如果遇到 `error: can't create or remove files in install directory`，这是 macOS 系统 Python 的权限问题。使用虚拟环境（`python3 -m venv venv`）即可解决。
+> 要求 Python 3.10-3.12（推荐 3.12）
 
-### 运行
+### 2. 启动 Python GUI
 
-```bash
+```powershell
 python run_app.py
 ```
 
-如果已作为包安装：
+### 3.（可选）启动 MATLAB 算法引擎
 
-```bash
+```matlab
+% 在 MATLAB R2025b 中执行
+cd('D:\work\demo\industrial-vision')
+pyenv('Version', 'D:\work\demo\industrial-vision\venv\Scripts\python.exe')
+matlab_bridge_server
+```
+
+> 不启动 MATLAB 也能运行 — 软件会自动降级到 Python 启发式算法。
+
+### 4. 完成一次完整演示
+
+1. 点击 **"加载点云"** → 取消对话框 → 选择加载演示数据
+2. 切换到 **选取模式** → 拖动鼠标选取缺陷区域
+3. 选择材料（如 STEEL_316L）→ 点击 **"生成修复路径"**
+4. 切换到 **"02 形貌预测"** → 点击 **"执行形貌预测"**
+5. 点击 **"导出 G-code"** 和 **"导出 PDF 报告"**
+
+> 详细步骤请参阅 [docs/01_快速开始.md](docs/01_快速开始.md)
+
+## 项目结构
+
+```
+industrial-vision/
+├── run_app.py                      # Python 应用入口
+├── matlab_bridge_server.m          # MATLAB Bridge 服务入口
+├── repair_protocol.proto           # Protobuf v2.1 协议定义
+├── repair_app.spec                 # PyInstaller 打包配置
+├── requirements.txt                # Python 运行时依赖
+├── pyproject.toml                  # 构建配置
+│
+├── repair_app/                     # Python 主应用
+│   ├── ui/                         # GUI（PySide6）
+│   │   ├── main_window.py          #   主窗口
+│   │   ├── repair_visualizer.py    #   3D 可视化
+│   │   ├── profile_result_panel.py #   MATLAB 结果原生渲染
+│   │   └── workers.py              #   后台工作线程
+│   ├── bridge/                     # Bridge 通信层（唯一生产路径）
+│   │   ├── adapters/               #   MatlabAdapter + LegacyZmqClient + MatlabEngineProxy
+│   │   ├── communication/          #   ZMQ REP/REQ + Protobuf v2.1
+│   │   └── services/               #   MATLAB 服务封装
+│   ├── core/                       # 核心算法（Python 原型，降级用）
+│   ├── domain/                     # 领域模型 + 引擎接口
+│   ├── engine/                     # LocalEngine（Python 降级引擎）
+│   ├── export/                     # G-code + PDF 导出
+│   ├── service/                    # 业务逻辑编排
+│   ├── repository/                 # 文件 I/O + 材料数据
+│   ├── platform/                   # 平台抽象（ZMQ 传输、CJK 字体）
+│   ├── communication/              # 旧版通信层（已弃用）
+│   ├── tests/                      # 单元测试（15 个文件，276 个测试）
+│   ├── tools/                      # 性能分析工具
+│   └── utils/                      # 配置、日志、许可证、崩溃处理
+│
+├── 路径规划/                        # MATLAB 形貌预测算法（12 个 .m 文件）
+├── 形貌预测/                        # MATLAB 路径规划算法（6 个 .m 文件）
+├── morphology_prediction/          # CFD 数据（pointlist / velocitylist）
+├── config/                         # 标定数据库 + 许可证
+├── docs/                           # 完整文档（见下方导航）
+├── scripts/                        # 验证脚本
+└── .github/                        # CI/CD + Issue 模板
+```
+
+> **注意**：`路径规划/` 和 `形貌预测/` 两个目录名与实际内容互换（历史命名原因）。`路径规划/` 存放形貌预测算法，`形貌预测/` 存放路径规划算法。详见 [docs/04_MATLAB算法说明.md](docs/04_MATLAB算法说明.md)。
+
+## 如何启动 MATLAB
+
+```matlab
+% 1. 打开 MATLAB R2025b
+% 2. 配置 Python 环境
+pyenv('Version', '<项目路径>/venv/Scripts/python.exe')
+
+% 3. 切换到项目根目录
+cd('<项目路径>')
+
+% 4. 启动 Bridge 服务
+matlab_bridge_server
+```
+
+MATLAB 会共享引擎会话（名称 `matlab_bridge`）并监听 `tcp://127.0.0.1:5555`。命令窗口会阻塞 — 这是正常的。
+
+## 如何启动 Python
+
+```powershell
+python run_app.py
+```
+
+或安装后使用命令行：
+
+```powershell
 pip install -e .
 csam-repair
 ```
 
-## 连接 MATLAB（可选但推荐）
-
-软件支持 MATLAB R2025b 作为工业算法引擎。连接后可获得真实的路径规划和形貌预测计算结果。
-
-### 启动 MATLAB Bridge 服务
-
-1. 打开 MATLAB R2025b
-2. 将工作目录切换到项目根目录
-3. 运行以下命令：
-
-```matlab
-matlab_bridge_server
-```
-
-MATLAB 会共享引擎会话并启动 Bridge 服务（默认端口 5555）。
-
-### 验证连接
-
-启动 Python GUI 后，执行路径规划时软件会自动连接 MATLAB。如果 MATLAB 不可用，软件会自动降级到 Python 启发式算法（日志中会显示降级信息）。
-
-> 详细 MATLAB 集成说明请参阅 [docs/MATLAB_INTEGRATION.md](docs/MATLAB_INTEGRATION.md)
-
-### 环境变量配置
+## 环境变量
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `CSAM_ALGORITHM_ENGINE` | 算法引擎模式（auto/matlab/python） | auto |
-| `CSAM_ZMQ_ADDRESS` | ZeroMQ 通信地址 | tcp://127.0.0.1:5555 |
-| `CSAM_MATLAB_SHARED_NAME` | MATLAB 共享会话名称 | matlab_bridge |
-| `CSAM_LOG_LEVEL` | 日志级别 | INFO |
+| `CSAM_ALGORITHM_ENGINE` | 算法引擎模式（auto / matlab / python） | `auto` |
+| `CSAM_ZMQ_ADDRESS` | ZeroMQ 通信地址 | `tcp://127.0.0.1:5555` |
+| `CSAM_MATLAB_SHARED_NAME` | MATLAB 共享会话名称 | `matlab_bridge` |
+| `CSAM_LOG_LEVEL` | 日志级别 | `INFO` |
+| `CSAM_HMAC_SECRET` | 许可证 HMAC 密钥（生产必须设置） | 开发回退密钥 |
 
-## 使用指南
+> 完整环境变量列表请参阅 [docs/02_安装部署.md](docs/02_安装部署.md)
 
-软件遵循 **两步工作流程**，并集成导出功能：
-
-```
-Step 1: Load & Path Planning → Step 2: Morphology Prediction → Export (G-code / PDF)
-```
-
-### 使用演示数据快速开始
-
-无需外部数据文件。当您点击 **"📂 加载点云"** 并取消文件对话框时，软件会询问是否加载内置演示数据用于测试。
-
-### 步骤 1：加载点云与路径规划
-
-1. 在左侧面板点击 **"📂 加载点云"** 选择点云文件
-   - 如果取消文件对话框，可以选择加载演示数据
-2. 加载后，3D 视图会自动切换到 **选取模式** — 拖动鼠标选取缺陷区域（以红色高亮显示）
-3. 从下拉菜单选择一种 **材料**（例如 STEEL_316L）
-4. 调整 **路径规划参数**（层高、扫描角度、步长等）
-   - 将鼠标悬停在任意参数上可查看工具提示说明
-5. 点击 **"🔧 生成修复路径"** 计算路径点
-6. 路径规划完成后，点击 **"📤 导出 G-code"** 保存刀具路径
-
-**支持的点云格式**：
-| 格式 | 扩展名 | 必需列 | 说明 |
-|--------|-----------|-----------------|-------|
-| CSV | `.csv` | `x, y, z` 或 `x, y, z, nx, ny, nz` | 逗号分隔。若为 6 列，则第 4-6 列视为法线。 |
-| TXT | `.txt` | `x, y, z` 或 `x, y, z, nx, ny, nz` | 与 CSV 相同。 |
-| XYZ | `.xyz` | `x, y, z` | 空格分隔。 |
-| ASC | `.asc` | `x, y, z` | 空格分隔。 |
-
-> **建议**：使用带法线的 6 列 CSV（`x, y, z, nx, ny, nz`）以获得最佳可视化效果。
-
-### 缺陷选取控件
-
-- **🧭 导航模式 / ✂️ 选取模式**：在导航（旋转/缩放）和选取模式之间切换
-- **模式**：选择选取方式 — 矩形框选 (Rectangle), 自由选区 (Freehand), 区域选择 (Brush Add), 取消选择 (Brush Remove)
-- **笔刷**：调整笔刷半径（仅适用于笔刷模式）
-- **↩ 撤销**：撤销上一次选取操作
-- **✕ 清除选区**：清除所有选取
-- **⇄ 反选**：反选选取
-
-### 步骤 2：形貌预测
-
-1. 在左侧面板点击 **"02 形貌预测"** 切换到预测页面
-2. 调整 **冷喷涂参数**（粒子速度、喷嘴直径等）
-   - **临界速度** (Critical Velocity) 由材料数据库自动计算，无法手动编辑
-   - 将鼠标悬停在任意参数上可查看工具提示说明
-3. 可选：点击 **"🔍 可行性检查"** 验证当前参数是否合适
-4. 点击 **"🔮 执行形貌预测"** 模拟沉积过程
-5. 预测完成后，点击 **"📄 导出 PDF 报告"** 生成报告
-
-### 3D 可视化控件
-
-- **视角**：在等轴测、俯视、侧视和正视之间切换
-- **曲面 / 缺陷 / 路径 / 喷嘴 / 色温**：切换不同图层的可见性
-- **▶ 逐层动画**：播放沉积过程的逐层动画
-- **层 slider**：浏览单个沉积层
-
-### 导出
-
-**G-Code 导出**（路径规划后可用）：
-1. 在路径规划面板点击 **"📤 导出 G-code"**
-2. 选择保存位置（默认：`repair.nc`）
-3. 生成的 G-code 包含安全 Z 轴移动、送粉 M 代码和进给速率映射
-
-**PDF 报告**（形貌预测后可用）：
-1. 在形貌预测面板点击 **"📄 导出 PDF 报告"**
-2. 选择保存位置（默认：`repair_report.pdf`）
-3. 报告内容包括：扫描信息、工艺参数、结果摘要、修复前后 3D 对比以及高度色温图
-
-> **注意**：PDF 导出依赖 `reportlab`，已作为核心依赖随基础安装提供，无需额外安装 `[full]`。
-
-## 打包与分发
-
-### 构建可执行文件
-
-项目使用 PyInstaller 进行跨平台打包。提供了生产级 spec 文件（`repair_app.spec`），包含运行时钩子、完整的隐藏导入以及 Qt DLL 的 UPX 排除配置。
+## 打包
 
 **Windows：**
 ```cmd
 build_windows.bat
 ```
-输出：`dist/CSAM_Repair.exe`（单文件可执行程序）
+输出：`dist/CSAM_Repair.exe`
 
 **macOS：**
 ```bash
 bash build_macos.sh
 ```
-输出：`dist/CSAM_Repair.app`（应用程序包）
+输出：`dist/CSAM_Repair.app`
 
-### 运行时配置
-
-将 `.env.example` 复制为 `.env`，并为生产部署配置环境变量：
-
-| 变量 | 说明 | 默认值 |
-|----------|-------------|---------|
-| `CSAM_HMAC_SECRET` | 用于许可证验证的 HMAC 密钥 | 开发回退密钥 |
-| `CSAM_ZMQ_ADDRESS` | ZMQ 传输地址 | 平台默认值 |
-| `CSAM_LOG_LEVEL` | 日志级别 | `INFO` |
-| `CSAM_ENGINE_ADDRESS` | MATLAB 引擎地址 | 平台默认值 |
-
-### 安装程序建议
-
-- **Windows**：使用 [Inno Setup](https://jrsoftware.org/isinfo.php) 或 [NSIS](https://nsis.sourceforge.io/) 创建用户友好的安装程序。`docs/07_开发者文档.md` 中提供了 Inno Setup 脚本模板示例。
-- **macOS**：以签名 `.dmg` 磁盘映像形式分发。分发前运行 `codesign` 和 `notarize`。
-
-### 图标配置
-
-构建脚本会通过在项目根目录搜索 `p1.ico`、`p1.png` 或 `p1.jpg` 来自动检测应用图标。请在构建前将图标文件放置在该目录。
-
-详细安装说明请参阅 [docs/UserManual/02_安装指南.md](docs/UserManual/02_安装指南.md)，开发者文档请参阅 [docs/07_开发者文档.md](docs/07_开发者文档.md)。
-
-## 架构
-
-```
-csam-repair/
-├── run_app.py                 # 应用入口
-├── matlab_bridge_server.m     # MATLAB Bridge 服务入口
-├── repair_app/
-│   ├── core/                  # 核心算法（路径规划、形貌预测 Python 原型）
-│   ├── bridge/                # Bridge 通信层（ZeroMQ + Protobuf v2.1）
-│   │   ├── adapters/          # MatlabAdapter + LegacyZmqClient + MatlabEngineProxy
-│   │   ├── communication/     # ZMQ REP/REQ 服务端/客户端
-│   │   └── services/          # MATLAB 服务封装
-│   ├── communication/         # 旧版通信层（已弃用，保留兼容）
-│   ├── domain/                # 领域模型 + 引擎接口
-│   ├── engine/                # LocalEngine（Python 原型引擎）
-│   ├── export/                # G-code 导出 + PDF 报告生成
-│   ├── platform/              # 平台抽象（ZMQ 传输、CJK 字体）
-│   ├── repository/            # 文件 I/O + 材料数据访问
-│   ├── service/               # 业务逻辑编排
-│   ├── tests/                 # 测试套件（276 个测试）
-│   ├── tools/                 # Profiler + Benchmark
-│   ├── ui/                    # GUI（PySide6）
-│   │   ├── main_window.py     # 主窗口
-│   │   ├── repair_visualizer.py    # 3D 可视化
-│   │   ├── profile_result_panel.py # MATLAB 结果原生渲染面板
-│   │   └── workers.py         # 后台工作线程
-│   └── utils/                 # 配置、日志、许可证、崩溃处理
-├── 路径规划/                   # MATLAB 路径规划 + 形貌预测算法
-├── 形貌预测/                   # MATLAB 形貌预测算法
-├── morphology_prediction/     # CFD 数据（pointlist/velocitylist）
-├── docs/                      # 完整文档体系
-├── scripts/                   # 验证脚本
-├── .github/workflows/ci.yml  # CI/CD 流水线
-├── pyproject.toml             # 构建配置
-├── requirements.txt           # 运行时依赖
-└── README.md                  # 本文件
-```
+> Linux 仅支持从源码运行，详见 [docs/02_安装部署.md](docs/02_安装部署.md)
 
 ## 开发
 
-### 运行测试
-
 ```bash
-# 全部测试（276 个测试）
+# 安装开发依赖
+pip install -e ".[dev]"
+
+# 运行全部测试（276 个）
 pytest repair_app/tests/ repair_app/bridge/tests/ -v
 
-# 仅单元测试
-pytest repair_app/tests/test_stage1.py -v
+# 端到端验证（27 项）
+python scripts/release_validation.py
 
-# 压力测试
-pytest repair_app/tests/test_stress.py -v
-
-# 分层测试（Controller / Service / Repository）
-pytest repair_app/tests/test_layers.py -v
-```
-
-### 性能分析
-
-```bash
-python repair_app/tools/profiler.py --mode all --size medium
-python repair_app/tools/benchmark.py
-```
-
-### 代码质量
-
-```bash
-# 安装 pre-commit 钩子（推荐）
-pip install pre-commit
-pre-commit install
-pre-commit run --all-files
-
-# 手动代码检查
+# 代码检查
 flake8 repair_app/ --count --max-complexity=15
 bandit -r repair_app/ -x repair_app/tests/ -ll
 ```
 
+> 详细开发指南请参阅 [docs/07_开发指南.md](docs/07_开发指南.md)
+
 ## 文档导航
 
-| 文档 | 说明 | 适合读者 |
+| 编号 | 文档 | 适合读者 |
 |------|------|---------|
-| [docs/UserManual/](docs/UserManual/) | 完整用户手册（11 篇，从安装到术语解释） | 操作员、工程师 |
-| [docs/07_开发者文档.md](docs/07_开发者文档.md) | 项目结构、模块职责、测试、构建 | 开发者 |
-| [docs/08_运维手册.md](docs/08_运维手册.md) | 日志、备份、升级、性能调优 | 运维人员 |
-| [docs/10_架构文档.md](docs/10_架构文档.md) | 系统架构图、模块关系、部署拓扑 | 架构师 |
-| [docs/09_API文档.md](docs/09_API文档.md) | 公开接口签名、异常层次 | 开发者 |
-| [docs/MATLAB_INTEGRATION.md](docs/MATLAB_INTEGRATION.md) | MATLAB R2025b 集成快速指南 | 算法工程师 |
-| [docs/MATLAB_R2025B_Validation_Playbook.md](docs/MATLAB_R2025B_Validation_Playbook.md) | MATLAB 验证手册（19 章） | QA 工程师 |
-| [docs/COMMUNICATION.md](docs/COMMUNICATION.md) | 通信架构决策（ZeroMQ + Protobuf v2.1） | 架构师 |
-| [docs/BRIDGE_ARCHITECTURE.md](docs/BRIDGE_ARCHITECTURE.md) | Bridge 层详细架构 | 开发者 |
-| [docs/PACKAGING_GUIDE.md](docs/PACKAGING_GUIDE.md) | PyInstaller 打包指南 | 发布工程师 |
-| [docs/CHANGELOG.md](docs/CHANGELOG.md) | 版本变更记录 | 所有人 |
-| [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | 发布检查清单 | 发布工程师 |
-| [docs/RELEASE_NOTES_V1.0.md](docs/RELEASE_NOTES_V1.0.md) | v1.0 发布说明 | 所有人 |
-| [docs/checklists/](docs/checklists/) | 验收/兼容性/部署/回归/冒烟测试清单 | QA |
-| [docs/archive/](docs/archive/) | 历史文档归档（迁移报告、集成报告等） | 历史参考 |
+| 01 | [快速开始](docs/01_快速开始.md) | 所有人 |
+| 02 | [安装部署](docs/02_安装部署.md) | 用户、运维 |
+| 03 | [用户使用手册](docs/03_用户使用手册.md) | 操作员、工程师 |
+| 04 | [MATLAB 算法说明](docs/04_MATLAB算法说明.md) | 算法工程师 |
+| 05 | [软件架构](docs/05_软件架构.md) | 架构师 |
+| 06 | [通信协议](docs/06_通信协议.md) | 开发者、架构师 |
+| 07 | [开发指南](docs/07_开发指南.md) | 开发者 |
+| 08 | [API 接口](docs/08_API接口.md) | 开发者 |
+| 09 | [测试验证](docs/09_测试验证.md) | QA、发布工程师 |
+| 10 | [FAQ](docs/10_FAQ.md) | 所有人 |
+| 11 | [故障排查](docs/11_故障排查.md) | 操作员、运维 |
+| — | [CHANGELOG](docs/CHANGELOG.md) | 所有人 |
+| — | [RELEASE_NOTES](docs/RELEASE_NOTES.md) | 所有人 |
+| — | [archive/](docs/archive/) | 历史参考 |
 
 ## 许可证
 
-本项目采用 MIT 许可证。详见 [LICENSE](LICENSE) 文件。
+MIT License。详见 [LICENSE](LICENSE)。
 
-应用在无许可证文件的情况下即可启动（会记录一条警告，但不会阻止功能）。要启用完整的许可证验证，请将 `license.key` 和 `public_key.pem` 放置在 `config/` 目录中。
+应用在无许可证文件的情况下即可启动（会记录警告）。要启用完整许可证验证，将 `license.key` 和 `public_key.pem` 放置在 `config/` 目录中。
 
-## 支持
+## 贡献
 
-如需技术支持，请联系 CSAM 团队。
+欢迎提交 Pull Request。请参阅 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [docs/07_开发指南.md](docs/07_开发指南.md)。

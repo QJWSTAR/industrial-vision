@@ -1,0 +1,463 @@
+# MATLAB 算法说明
+
+> 版本：1.0.0 RC | 协议：v2.1 | MATLAB：R2025b
+> 更新日期：2026-07-14
+
+---
+
+## 1. 概述
+
+CSAM 修复平台将 MATLAB 作为工业算法引擎（Industrial Algorithm Engine），承担路径规划（Path Planning）与形貌预测（Morphology / Profile Prediction）两大类几何与物理计算。Python 侧通过 MATLAB Engine API for Python 调用 MATLAB 共享引擎会话，实现跨语言协作。
+
+**调用方式**：Python 不直接执行 `.m` 算法文件，而是通过以下链路：
+
+```
+Python 应用
+  │  MatlabEngineProxy（单例）
+  │  connect_matlab('matlab_bridge')  连接共享会话
+  ▼
+MATLAB 共享引擎会话（matlab_bridge）
+  │  run_path_planning.m / run_profile_prediction.m
+  ▼
+MATLAB 算法函数（.m 文件）
+```
+
+- 路径规划：`eng.run_path_planning(stl_path, params, nargout=4)` → 返回航点
+- 形貌预测：`eng.call_profile_prediction(stl_path, excel_path, params)` → 返回形貌预测结果 dict
+
+> 标定逻辑位于 Python 侧（`config/calibration_db.json`），MATLAB 仅执行纯几何/路径计算。
+
+---
+
+## 2. MATLAB 环境要求
+
+### 2.1 MATLAB 版本
+
+| 项目 | 要求 |
+| --- | --- |
+| MATLAB 版本 | R2025b（推荐）/ R2024b+ |
+| Java | 已启用（`usejava('jvm')` 返回 1，MATLAB 默认启用） |
+| MATLAB Engine API for Python | 必须安装（用于 Python 调用 MATLAB） |
+
+### 2.2 工具箱依赖
+
+算法对工具箱的依赖分为三档：
+
+| 依赖档位 | 涉及算法 | 说明 |
+| --- | --- | --- |
+| 需要 Mapping Toolbox（`polyxpoly`） | `generate_path`、`profile_predict` | 路径规划与剖面预测 |
+| 需要 Curve Fitting Toolbox（`fit` / `fittype`） | `particle_fitting` | 粒子拟合 |
+| 基础 MATLAB（无需工具箱） | 其余算法 | 使用内置 `containers.Map`、`graph`、`conncomp`、`delaunayTriangulation` 等 |
+
+> 工具箱缺失时，MATLAB 会返回 `ERR_DEPS` 错误码。
+
+### 2.3 Python 侧依赖
+
+MATLAB 通过 `pyenv` 调用 Python 的 BridgeServer，Python 侧需安装：
+
+- `pyzmq`（ZeroMQ 绑定）
+- `protobuf`（Protocol Buffers 运行时）
+- `numpy`
+
+---
+
+## 3. 算法目录结构
+
+### 3.1 重要说明：目录命名交叉
+
+> **历史命名原因**：源码中存在两个中文命名目录，但目录名与实际存放的算法**交叉相反**。查阅代码时务必以算法用途为准，不要以目录名为准。
+
+| 目录名 | 实际存放的算法 | 文件数 |
+| --- | --- | --- |
+| `路径规划\` | **形貌预测**算法（`profilePredict.m`、`spotInterp.m` 等） | 12 |
+| `形貌预测\` | **路径规划**算法（`layer_slice.m`、`generate_path.m` 等） | 6 |
+
+> **判断规则**：以算法实际用途为准，忽略目录名带来的直觉误导。
+
+### 3.2 路径规划目录（`形貌预测\`，6 个 .m 文件）
+
+实际存放路径规划（Path Planning）算法：
+
+| 文件 | 作用 |
+| --- | --- |
+| `run_path_planning.m` | **主入口**：编排路径规划全流程 |
+| `read_stl_file.m` | 读取 STL 文件为 `N*12` 矩阵（含法向量） |
+| `model_process.m` | 三角面分类（添加簇 / 修复簇）与边界计算 |
+| `layer_slice.m` | 按 `layer_height` 将三角面簇切片为逐层多边形 |
+| `generate_path.m` | 由层列表生成喷涂 `pointlist` / `velocitylist` / `zonelist`（依赖 `polyxpoly`） |
+| `aStarSearch.m` | 占用栅格上的 A* 路径搜索 |
+
+### 3.3 形貌预测目录（`路径规划\`，12 个 .m 文件）
+
+实际存放形貌预测（Morphology Prediction）算法：
+
+| 文件 | 作用 |
+| --- | --- |
+| `run_profile_prediction.m` | **主入口**：编排形貌预测全流程 |
+| `read_STLfile.m` | 用 `stlread` 读取 STL 为 `N*9` 矩阵（仅顶点） |
+| `recursiveSubdivide.m` | 递归细分三角形直至边长低于阈值 |
+| `improveShortEdges.m` | 折叠短边以改善三角形质量 |
+| `particleFitting.m` | 将 CFD 粒子分布拟合为射线属性（依赖 Curve Fitting Toolbox） |
+| `spotInterp.m` | 沿 `pointlist` 按固定步长插值喷涂点 |
+| `rayMove.m` | 用 Rodrigues 旋转将射线变换到喷嘴姿态坐标系 |
+| `buildOctree.m` | 为三角面构建八叉树加速结构 |
+| `batchOctreeFilter.m` | 遍历八叉树按射线过滤候选三角形 |
+| `ray_triangle_intersection.m` | Moller-Trumbore 射线/三角形相交测试 |
+| `classifyRemovedTriangles.m` | 聚类被移除三角形并提取边界环 |
+| `profilePredict.m` | 预测单次喷涂移动的沉积剖面三角形（依赖 `polyxpoly`） |
+
+### 3.4 生产入口
+
+| 文件 | 位置 | 作用 |
+| --- | --- | --- |
+| `matlab_bridge_server.m` | 项目根目录 | 进程宿主，通过 `pyenv` 调用 Python 的 MatlabAdapter |
+
+---
+
+## 4. 主入口函数
+
+### 4.1 run_path_planning.m（路径规划主入口）
+
+执行路径规划全流程：读取 STL → 模型分类 → 逐层切片 → 生成喷涂路径。
+
+**输入**
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `stl_path` | string | STL 文件路径 |
+| `params` | struct | 路径规划参数（层高、扫描角度、步长等，见 §7.1） |
+
+**输出**（`nargout=4`）
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `pointlist` | `N*6` 矩阵 | 喷涂航点 `[x,y,z, nx,ny,nz]`，单位 mm |
+| `feed_rates` | 数组/字符串 | 每点进给速度 |
+| `layer_indices` | 数组 | 每点所属层索引 |
+| `meta` | struct | 元信息（层数、包围盒、统计等） |
+
+**Python 调用示例**
+
+```python
+eng.run_path_planning(stl_path, params, nargout=4)
+```
+
+### 4.2 run_profile_prediction.m（形貌预测主入口）
+
+执行形貌预测全流程：读取 STL → 网格细分 → 粒子拟合 → 逐点射线追踪 → 沉积剖面预测。
+
+**输入**
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `stl_path` | string | STL 文件路径 |
+| `excel_path` | string | CFD 粒子数据 Excel 文件路径 |
+| `params` | struct | 形貌预测参数（standoff_distance、spot_step_size、particle_velocity 等，见 §7.2） |
+
+**输出**
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `mesh` | 矩阵 | 最终沉积网格（三角面） |
+| `layer_profiles` | cell/结构数组 | 逐层沉积剖面 |
+| `particle_distribution` | 矩阵/结构 | 粒子分布数据 |
+| `uniformity` | double | 沉积均匀性指标 |
+| `estimated_mass_g` | double | 估计沉积质量（克） |
+| `estimated_time_s` | double | 估计沉积时间（秒） |
+| `warnings` | cell 数组 | 预测过程中的告警信息 |
+
+**Python 调用示例**
+
+```python
+result = eng.call_profile_prediction(stl_path, excel_path, params)
+# result 为 dict，含上述字段
+```
+
+---
+
+## 5. 算法调用图
+
+### 5.1 路径规划管线调用图
+
+```
+STL 文件
+  │
+  ▼
+read_stl_file.m ──────────────► triangles (N×12，含法向量)
+  │
+  ▼
+model_process.m ─────────────► all_triangles (N×15，分类+边界)
+  │                              additive_cluster
+  │                              repairing_clusters
+  ▼
+layer_slice.m ────────────────► additive_layerlist
+  │                              repairing_layerlist
+  ▼
+generate_path.m ──────────────► pointlist (N×6)
+  │  ├── generate_infill()         velocitylist
+  │  ├── generate_edge()           zonelist
+  │  └── generate_link()
+  │       └── aStarSearch.m ◄───── A* 栅格路径搜索
+  ▼
+（输出至 Python 调用方）
+```
+
+### 5.2 形貌预测管线调用图
+
+```
+STL 文件                       CFD Excel 文件
+  │                                │
+  ▼                                ▼
+read_STLfile.m                 particleFitting.m
+  │ stlread()                    │ fittype()/fit()
+  ▼                              ▼
+triangles (N×9)              rays_indices, rays_origins,
+  │                           rays_directions, rays_speeds,
+  ▼                           rays_possiLengths, rays_Vcr
+recursiveSubdivide.m            │
+  │ (最长边二分)                │
+  ▼                            │
+improveShortEdges.m             │
+  │ (短边折叠)                 │
+  ▼                            │
+triangles (精化 N×9)           │
+  │                            │
+  ├────────────────────────────┘
+  ▼
+spotInterp.m ──────────────► spotsList (M×7)
+  │                              [x,y,z,nx,ny,nz,补偿系数]
+  ▼
+┌──────────── 逐步循环 (i = 1 .. steps) ────────────┐
+│                                                    │
+│  rayMove.m ──────────► moveRays_origins,           │
+│     Rodrigues 旋转        moveRays_directions,      │
+│                           nozzleOrientation         │
+│                                                    │
+│  buildOctree.m ──────► trisOctree (八叉树)          │
+│                                                    │
+│  batchOctreeFilter.m ► tri_candidates              │
+│                                                    │
+│  ray_triangle_intersection.m                       │
+│     Möller-Trumbore ► intersected_ray_ids,         │
+│                       intersected_tri_ids,          │
+│                       intersection_points          │
+│                                                    │
+│  classifyRemovedTriangles.m                        │
+│     graph+conncomp ► removedFacetsIdx,             │
+│                       raysCluster,                 │
+│                       boundaryVerticesCluster      │
+│                                                    │
+│  profilePredict.m ───► oldTriangles, newTriangles  │
+│     ├── PCA 投影                                   │
+│     ├── Delaunay 三角化                            │
+│     ├── improveShortEdges.m ◄── 短边折叠            │
+│     └── polyxpoly 边界裁剪                         │
+│                                                    │
+│  triangles = [oldTriangles; newTriangles]          │
+└────────────────────────────────────────────────────┘
+```
+
+### 5.3 两管线数据交接
+
+路径规划产出的 `pointlist` 与 `velocitylist` 作为形貌预测的输入（通过 `spotInterp.m` 消费），实现两条管线的衔接。
+
+---
+
+## 6. 连接 MATLAB
+
+### 6.1 启动 matlab_bridge_server.m
+
+1. 启动 MATLAB R2025b。
+2. 配置 Python 环境（指向项目 venv）：
+
+```matlab
+pyenv('Version', 'D:\work\demo\industrial-vision\venv\Scripts\python.exe');
+```
+
+3. 切换到项目根目录并启动服务：
+
+```matlab
+cd('D:\work\demo\industrial-vision')
+matlab_bridge_server
+```
+
+4. 服务将监听 `tcp://127.0.0.1:5555`，MATLAB 命令窗口显示：
+
+```
+[matlab_bridge_server] Bridge server started on tcp://127.0.0.1:5555
+```
+
+5. 通过 `matlab.engine.shareEngine('matlab_bridge')` 共享引擎会话，会话名为 `matlab_bridge`。
+6. `addpath` 加载 `形貌预测/` 和 `路径规划/` 两个目录。
+
+### 6.2 pyenv 配置
+
+MATLAB 通过 `pyenv` 调用 Python 的 MatlabAdapter，验证：
+
+```matlab
+pyenv          % 应显示 Python 版本与可执行路径
+py.importlib.import_module('repair_app.bridge.adapters.matlab_adapter')
+```
+
+### 6.3 共享会话机制
+
+| 项 | 说明 |
+| --- | --- |
+| 共享引擎会话名 | `matlab_bridge` |
+| 共享方式 | `matlab.engine.shareEngine('matlab_bridge')` |
+| Python 连接 | `connect_matlab('matlab_bridge')` |
+| 代理类 | `MatlabEngineProxy`（单例） |
+
+### 6.4 验证连接
+
+**算法文件加载验证**：
+
+```matlab
+% 路径规划算法（位于 形貌预测\ 目录）
+exist('generate_path', 'file')   % 应返回 2
+exist('layer_slice', 'file')     % 应返回 2
+exist('aStarSearch', 'file')     % 应返回 2
+
+% 形貌预测算法（位于 路径规划\ 目录）
+exist('particleFitting', 'file') % 应返回 2
+exist('profilePredict', 'file')  % 应返回 2
+```
+
+**工具箱可用性验证**：
+
+```matlab
+license('test', 'MAP_Toolbox')           % Mapping Toolbox
+license('test', 'Curve_Fitting_Toolbox') % Curve Fitting Toolbox
+```
+
+**ZeroMQ 连通性验证**（在另一终端运行）：
+
+```powershell
+.\venv\Scripts\python.exe -c "import zmq; ctx=zmq.Context(); s=ctx.socket(zmq.REQ); s.connect('tcp://127.0.0.1:5555'); print('connected'); s.close()"
+```
+
+应输出 `connected`。
+
+### 6.5 环境变量
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CSAM_ZMQ_ADDRESS` | `tcp://127.0.0.1:5555` | ZMQ 绑定地址 |
+| `CSAM_ZMQ_TIMEOUT_MS` | `30000` | 请求超时（毫秒） |
+| `CSAM_ALGORITHM_ENGINE` | `auto` | 算法引擎选择（见 §8） |
+
+---
+
+## 7. 参数说明
+
+### 7.1 路径规划参数
+
+| 参数 | 类型 | 单位 | 说明 |
+| --- | --- | --- | --- |
+| `layer_height` | double | mm | 切片层高 |
+| `scanning_angle` | double | 度 | 扫描方向角度 |
+| `scanning_step` | double | mm | 扫描线间距（Zig-Zag 填充步长） |
+| `edge_step_size` | double | mm | 边缘采样步长 |
+| `tilt_angle` | double | 度 | 边缘法向量倾斜角 |
+| `buffer_additive` | double | mm | 添加区域缓冲距离 |
+| `buffer_repairing` | double | mm | 修复区域缓冲距离 |
+| `linkPath_freeDistance` | double | mm | 区域间链接自由距离 |
+| `resolution` | double | mm | 占用栅格分辨率 |
+
+### 7.2 形貌预测参数
+
+| 参数 | 类型 | 单位 | 说明 |
+| --- | --- | --- | --- |
+| `standoff_distance`（SoD） | double | mm | 喷嘴 standoff 距离 |
+| `spot_step_size` | double | mm | 喷涂点插值步长 |
+| `particle_velocity` | double | m/s | 粒子速度 |
+| `nozzle_diameter` | double | mm | 喷嘴直径 |
+| `max_edge_length` | double | mm | 网格细分最大边长阈值 |
+| `short_edge_threshold` | double | mm | 短边折叠阈值 |
+| `critical_velocity`（Vcr） | double | m/s | 临界速度（由材料数据库计算，只读） |
+| `coef_THK` | double | - | 厚度系数 |
+
+---
+
+## 8. 降级策略
+
+通过环境变量 `CSAM_ALGORITHM_ENGINE` 控制算法引擎选择，共三种模式：
+
+| 模式 | 取值 | 行为 |
+| --- | --- | --- |
+| 自动（默认） | `auto` | 优先调用 MATLAB；MATLAB 失败时降级到 Python 原型 |
+| 强制 MATLAB | `matlab` | 仅使用 MATLAB，失败不降级（适用于精度要求场景） |
+| 强制 Python | `python` | 仅使用 Python 原型，不调用 MATLAB（适用于无 MATLAB 环境） |
+
+**降级触发条件**（`auto` 模式下）：
+
+- MATLAB 共享会话不可连接
+- MATLAB 调用超时（超过 `CSAM_ZMQ_TIMEOUT_MS`）
+- MATLAB 抛出异常或返回 `ERR_DEPS`
+- 工具箱缺失
+
+> 降级到 Python 原型时，精度可能与 MATLAB 结果存在差异，仅建议用于功能验证或无 MATLAB 环境。
+
+---
+
+## 9. 故障排查
+
+| 症状 | 可能原因 | 解决方案 |
+| --- | --- | --- |
+| MATLAB 启动时报"文本字符无效" | `.m` 文件含非 ASCII 字符 | 检查算法文件，将 em-dash、全角标点等替换为 ASCII 等价物；可执行代码行禁止任何非 ASCII 字符 |
+| Python 连接 ZMQ 超时 | MATLAB 服务未启动 / 端口被占 | 确认 `matlab_bridge_server` 已运行；检查 5555 端口是否被占用 |
+| `pyenv` 报错找不到模块 | Python 路径未配置或依赖缺失 | 重新设置 `pyenv('Version', ...)`；确认 venv 已安装 `pyzmq`/`protobuf`/`numpy` |
+| 算法返回 ERR_DEPS | 缺少工具箱 | 安装 Mapping Toolbox（`polyxpoly`）或 Curve Fitting Toolbox（`fit`/`fittype`） |
+| 健康检查返回 DEGRADED | 部分工具箱缺失或内存高 | 检查 `license('test', ...)`；执行 `pack` 释放内存 |
+| MATLAB 找不到 `matlab_bridge_server` | 工作目录错误 | 在 MATLAB 中 `cd` 到项目根目录后再运行 `matlab_bridge_server` |
+| "Java is not enabled" 提示 | R2025b 显示文本误导 | 验证 `usejava('jvm')` 返回 1 即为正常，忽略该提示文本 |
+| 共享会话连接失败 | `matlab_bridge` 会话未共享 | 确认 `matlab.engine.shareEngine('matlab_bridge')` 已执行 |
+
+### 9.1 禁止的命令
+
+MATLAB 服务上下文中禁止使用以下命令（会导致工作区/数据丢失）：
+
+- `clear all`
+- `close all`
+- `fclose all`
+
+---
+
+## 10. 新增算法指南
+
+### 10.1 添加新算法步骤
+
+1. **确定算法归属**：判断属于路径规划还是形貌预测，将 `.m` 文件放入对应**实际用途**的目录（注意目录命名交叉，参见 §3.1）。
+2. **编写算法函数**：遵循 MATLAB 编码规范，可执行代码行禁止非 ASCII 字符，注释中仅允许 CJK 字符。
+3. **注册工具箱依赖**：若使用 `polyxpoly`、`fit`/`fittype` 等，在文档中标注工具箱依赖。
+4. **在主入口编排**：将新算法调用加入 `run_path_planning.m` 或 `run_profile_prediction.m` 的流程。
+5. **更新调用图**：在 `MATLAB_CALL_GRAPH.md` 与本文档 §5 中补充依赖关系。
+6. **添加参数说明**：在本文档 §7 补充新算法参数。
+7. **编写测试**：在 `repair_app/tests/` 下新增或扩展测试用例。
+8. **验证连接**：使用 `exist('new_func', 'file')` 验证算法文件加载。
+
+### 10.2 命名约定
+
+- 算法函数使用驼峰命名（如 `profilePredict.m`、`buildOctree.m`）。
+- 工具函数与路径规划算法可使用下划线命名（如 `read_stl_file.m`、`layer_slice.m`）。
+- 主入口函数以 `run_` 前缀（如 `run_path_planning.m`）。
+
+### 10.3 Python 调用约定
+
+新增算法若需被 Python 调用：
+
+1. 在 `MatlabEngineProxy` 中添加代理方法。
+2. 使用 `eng.<func_name>(args, nargout=N)` 调用。
+3. 复杂数据通过 struct / dict 传递，避免裸 cell 数组。
+4. 在 `auto` 模式下提供 Python 原型作为降级实现。
+
+---
+
+## 交叉引用
+
+| 主题 | 文档 |
+| --- | --- |
+| 工业算法详细说明（含每个算法的输入输出与流程） | [04_工业算法说明.md](./04_工业算法说明.md) |
+| MATLAB R2025b 集成与启动验证 | [MATLAB_INTEGRATION.md](./MATLAB_INTEGRATION.md) |
+| MATLAB 算法完整调用图 | [MATLAB_CALL_GRAPH.md](./MATLAB_CALL_GRAPH.md) |
+| 测试验证 | [09_测试验证.md](./09_测试验证.md) |
