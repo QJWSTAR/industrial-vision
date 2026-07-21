@@ -264,7 +264,8 @@ class TestExceptions:
             raise ConnectionError("连接失败", request_id="req-456")
         except BridgeError as e:
             assert "req-456" in str(e)
-            assert not hasattr(e, "__traceback__") or e.__traceback__ is not None
+            assert isinstance(e, BridgeError), "应为 BridgeError 子类"
+            assert not str(e).startswith("Traceback"), "异常消息不应包含原始 traceback"
             # 消息不含原始文件路径
             assert ".py" not in str(e)
 

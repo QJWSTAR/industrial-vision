@@ -83,6 +83,38 @@ def _triangulate_xy(pts: np.ndarray, max_pts: int = 3000) -> Optional[tuple]:
         return None
 
 
+def _parse_binary_stl_to_points(stl_bytes: bytes) -> Optional[np.ndarray]:
+    """解析二进制 STL bytes 为 N×3 点云数组（用于实时 mesh 刷新）。
+
+    二进制 STL 结构：
+      - 80 字节 header
+      - 4 字节 uint32 三角形数量
+      - 每个三角形 50 字节：3×float32 法向量 + 3×3×float32 顶点 + 2 字节属性
+    """
+    import struct
+    if len(stl_bytes) < 84:
+        return None
+    try:
+        n_tri = struct.unpack_from("<I", stl_bytes, 80)[0]
+        if n_tri <= 0 or len(stl_bytes) < 84 + n_tri * 50:
+            return None
+        # 每三角形 3 个顶点，每顶点 3 个 float
+        pts = np.empty((n_tri * 3, 3), dtype=np.float32)
+        offset = 84
+        for i in range(n_tri):
+            # 跳过 12 字节法向量，读取 9 个 float（3 顶点 × 3 坐标）
+            base = offset + i * 50 + 12
+            v1 = struct.unpack_from("<fff", stl_bytes, base)
+            v2 = struct.unpack_from("<fff", stl_bytes, base + 12)
+            v3 = struct.unpack_from("<fff", stl_bytes, base + 24)
+            pts[i * 3] = v1
+            pts[i * 3 + 1] = v2
+            pts[i * 3 + 2] = v3
+        return pts
+    except Exception:
+        return None
+
+
 class RepairVisualizer(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -199,9 +231,7 @@ class RepairVisualizer(QWidget):
         self._ax.set_facecolor(_BG)
         for pane in [self._ax.xaxis, self._ax.yaxis, self._ax.zaxis]:
             pane.set_pane_color(_BG)
-        self._ax.xaxis._axinfo["grid"]["color"] = _GRID
-        self._ax.yaxis._axinfo["grid"]["color"] = _GRID
-        self._ax.zaxis._axinfo["grid"]["color"] = _GRID
+        self._ax.grid(color=_GRID, alpha=0.3)
 
     # ========== 槽 ==========
     def _on_view_changed(self, idx: int) -> None:
@@ -296,6 +326,23 @@ class RepairVisualizer(QWidget):
         """设置部分沉积点（用于实时同步显示）。"""
         self._partial_repair = repair_pts
         self._render()
+
+    def set_partial_mesh(self, mesh_bytes: bytes) -> None:
+        """设置实时 mesh（二进制 STL），用于逐层沉积表面刷新。
+
+        将二进制 STL 解析为点云后赋值到 _partial_repair，
+        复用现有的 _render_repair_result 渲染逻辑。
+        """
+        if not mesh_bytes:
+            return
+        try:
+            pts = _parse_binary_stl_to_points(mesh_bytes)
+            if pts is not None and len(pts) > 0:
+                self._partial_repair = pts
+                self._render()
+        except Exception:
+            # 解析失败静默忽略，不影响主流程
+            pass
 
     def set_nozzle_orientations(
         self,
@@ -392,9 +439,9 @@ class RepairVisualizer(QWidget):
         step = max(1, len(wp) // 30)
         self._ax.scatter(wp[::step, 0], wp[::step, 1], wp[::step, 2],
                          s=20, c="#EF4444", marker="o", alpha=0.9, zorder=5)
-        self._ax.scatter(*wp[0], s=60, c="#10B981", marker="s",
+        self._ax.scatter(wp[0, 0], wp[0, 1], wp[0, 2], s=60, c="#10B981", marker="s",
                          edgecolors="white", linewidth=0.8, zorder=6)
-        self._ax.scatter(*wp[-1], s=60, c="#8B5CF6", marker="s",
+        self._ax.scatter(wp[-1, 0], wp[-1, 1], wp[-1, 2], s=60, c="#8B5CF6", marker="s",
                          edgecolors="white", linewidth=0.8, zorder=6)
 
     def _render_nozzle_if_needed(self) -> None:
@@ -519,3 +566,94 @@ class RepairVisualizer(QWidget):
             self._ax.view_init(elev=0, azim=0)
         else:
             self._ax.view_init(elev=30, azim=-60)
+
+    # ============================================================
+    # 便捷方法（供 ContextMenu / 菜单 / 工具栏调用）
+    # ============================================================
+    def reset_view(self) -> None:
+        """重置视角到等距视图。"""
+        self._view_mode = ViewMode.ISOMETRIC
+        if hasattr(self, "_cb_view"):
+            self._cb_view.setCurrentIndex(0)
+        if hasattr(self, "_ax") and self._ax is not None:
+            self._ax.view_init(elev=30, azim=-60)
+            self._canvas.draw_idle()
+
+    def fit_to_view(self) -> None:
+        """适应窗口（重新计算数据范围）。"""
+        if not hasattr(self, "_ax") or self._ax is None:
+            return
+        try:
+            # 重新计算各轴范围
+            all_pts = []
+            if self._substrate_pts is not None:
+                all_pts.append(self._substrate_pts)
+            if self._repair_pts is not None and len(self._repair_pts) > 0:
+                all_pts.append(self._repair_pts)
+            if self._waypoints is not None and len(self._waypoints) > 0:
+                all_pts.append(self._waypoints[:, :3] if self._waypoints.ndim == 2 and self._waypoints.shape[1] >= 3 else self._waypoints)
+            if all_pts:
+                import numpy as np
+                combined = np.vstack(all_pts)
+                margin = 0.1
+                x_range = combined[:, 0].max() - combined[:, 0].min()
+                y_range = combined[:, 1].max() - combined[:, 1].min()
+                z_range = combined[:, 2].max() - combined[:, 2].min()
+                self._ax.set_xlim(
+                    combined[:, 0].min() - x_range * margin,
+                    combined[:, 0].max() + x_range * margin,
+                )
+                self._ax.set_ylim(
+                    combined[:, 1].min() - y_range * margin,
+                    combined[:, 1].max() + y_range * margin,
+                )
+                self._ax.set_zlim(
+                    combined[:, 2].min() - z_range * margin,
+                    combined[:, 2].max() + z_range * margin,
+                )
+                self._canvas.draw_idle()
+        except Exception:
+            pass
+
+    def cleanup(self) -> None:
+        """清理 matplotlib 资源，防止 Figure 内存泄漏。
+
+        应在 MainWindow closeEvent 中调用。
+        """
+        # 停止动画定时器
+        if hasattr(self, "_anim_timer") and self._anim_timer is not None:
+            try:
+                self._anim_timer.stop()
+            except Exception:
+                pass
+            self._anim_timer = None
+        # 清理 matplotlib Figure
+        if hasattr(self, "_fig") and self._fig is not None:
+            try:
+                self._fig.clf()
+            except Exception:
+                pass
+            self._fig = None
+        if hasattr(self, "_ax") and self._ax is not None:
+            self._ax = None
+        if hasattr(self, "_canvas") and self._canvas is not None:
+            try:
+                self._canvas.deleteLater()
+            except Exception:
+                pass
+            self._canvas = None
+
+    def toggle_axes(self) -> None:
+        """显示/隐藏坐标轴。"""
+        if not hasattr(self, "_ax") or self._ax is None:
+            return
+        try:
+            # 切换坐标轴可见性
+            visible = self._ax.get_axis_off()
+            if visible:
+                self._ax.set_axis_on()
+            else:
+                self._ax.set_axis_off()
+            self._canvas.draw_idle()
+        except Exception:
+            pass

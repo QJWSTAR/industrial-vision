@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from typing import Callable, Optional
 
 from PySide6.QtCore import QThread, Signal
@@ -55,12 +56,14 @@ class _RequestWorker(QThread):
         request_bytes: bytes,
         address: str,
         config: BridgeConfig,
+        request_id: str = "",
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._request = request_bytes
         self._address = address
         self._config = config
+        self._request_id = request_id
 
     def run(self) -> None:
         if not _ZMQ_AVAILABLE:
@@ -93,7 +96,7 @@ class _RequestWorker(QThread):
                 f"请求超时 ({self._config.request_timeout_ms}ms)", ""
             )
         except Exception as exc:
-            self.error_occurred.emit(str(exc), "")
+            self.error_occurred.emit(str(exc), self._request_id)
         finally:
             sock.close(linger=0)
 
@@ -132,6 +135,19 @@ class _HealthWorker(QThread):
                 resp.ParseFromString(resp_bytes)
                 parsed = Serializer.parse_health_response(resp)
                 latency = time.time() - start
+                # P3-3: Version Mismatch 检测
+                from repair_app.bridge.communication.protocol import (
+                    PROTOCOL_VERSION, COMPATIBLE_PROTOCOL_VERSIONS,
+                )
+                service_version = parsed.get("service_version", "")
+                if service_version and service_version not in COMPATIBLE_PROTOCOL_VERSIONS:
+                    from repair_app.bridge.communication.exceptions import ProtocolError
+                    self.result_ready.emit(
+                        False,
+                        f"版本不兼容: 客户端 {PROTOCOL_VERSION} / 服务端 {service_version}",
+                        latency,
+                    )
+                    return
                 self.result_ready.emit(
                     parsed.get("status_code") == 0,
                     parsed.get("status", "OK"),
@@ -166,11 +182,13 @@ class BridgeClient:
         self._closed = False
         self._on_result: Optional[Callable] = None
         self._on_error: Optional[Callable] = None
+        self._lock = threading.Lock()
 
     # ---- 属性 ----
     @property
     def is_connected(self) -> bool:
-        return self._connected
+        with self._lock:
+            return self._connected
 
     @property
     def zmq_available(self) -> bool:
@@ -218,7 +236,10 @@ class BridgeClient:
                 on_error(exc)
             return ""
 
-        self._request_worker = _RequestWorker(req_bytes, self._address, self._config)
+        self._request_worker = _RequestWorker(
+            req_bytes, self._address, self._config,
+            request_id=getattr(request, "request_id", ""),
+        )
         self._request_worker.result_ready.connect(self._on_result_ready)
         self._request_worker.error_occurred.connect(self._on_error_occurred)
         self._request_worker.finished.connect(self._on_worker_finished)
@@ -231,6 +252,10 @@ class BridgeClient:
         if self._closed:
             on_health(False, "客户端已关闭")
             return
+
+        # 等待上一个 health worker 完成（防止覆盖竞态）
+        if self._health_worker is not None and self._health_worker.isRunning():
+            return  # 跳过本次心跳检查
 
         self._health_worker = _HealthWorker(self._address, self._config)
         self._health_worker.result_ready.connect(
@@ -274,7 +299,8 @@ class BridgeClient:
             self._on_result(result)
 
     def _on_error_occurred(self, msg: str, request_id: str) -> None:
-        self._connected = False
+        with self._lock:
+            self._connected = False
         if self._on_error:
             err = translate_zmq_error(Exception(msg), request_id=request_id)
             self._on_error(err)
@@ -288,8 +314,10 @@ class BridgeClient:
         msg: str,
         callback: Callable[[bool, str], None],
     ) -> None:
-        self._connected = ok
+        with self._lock:
+            self._connected = ok
         callback(ok, msg)
 
     def _on_heartbeat_status(self, status: int, msg: str) -> None:
-        self._connected = status == 0
+        with self._lock:
+            self._connected = status == 0

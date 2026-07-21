@@ -86,6 +86,7 @@ class TestMainWindowBridgeIntegration:
         try:
             # 不应抛异常
             result = mw._use_zmq_engine()
+            # 验证：返回 bool（_use_zmq_engine 可能因 engine 未就绪返回 False）
             assert isinstance(result, bool)
         finally:
             if mw._zmq_client is not None:
@@ -100,7 +101,7 @@ class TestBridgeEndToEnd:
     def test_request_repair_through_bridge_adapter(self, qapp):
         """LegacyZmqClient.request_repair 应委托给 BridgeClient。
 
-        验证：传入无效请求时，on_error 被调用（序列化失败路径）。
+        验证：传入无效请求（None）时，on_error 被调用（序列化失败路径）。
         """
         from repair_app.bridge.adapters.legacy_adapter import LegacyZmqClient
 
@@ -115,11 +116,12 @@ class TestBridgeEndToEnd:
         import time
         time.sleep(0.3)
         client.close()
-        # 序列化失败应立即触发 on_error（或在 worker 中触发）
-        # 不要求 errors 非空（取决于时序），但不应崩溃
+        # 验证：序列化失败应触发 on_error（至少有一条错误消息）
+        assert len(errors) > 0, "无效请求应触发 on_error 回调"
+        assert isinstance(errors[0], str), "error 消息应为字符串"
 
     def test_check_health_no_crash(self, qapp):
-        """LegacyZmqClient.check_health 不应崩溃（无引擎时）。"""
+        """LegacyZmqClient.check_health 应回调或优雅降级（无引擎时）。"""
         from repair_app.bridge.adapters.legacy_adapter import LegacyZmqClient
 
         client = LegacyZmqClient()
@@ -129,12 +131,16 @@ class TestBridgeEndToEnd:
             results.append((ok, msg))
 
         client.check_health(cb)
+        # 给 worker 充分时间启动和回调（异步时序）
         import time
-        time.sleep(0.5)
+        time.sleep(1.0)
         client.close()
-        # 无引擎时应收到 False
+        # 验证：回调被调用 OR 无崩溃（无引擎时可能不回调）
+        # 关键是不抛异常。如果回调了，ok 应为 False
         if results:
-            assert results[0][0] is False or isinstance(results[0][0], bool)
+            ok, msg = results[0]
+            assert ok is False, f"无引擎时 ok 应为 False，实际 {ok}"
+            assert isinstance(msg, str), "msg 应为字符串"
 
 
 # ================================================================
@@ -142,12 +148,17 @@ class TestBridgeEndToEnd:
 # ================================================================
 class TestLegacyModuleStillAvailable:
     def test_legacy_zmq_client_importable(self):
-        """旧版 ZmqRepairClient 仍可导入（向后兼容）。"""
+        """旧版 ZmqRepairClient 仍可导入且可实例化（向后兼容）。"""
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             from repair_app.communication.zmq_client import ZmqRepairClient
-            assert ZmqRepairClient is not None
+            # 验证：类可调用（不只是 not None）
+            assert callable(ZmqRepairClient), "ZmqRepairClient 应为可调用类"
+            # 验证：可实例化
+            client = ZmqRepairClient()
+            assert hasattr(client, "close"), "应暴露 close 方法"
+            client.close()
 
     def test_legacy_module_emits_deprecation_warning(self):
         """实例化旧版 ZmqRepairClient 应发出 DeprecationWarning。"""

@@ -20,18 +20,35 @@ IS_WINDOWS = sys.platform == 'win32'
 
 # --- Icon 配置 ---
 ICON_PATH = None
-for ext in ['.ico', '.png', '.jpg']:
-    candidate = PROJECT_DIR / f'p1{ext}'
-    if candidate.exists():
-        ICON_PATH = str(candidate)
+# 优先在项目根目录查找图标，回退到 docs/images/
+_icon_search_dirs = [PROJECT_DIR, PROJECT_DIR / 'docs' / 'images']
+for _icon_dir in _icon_search_dirs:
+    for ext in ['.ico', '.png', '.jpg']:
+        candidate = _icon_dir / f'p1{ext}'
+        if candidate.exists():
+            ICON_PATH = str(candidate)
+            break
+    if ICON_PATH:
         break
 
 # --- 资源文件 ---
 datas = [
     # 材料数据库
     (str(PROJECT_DIR / 'repair_app' / 'core' / 'material_db.json'), 'repair_app/core'),
+    # 参数 Schema（单一 Truth Source，启动时必需）
+    (str(PROJECT_DIR / 'repair_app' / 'config' / 'parameter_schema.json'), 'repair_app/config'),
     # 标定配置
     (str(PROJECT_DIR / 'config' / 'calibration_db.json'), 'config'),
+    # License 公钥（打包后许可证验证必需，从 _MEIPASS 只读加载）
+    (str(PROJECT_DIR / 'config' / 'public_key.pem'), 'config'),
+    # 应用级配置（Developer Mode 开关等，从 _MEIPASS 只读加载）
+    (str(PROJECT_DIR / 'config' / 'app_config.json'), 'config'),
+    # MATLAB Bridge Server 脚本
+    (str(PROJECT_DIR / 'matlab_bridge_server.m'), '.'),
+    # MATLAB 路径规划算法
+    (str(PROJECT_DIR / 'path_planning'), 'path_planning'),
+    # MATLAB 形貌预测算法
+    (str(PROJECT_DIR / 'profile_prediction'), 'profile_prediction'),
     # proto 文件
     (str(PROJECT_DIR / 'repair_protocol.proto'), '.'),
 ]
@@ -88,9 +105,13 @@ a = Analysis(
         'repair_app.export.export_validator',
         'repair_app.ui.defect_selector', 'repair_app.ui.repair_visualizer',
         'repair_app.ui.main_window', 'repair_app.ui.workers',
+        'repair_app.ui.profile_result_panel', 'repair_app.ui.pipeline_indicator',
+        'repair_app.ui.progress_subscriber', 'repair_app.ui.layer_player',
+        'repair_app.ui.realtime_stats',
         'repair_app.utils.license_manager', 'repair_app.utils.logger_config',
         'repair_app.utils.look_up', 'repair_app.utils.config',
         'repair_app.utils.crash_handler', 'repair_app.utils.resource_path',
+        'repair_app.utils.app_config',
         'repair_app.service.repair_engine_service', 'repair_app.service.file_service',
         'repair_app.service.export_service',
         'repair_app.service.validation_service',
@@ -100,8 +121,34 @@ a = Analysis(
         'repair_app.export.robot_exporter', 'repair_app.utils.calibration_wizard',
         # V1.0: bridge 通信层 + MATLAB 执行平台
         'repair_app.bridge', 'repair_app.bridge.adapters.legacy_adapter',
+        'repair_app.bridge.adapters.matlab_adapter',
+        'repair_app.bridge.adapters.matlab_engine_proxy',
+        'repair_app.bridge.adapters.matlab_pipeline',
+        'repair_app.bridge.launcher',
+        'repair_app.bridge.lifecycle_manager',
+        'repair_app.bridge.progress_publisher',
         'repair_app.bridge.services.matlab_service',
+        # bridge.communication.* 子模块（PyInstaller 无法自动发现）
+        'repair_app.bridge.communication.config',
+        'repair_app.bridge.communication.heartbeat',
+        'repair_app.bridge.communication.message',
+        'repair_app.bridge.communication.protocol',
+        'repair_app.bridge.communication.serializer',
+        'repair_app.bridge.communication.zmq_client',
+        'repair_app.bridge.communication.zmq_server',
+        'repair_app.bridge.communication.exceptions',
+        # loguru（结构化日志，多处动态导入）
+        'loguru',
         'repair_app.engine.local_engine',
+        'repair_app.software.path_manager',
+        'repair_app.software.project_manager',
+        'repair_app.software.exception_reporter',
+        'repair_app.software.about_dialog',
+        # V1.0: 算法验证体系（MATLAB/Python 双引擎比对）
+        'repair_app.validation',
+        'repair_app.validation.algorithm_validator',
+        'repair_app.validation.result_comparator',
+        'repair_app.validation.diff_report_generator',
     ],
     hookspath=[],
     hooksconfig={},
@@ -144,8 +191,8 @@ exe = EXE(
         'Qt6OpenGL.dll', 'Qt6Network.dll', 'Qt6Svg.dll',
     ],
     runtime_tmpdir=None,
-    console=IS_WINDOWS,  # Windows 保留控制台便于调试
-    disable_windowed_traceback=False,
+    console=False,  # 发布版关闭控制台窗口（GUI 应用）
+    disable_windowed_traceback=True,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,

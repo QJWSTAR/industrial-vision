@@ -69,6 +69,8 @@ class TestMorphologyPredictorPrecision:
         sparse_wp = _sparsify_waypoints(waypoints, step=0)
         assert len(sparse_wp) == n_waypoints_before, \
             f"With step=0, should keep all waypoints. Got {len(sparse_wp)}"
+        # 验证：稀疏化前后数组内容一致（不只是长度）
+        assert np.array_equal(sparse_wp, waypoints), "step=0 时内容应完全一致"
 
         # 验证：传入 waypoint_sparsify_step=0 时函数正常执行
         layers = list(iter_repair_mesh_layers(
@@ -76,7 +78,11 @@ class TestMorphologyPredictorPrecision:
             waypoint_sparsify_step=0,
         ))
         assert len(layers) == 2, f"Expected 2 layers, got {len(layers)}"
-        assert n_waypoints_before == 200
+        # 验证：每层有实际数据（不只是长度）
+        for i, layer in enumerate(layers):
+            assert layer is not None, f"第 {i} 层不应为 None"
+            assert hasattr(layer, "shape") or hasattr(layer, "__len__"), \
+                f"第 {i} 层应有形状或长度"
 
 
 if __name__ == "__main__":

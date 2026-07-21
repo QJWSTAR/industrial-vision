@@ -10,3 +10,4 @@ pyzmq>=24
 protobuf>=5.26  # >=5.26 required: repair_protocol_pb2.py uses runtime_version (gencode v6.31.1)
 reportlab>=4.0  # PDF 报告生成 (report_generator.py)
 cryptography>=41.0  # RSA 许可证验证 (license_manager.py)
+loguru>=0.7,<2.0  # 结构化日志（logger_config.py 等多处使用）

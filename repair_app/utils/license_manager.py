@@ -28,12 +28,16 @@ except ImportError:
     _log_error = lambda msg: None
 
 try:
-    from repair_app.utils.resource_path import get_config_dir, is_frozen
+    from repair_app.utils.resource_path import get_config_dir, get_builtin_config_file, is_frozen
 except ImportError:
     is_frozen = lambda: False
     def get_config_dir():
         from pathlib import Path
         return Path(__file__).resolve().parent.parent.parent / 'config'
+    def get_builtin_config_file(filename):
+        from pathlib import Path
+        p = Path(__file__).resolve().parent.parent.parent / 'config' / filename
+        return p if p.exists() else None
 
 
 LICENSE_FILE = "license.key"
@@ -43,11 +47,15 @@ _DEV_HMAC_FALLBACK = "csam_dev_secret_2026"
 _DEFAULT_HMAC_SECRET = os.environ.get("CSAM_HMAC_SECRET")
 if _DEFAULT_HMAC_SECRET is None:
     if is_frozen():
-        _log_error("CSAM_HMAC_SECRET 未设置，生产环境 HMAC 验证将失败")
         _DEFAULT_HMAC_SECRET = ""
     else:
-        _log_warning("使用开发模式 HMAC 密钥，请勿用于生产环境")
         _DEFAULT_HMAC_SECRET = _DEV_HMAC_FALLBACK
+        # 开发模式使用回退密钥时输出显著警告
+        import logging as _stdlog
+        _stdlog.getLogger("csam.license").warning(
+            "CSAM_HMAC_SECRET 未设置，使用开发模式回退密钥。"
+            "生产环境必须设置此环境变量或使用 RSA 签名。"
+        )
 
 
 def _get_machine_id() -> str:
@@ -117,6 +125,43 @@ class LicenseData:
         return 0 < self.days_remaining <= 7
 
 
+class LicenseStatus:
+    """License 运行时校验结果（verify_runtime 的返回值）。
+
+    封装"软件是否可以启动"的统一答案，解耦"如何判定"的细节。
+
+    Attributes:
+        valid: 是否允许进入软件主界面。
+        mode: 校验模式。"developer"=开发者模式跳过；
+              "commercial"=完整商业 License 校验通过。
+        message: 人类可读的说明（用于日志/状态栏）。
+        days_remaining: 剩余有效天数（开发者模式返回 -1 表示永久）。
+    """
+
+    def __init__(
+        self,
+        valid: bool,
+        mode: str = "commercial",
+        message: str = "",
+        days_remaining: int = 0,
+    ) -> None:
+        self.valid = valid
+        self.mode = mode
+        self.message = message
+        self.days_remaining = days_remaining
+
+    @property
+    def is_developer(self) -> bool:
+        """是否为开发者模式（跳过商业 License 校验）。"""
+        return self.mode == "developer"
+
+    def __repr__(self) -> str:
+        return (
+            f"LicenseStatus(valid={self.valid}, mode={self.mode!r}, "
+            f"days_remaining={self.days_remaining})"
+        )
+
+
 class LicenseManager:
     """License 验证管理器。"""
 
@@ -125,11 +170,77 @@ class LicenseManager:
         self._license: Optional[LicenseData] = None
         self._valid: bool = False
         self._error: str = ""
+        self._runtime_mode: str = ""  # "developer" / "commercial"
+
+    # ---- 运行时统一校验入口（启动流程唯一调用点） ----
+    def verify_runtime(self) -> LicenseStatus:
+        """运行时统一校验：决定软件是否可以启动。
+
+        逻辑：
+        - Developer Mode（AppConfig.is_developer_mode() == True）：
+          直接返回 valid=True, mode="developer"，跳过商业 License 校验。
+          不修改任何 License 文件/签名/机器码逻辑。
+        - Release Mode（默认）：
+          调用 load_license() 执行完整商业 License 校验（机器码 + 过期 + 签名）。
+
+        Returns:
+            LicenseStatus: 封装校验结果（valid / mode / message / days_remaining）。
+
+        注意：
+            本方法是启动流程的**唯一调用点**。业务代码不应直接调用
+            load_license() 判断是否启动，而应通过本方法统一决策。
+        """
+        # 延迟导入避免循环依赖
+        from repair_app.utils.app_config import AppConfig
+
+        if AppConfig.is_developer_mode():
+            self._runtime_mode = "developer"
+            self._valid = True  # 允许进入主界面
+            self._error = ""
+            return LicenseStatus(
+                valid=True,
+                mode="developer",
+                message="Developer Mode: License verification skipped",
+                days_remaining=-1,  # 开发者模式视为永久
+            )
+
+        # Release Mode: 执行完整商业 License 校验
+        self._runtime_mode = "commercial"
+        ok = self.load_license()
+        if ok:
+            return LicenseStatus(
+                valid=True,
+                mode="commercial",
+                message=f"License verified ({self.days_remaining} days remaining)",
+                days_remaining=self.days_remaining,
+            )
+        return LicenseStatus(
+            valid=False,
+            mode="commercial",
+            message=self._error or "License verification failed",
+            days_remaining=0,
+        )
+
+    @property
+    def runtime_mode(self) -> str:
+        """当前运行时模式："developer" / "commercial" / ""（未调用 verify_runtime）。"""
+        return self._runtime_mode
+
+    @property
+    def is_developer_mode(self) -> bool:
+        """当前是否运行在开发者模式（需先调用 verify_runtime）。"""
+        return self._runtime_mode == "developer"
 
     def _load_public_key(self):
         if not _CRYPTO_AVAILABLE:
             return None
-        pub_path = str(get_config_dir() / PUBLIC_KEY_FILE)
+        # 安全关键：公钥始终从打包内置只读目录（_MEIPASS）加载，
+        # 防止用户目录替换攻击
+        pub_path_obj = get_builtin_config_file(PUBLIC_KEY_FILE)
+        if pub_path_obj is None:
+            # 回退到用户配置目录（开发环境）
+            pub_path_obj = get_config_dir() / PUBLIC_KEY_FILE
+        pub_path = str(pub_path_obj)
         if not os.path.exists(pub_path):
             return None
         try:
@@ -147,7 +258,7 @@ class LicenseManager:
             return False
 
         try:
-            with open(lic_path, "r") as f:
+            with open(lic_path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
         except json.JSONDecodeError:
             self._error = "License 文件格式错误"
@@ -208,8 +319,16 @@ class LicenseManager:
             return False
 
     def _verify_hmac(self, raw: dict, signature: str) -> bool:
-        """退化 HMAC 校验（开发/测试用途）。"""
+        """退化 HMAC 校验（开发/测试用途）。
+
+        生产环境（is_frozen）下空密钥直接拒绝，防止伪造。
+        """
+        if is_frozen() and not _DEFAULT_HMAC_SECRET:
+            _log_error("生产环境 HMAC 密钥为空，拒绝验证")
+            return False
         secret = _DEFAULT_HMAC_SECRET.encode() if isinstance(_DEFAULT_HMAC_SECRET, str) else _DEFAULT_HMAC_SECRET
+        if not secret:
+            return False
         payload = json.dumps({k: v for k, v in raw.items() if k != "signature"},
                              sort_keys=True).encode()
         expected = hmac.new(secret, payload, hashlib.sha256).hexdigest()

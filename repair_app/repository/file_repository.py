@@ -1,17 +1,51 @@
 """File repository — centralized file I/O for point clouds, waypoints, and exports.
 
 This extracts file operations from MainWindow into a testable, reusable layer.
+
+中间文件策略（V1.0）：
+- 航点缓存（pointlist.npz / velocitylist.json）写入系统临时目录，不污染项目目录
+- 软件退出时自动清理（通过 atexit 注册）
+- 生产路径优先使用内存传递（MATLABPipeline），文件仅作降级缓存
 """
 
 from __future__ import annotations
+import atexit
 import json
 import os
+import shutil
+import tempfile
 from typing import Optional, Tuple
 
 import numpy as np
 
 from repair_app.utils.logger_config import info, warning, error as log_error
-from repair_app.utils.config import get_morph_dir, get_pointlist_file, get_velocitylist_file
+from repair_app.utils.config import get_morph_dir
+
+
+# ---- 缓存目录管理 ----
+_CACHE_DIR: Optional[str] = None
+
+
+def _get_cache_dir() -> str:
+    """获取（或创建）专用缓存目录，软件退出时自动清理。"""
+    global _CACHE_DIR
+    if _CACHE_DIR is None:
+        _CACHE_DIR = tempfile.mkdtemp(prefix="csam_cache_")
+        atexit.register(_cleanup_cache_dir)
+        info(f"缓存目录已创建: {_CACHE_DIR}")
+    return _CACHE_DIR
+
+
+def _cleanup_cache_dir() -> None:
+    """退出时清理缓存目录。"""
+    global _CACHE_DIR
+    if _CACHE_DIR is not None and os.path.isdir(_CACHE_DIR):
+        try:
+            shutil.rmtree(_CACHE_DIR, ignore_errors=True)
+            info(f"缓存目录已清理: {_CACHE_DIR}")
+        except Exception as exc:
+            warning(f"清理缓存目录失败: {exc}")
+    _CACHE_DIR = None
 
 
 class FileRepository:
@@ -19,14 +53,15 @@ class FileRepository:
 
     Responsibilities:
         - Load point cloud files (CSV, TXT, etc.)
-        - Save/load waypoint data (NPZ + JSON)
-        - Manage morph directory
+        - Save/load waypoint data (缓存目录，退出自动清理)
     """
 
     def __init__(self, morph_dir: Optional[str] = None) -> None:
+        # morph_dir 仅用于兼容旧调用，实际缓存写入系统临时目录
         self._morph_dir = morph_dir or get_morph_dir()
-        self._pointlist_path = get_pointlist_file()
-        self._velocitylist_path = get_velocitylist_file()
+        cache = _get_cache_dir()
+        self._pointlist_path = os.path.join(cache, "pointlist.npz")
+        self._velocitylist_path = os.path.join(cache, "velocitylist.npz")
 
     # ---- Point Cloud Loading ----
 
@@ -70,14 +105,14 @@ class FileRepository:
         Returns:
             True if save succeeded, False otherwise.
         """
-        os.makedirs(self._morph_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(self._pointlist_path), exist_ok=True)
         try:
             np.savez(self._pointlist_path, pointlist=waypoints)
             if velocity_list is not None:
                 vel_path = self._velocitylist_path.replace('.npz', '.json')
                 with open(vel_path, 'w', encoding='utf-8') as f:
                     json.dump(velocity_list, f)
-            info(f"Saved: pointlist.npz ({len(waypoints)} waypoints)")
+            info(f"已缓存航点到临时目录: pointlist.npz ({len(waypoints)} waypoints)")
             return True
         except Exception as e:
             log_error(f"Failed to save waypoints: {e}")

@@ -7,6 +7,8 @@ from __future__ import annotations
 import numpy as np
 from typing import Iterator
 
+from repair_app.config import schema_loader as _schema
+
 try:
     from shapely.geometry import Polygon, Point, MultiPolygon
     from shapely.ops import unary_union
@@ -14,6 +16,26 @@ try:
 except ImportError:
     _SHAPELY = False
     Polygon = None
+
+
+# ============================================================
+# 默认值常量（全部从 parameter_schema.json 读取，禁止硬编码）
+# 消除三处入口函数（plan_path_from_stl / plan_path_from_cloud /
+# iter_path_from_cloud）以及 layer_slice / generate_path 的默认值重复。
+# ============================================================
+def _d(key: str) -> float:
+    """从 schema 读取工艺参数默认值。"""
+    return float(_schema.get_process_default(key))
+
+
+_D_LAYER_HEIGHT = _d("layer_height_mm")
+_D_SCANNING_ANGLE = _d("scanning_angle_deg")
+_D_SCANNING_STEP = _d("scanning_step_mm")
+_D_BUFFER_ADDITIVE = _d("buffer_additive_mm")
+_D_BUFFER_REPAIRING = _d("buffer_repairing_mm")
+_D_EDGE_STEP = _d("edge_step_size_mm")
+_D_TILT_ANGLE = _d("tilt_angle_deg")
+_D_NUM_LAYERS = int(_d("num_layers"))
 
 
 def model_process(
@@ -64,7 +86,7 @@ def model_process(
 
 def layer_slice(
     tris: np.ndarray,
-    layer_height: float = 2.0,
+    layer_height: float = _D_LAYER_HEIGHT,
     base_plane: float = 5.0,
     mode: str = "additive",
 ):
@@ -119,11 +141,11 @@ def _intersect_triangles_with_plane(tris: np.ndarray, z: float):
 
 def generate_path(
     layerlist: list,
-    buffer: float = 2.0,
-    scanning_angle: float = -45.0,
-    scanning_step: float = 2.0,
-    edge_step_size: float = 2.0,
-    tilt_angle: float = 60.0,
+    buffer: float = _D_BUFFER_ADDITIVE,
+    scanning_angle: float = _D_SCANNING_ANGLE,
+    scanning_step: float = _D_SCANNING_STEP,
+    edge_step_size: float = _D_EDGE_STEP,
+    tilt_angle: float = _D_TILT_ANGLE,
 ):
     """生成 Zig-Zag 填充路径 + 边缘补偿路径。
 
@@ -233,7 +255,7 @@ def _generate_zigzag(
         scanline = _intersect_scanline(poly, angle_deg, y)
         if scanline is not None and len(scanline) >= 2:
             xs = sorted(scanline)
-            n_pts = max(2, int((xs[-1] - xs[0]) / step * 3))
+            n_pts = max(2, int((xs[-1] - xs[0]) / max(step, 1e-6) * 3))
             line_x = np.linspace(xs[0], xs[-1], n_pts)
             if reverse:
                 line_x = line_x[::-1]
@@ -316,13 +338,13 @@ def _resample_contour(coords: np.ndarray, n: int) -> np.ndarray:
 
 def plan_path_from_stl(
     stl_path: str,
-    layer_height: float = 2.0,
-    scanning_angle: float = -45.0,
-    scanning_step: float = 2.0,
-    buffer_additive: float = 2.0,
-    buffer_repairing: float = 0.0,
-    edge_step_size: float = 2.0,
-    tilt_angle: float = 60.0,
+    layer_height: float = _D_LAYER_HEIGHT,
+    scanning_angle: float = _D_SCANNING_ANGLE,
+    scanning_step: float = _D_SCANNING_STEP,
+    buffer_additive: float = _D_BUFFER_ADDITIVE,
+    buffer_repairing: float = _D_BUFFER_REPAIRING,
+    edge_step_size: float = _D_EDGE_STEP,
+    tilt_angle: float = _D_TILT_ANGLE,
     base_plane: float = 5.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """从 STL 文件直接生成修复路径航点。
@@ -368,11 +390,11 @@ def plan_path_from_stl(
 def plan_path_from_cloud(
     xyz: np.ndarray,
     defect_mask: np.ndarray,
-    layer_height: float = 2.0,
-    scanning_angle: float = -45.0,
-    scanning_step: float = 2.0,
-    buffer_mm: float = 2.0,
-    n_layers: int = 5,
+    layer_height: float = _D_LAYER_HEIGHT,
+    scanning_angle: float = _D_SCANNING_ANGLE,
+    scanning_step: float = _D_SCANNING_STEP,
+    buffer_mm: float = _D_BUFFER_ADDITIVE,
+    n_layers: int = _D_NUM_LAYERS,
 ) -> np.ndarray:
     """从点云 + 缺陷 mask 直接生成修复路径（简化版，不需要 STL）。
 
@@ -395,11 +417,11 @@ def plan_path_from_cloud(
 def iter_path_from_cloud(
     xyz: np.ndarray,
     defect_mask: np.ndarray,
-    layer_height: float = 2.0,
-    scanning_angle: float = -45.0,
-    scanning_step: float = 2.0,
-    buffer_mm: float = 2.0,
-    n_layers: int = 5,
+    layer_height: float = _D_LAYER_HEIGHT,
+    scanning_angle: float = _D_SCANNING_ANGLE,
+    scanning_step: float = _D_SCANNING_STEP,
+    buffer_mm: float = _D_BUFFER_ADDITIVE,
+    n_layers: int = _D_NUM_LAYERS,
 ) -> Iterator[np.ndarray]:
     """逐层生成路径，并在每层完成后返回当前累计航点。"""
     if not np.any(defect_mask):

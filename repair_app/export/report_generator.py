@@ -40,15 +40,20 @@ except ImportError:
     _REPORTLAB_AVAILABLE = False
 
 
-PAGE_W, PAGE_H = (595.27, 841.89) if not _REPORTLAB_AVAILABLE else A4
-MARGIN = 20 * mm
-
-# 品牌色
-_COLOR_PRIMARY = HexColor("#1D4ED8")
-_COLOR_ACCENT = HexColor("#3B82F6")
-_COLOR_DARK = HexColor("#0F172A")
-_COLOR_MUTED = HexColor("#64748B")
-_COLOR_BORDER = HexColor("#E2E8F0")
+if _REPORTLAB_AVAILABLE:
+    PAGE_W, PAGE_H = A4
+    MARGIN = 20 * mm
+    # 品牌色
+    _COLOR_PRIMARY = HexColor("#1D4ED8")
+    _COLOR_ACCENT = HexColor("#3B82F6")
+    _COLOR_DARK = HexColor("#0F172A")
+    _COLOR_MUTED = HexColor("#64748B")
+    _COLOR_BORDER = HexColor("#E2E8F0")
+else:
+    # reportlab 不可用时使用 A4 点数等效值（1mm ≈ 2.83465 pt）
+    PAGE_W, PAGE_H = (595.27, 841.89)
+    MARGIN = 56.69  # 20mm
+    _COLOR_PRIMARY = _COLOR_ACCENT = _COLOR_DARK = _COLOR_MUTED = _COLOR_BORDER = None
 
 
 def _setup_fonts() -> None:
@@ -111,6 +116,8 @@ class RepairReport:
         self.results: dict = {}
         self.images: list[tuple[str, str]] = []  # (caption, path)
         self.layers: list[dict] = []
+        self.statistics: dict = {}  # P2-4: 统计信息
+        self.quality: dict = {}     # P2-4: 质量评估
         self.calibration: dict = {}
         self._tmp_files: list[str] = []
 
@@ -130,6 +137,30 @@ class RepairReport:
 
     def set_results(self, results: dict) -> None:
         self.results = results
+
+    def set_layers(self, layers: list[dict]) -> None:
+        """P2-4: 设置逐层沉积数据，激活逐层分析章节。
+
+        Args:
+            layers: 每层 dict，含 points/avg_height/mass_g 等字段
+        """
+        self.layers = list(layers) if layers else []
+
+    def set_statistics(self, statistics: dict) -> None:
+        """P2-4: 设置统计信息章节数据。
+
+        Args:
+            statistics: dict，含 mean/min/max/std 等统计字段
+        """
+        self.statistics = dict(statistics) if statistics else {}
+
+    def set_quality(self, quality: dict) -> None:
+        """P2-4: 设置质量评估章节数据。
+
+        Args:
+            quality: dict，含 uniformity_score/coverage_rate/overspray_ratio 等
+        """
+        self.quality = dict(quality) if quality else {}
 
     def add_comparison_figure(self, substrate_pts: np.ndarray,
                                defect_mask: np.ndarray,
@@ -202,8 +233,10 @@ class RepairReport:
         self._build_scan_info(story, styles)
         self._build_params(story, styles)
         self._build_results(story, styles)
+        self._build_statistics(story, styles)   # P2-4: 统计信息
         self._build_images(story, styles)
         self._build_layer_analysis(story, styles)
+        self._build_quality(story, styles)       # P2-4: 质量评估
         self._build_calibration(story, styles)
 
         # 页脚
@@ -273,7 +306,7 @@ class RepairReport:
 
     def _build_images(self, story: list, styles: dict) -> None:
         """构建修复前后可视化章节。"""
-        story.append(Paragraph("4. 修复前后可视化", styles["h2"]))
+        story.append(Paragraph("5. 修复前后可视化", styles["h2"]))
         for caption, path in self.images:
             if os.path.exists(path):
                 story.append(Paragraph(caption, styles["body"]))
@@ -281,12 +314,21 @@ class RepairReport:
                 story.append(img)
                 story.append(Spacer(1, 4 * mm))
 
+    def _build_statistics(self, story: list, styles: dict) -> None:
+        """P2-4: 构建统计信息章节。"""
+        if not self.statistics:
+            return
+        story.append(Paragraph("4. 统计信息", styles["h2"]))
+        stat_data = [[k, str(v)] for k, v in self.statistics.items()]
+        story.extend(self._build_table(stat_data, col_widths=[80*mm, 80*mm]))
+        story.append(Spacer(1, 6 * mm))
+
     def _build_layer_analysis(self, story: list, styles: dict) -> None:
         """构建逐层沉积分析章节。"""
         if not self.layers:
             return
         story.append(PageBreak())
-        story.append(Paragraph("5. 逐层沉积分析", styles["h2"]))
+        story.append(Paragraph("6. 逐层沉积分析", styles["h2"]))
         layer_data = [["层号", "填充点数", "平均高度 (mm)", "材料用量 (g)"]]
         for i, layer in enumerate(self.layers):
             layer_data.append([
@@ -304,12 +346,22 @@ class RepairReport:
         ]))
         story.append(t)
 
+    def _build_quality(self, story: list, styles: dict) -> None:
+        """P2-4: 构建质量评估章节。"""
+        if not self.quality:
+            return
+        story.append(PageBreak())
+        story.append(Paragraph("7. 质量评估", styles["h2"]))
+        qual_data = [[k, str(v)] for k, v in self.quality.items()]
+        story.extend(self._build_table(qual_data, col_widths=[80*mm, 80*mm]))
+        story.append(Spacer(1, 6 * mm))
+
     def _build_calibration(self, story: list, styles: dict) -> None:
         """构建标定信息章节。"""
         if not self.calibration:
             return
         story.append(Spacer(1, 6 * mm))
-        story.append(Paragraph("6. 标定信息", styles["h2"]))
+        story.append(Paragraph("8. 标定信息", styles["h2"]))
         cal_data = [[k, str(v)] for k, v in self.calibration.items()]
         story.extend(self._build_table(cal_data))
 

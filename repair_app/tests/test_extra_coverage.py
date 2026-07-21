@@ -65,7 +65,8 @@ def test_result_report_markdown_and_csv(tmp_path) -> None:
 
 def test_validator_comparison_metric_passed_fields() -> None:
     cm = ComparisonMetric.RMSE
-    assert isinstance(cm.value, str)
+    # 验证：枚举值是具体字符串（不只是 str 类型）
+    assert cm.value == "rmse", f"RMSE 值应为 'rmse'，实际 {cm.value}"
 
 
 def test_morphology_validator_identical() -> None:
@@ -75,11 +76,14 @@ def test_morphology_validator_identical() -> None:
 
 
 def test_export_service_toolpath_validation_and_gcode(tmp_path) -> None:
+    from repair_app.core.repair_session import RepairSession
     svc = ExportService()
-    ok, result = svc.validate_toolpath(np.array([[0, 0, 1], [1, 0, 1]], dtype=np.float32))
+    session = RepairSession()
+    session.waypoint.mock = np.array([[0, 0, 1], [1, 0, 1]], dtype=np.float32)
+    ok, result = svc.validate_toolpath(session)
     assert ok is True
     out = tmp_path / "out.nc"
-    ok = svc.export_gcode(np.array([[0, 0, 1], [1, 0, 1]], dtype=np.float32), str(out))
+    ok = svc.export_gcode(session, str(out))
     assert ok is True
     assert out.exists()
 

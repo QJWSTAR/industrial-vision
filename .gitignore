@@ -29,6 +29,7 @@ logs/
 # Datasets & Experiments
 repair_app/datasets/
 repair_app/experiments/
+user_data/
 
 # License & Secrets
 config/license.key
@@ -58,6 +59,7 @@ Thumbs.db
 htmlcov/
 .coverage
 coverage.xml
+test_results*.txt
 
 # matplotlib
 .matplotlib_cache/

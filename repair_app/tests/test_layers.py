@@ -210,18 +210,27 @@ class TestMaterialRepository:
     def test_get_default_material(self):
         repo = MaterialRepository()
         mat = repo.get_default()
+        # 验证：返回真实材料对象（有属性），不只是 not None
         assert mat is not None
+        assert hasattr(mat, "density_gcm3") or hasattr(mat, "name"), \
+            "材料对象应有物理属性"
 
     def test_get_known_material(self):
         repo = MaterialRepository()
         mat = repo.get("STEEL_316L")
+        # 验证：返回的材料有具体属性（MaterialParams 有 name/density 等）
         assert mat is not None
+        assert hasattr(mat, "name"), "材料应有 name 属性"
+        assert isinstance(mat.name, str) and len(mat.name) > 0, "name 应非空"
+        assert hasattr(mat, "density_kgm3"), "材料应有 density_kgm3 属性"
+        assert mat.density_kgm3 > 0, "密度应为正数"
 
     def test_material_keys(self):
         repo = MaterialRepository()
         keys = repo.material_keys
+        # 验证：包含已知材料（隐含 len>0）
         assert "STEEL_316L" in keys
-        assert len(keys) > 0
+        assert len(keys) >= 1, "应至少有一种材料"
 
     def test_unknown_material_returns_default(self):
         repo = MaterialRepository()

@@ -11,6 +11,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional
 import numpy as np
+from repair_app.config import schema_loader as _schema
 
 
 class RobotType(Enum):
@@ -19,20 +20,27 @@ class RobotType(Enum):
 
 
 class RobotExporter:
-    """工业机器人轨迹代码生成器。"""
+    """工业机器人轨迹代码生成器。
+
+    tcp_speed / tool_frame / base_frame 默认值从 parameter_schema.json
+    的 ui_parameters 读取（robot_tcp_speed_ms / robot_tool_frame / robot_base_frame）。
+    """
 
     def __init__(
         self,
         robot_type: RobotType = RobotType.KUKA,
-        tcp_speed: float = 0.5,      # TCP 线速度 (m/s)
-        tool_frame: int = 1,          # 工具坐标系编号
-        base_frame: int = 0,          # 基坐标系编号
-        zone: str = "fine",           # 逼近精度 (fine/z10/z50)
+        tcp_speed: Optional[float] = None,   # TCP 线速度 (m/s)
+        tool_frame: Optional[int] = None,    # 工具坐标系编号
+        base_frame: Optional[int] = None,    # 基坐标系编号
+        zone: str = "fine",                  # 逼近精度 (fine/z10/z50)
     ) -> None:
         self.robot_type = robot_type
-        self.tcp_speed = tcp_speed
-        self.tool_frame = tool_frame
-        self.base_frame = base_frame
+        self.tcp_speed = float(tcp_speed) if tcp_speed is not None \
+            else float(_schema.get_ui_default("robot_tcp_speed_ms"))
+        self.tool_frame = int(tool_frame) if tool_frame is not None \
+            else int(_schema.get_ui_default("robot_tool_frame"))
+        self.base_frame = int(base_frame) if base_frame is not None \
+            else int(_schema.get_ui_default("robot_base_frame"))
         self.zone = zone
 
     def export(
@@ -100,7 +108,7 @@ class RobotExporter:
 
         code = "\n".join(lines)
         if output_path:
-            with open(output_path, "w") as f:
+            with open(output_path, "w", encoding="utf-8") as f:
                 f.write(code)
         return code
 
@@ -141,7 +149,7 @@ class RobotExporter:
 
         code = "\n".join(lines)
         if output_path:
-            with open(output_path, "w") as f:
+            with open(output_path, "w", encoding="utf-8") as f:
                 f.write(code)
         return code
 

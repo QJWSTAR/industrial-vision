@@ -61,10 +61,35 @@ class MatlabAdapter(BridgeServer):
         else:
             self._algorithm_fn = self._select_algorithm()
 
+    def shutdown(self) -> None:
+        """关闭适配器，释放 MATLAB 引擎引用。
+
+        在 BridgeServer._cleanup 之后调用，确保单例状态清空，
+        下次启动不会残留旧连接。
+        """
+        try:
+            from .matlab_engine_proxy import MatlabEngineProxy
+            MatlabEngineProxy.reset_singleton()
+            logger.info("MatlabAdapter 已关闭，MATLAB 引擎引用已释放")
+        except Exception as exc:
+            logger.warning("MatlabAdapter 关闭异常: %s", exc)
+
     def handle_repair(self, request: RepairRequest) -> RepairResult:
-        """处理修复请求：解析 → 调用算法 → 构建结果（含可视化字段）。"""
+        """处理修复请求：解析 → 调用 MATLABPipeline → 构建结果。
+
+        生产路径：MATLABPipeline 一次调用完成路径规划 + 形貌预测
+        降级路径：MATLAB 不可用时回退到 Python 启发式
+        """
         started = time.time()
         request_id = request.request_id
+
+        # 启动 ProgressPublisher（实时进度推送，供 GUI 订阅）
+        try:
+            from repair_app.bridge.progress_publisher import ProgressPublisher
+            pub = ProgressPublisher.get_instance()
+            pub.start()
+        except Exception as exc:
+            logger.debug("ProgressPublisher 启动失败（不影响计算）: %s", exc)
 
         try:
             xyz, _normals, meta = Serializer.parse_point_cloud(request)
@@ -75,8 +100,55 @@ class MatlabAdapter(BridgeServer):
                     "空点云请求", "输入点云为空",
                 )
 
-            # 调用算法（MATLAB 作为计算引擎，auto 模式失败时自动降级到 Python）
-            waypoints = self._invoke_with_fallback(xyz, meta)
+            # ---- 生产路径：MATLABPipeline 完整管线 ----
+            pipeline_result = self._invoke_pipeline_with_fallback(xyz, meta)
+
+            if pipeline_result is not None:
+                # MATLAB 管线成功：使用真实计算结果
+                waypoints = pipeline_result["waypoints"]
+                elapsed_ms = int((time.time() - started) * 1000)
+                density_gcm3 = float(meta.get("material_density_gcm3", 7.99)) or 7.99
+
+                # 将 MATLAB warnings 附加到 feasibility_reason（Protobuf 无独立 warnings 字段）
+                warnings_list = pipeline_result.get("warnings", [])
+                reason = "MATLAB pipeline completed (path planning + profile prediction)"
+                if warnings_list:
+                    reason += " | Warnings: " + "; ".join(str(w) for w in warnings_list[:5])
+
+                return Serializer.build_repair_result(
+                    waypoints,
+                    request_id=request_id,
+                    status_code=RepairStatusCode.SUCCESS,
+                    predicted_volume_mm3=pipeline_result["predicted_volume_mm3"],
+                    material_density_gcm3=density_gcm3,
+                    estimated_mass_g=pipeline_result["estimated_mass_g"],
+                    estimated_time_s=pipeline_result["estimated_time_s"],
+                    compute_time_ms=elapsed_ms,
+                    uniformity_score=pipeline_result["uniformity"],
+                    is_feasible=True,
+                    feasibility_reason=reason,
+                    layer_profiles=pipeline_result["layer_profiles"],
+                    particle_dist=pipeline_result["particle_dist"],
+                    mesh_data=pipeline_result["mesh_data"],
+                    mesh_format=pipeline_result["mesh_format"],
+                )
+
+            # ---- 降级路径：仅 engine_mode=python 时启用 Python 原型 ----
+            engine_mode = os.environ.get("CSAM_ALGORITHM_ENGINE", "auto").lower()
+            if engine_mode != "python":
+                # 生产路径：MATLAB 不可用时直接报错，不降级到 Python Demo
+                elapsed_ms = int((time.time() - started) * 1000)
+                return self._build_error_result(
+                    request_id, RepairStatusCode.ERR_ALGORITHM_FAIL,
+                    "MATLAB 算法引擎不可用",
+                    "MATLAB 管线调用失败。生产路径要求 MATLAB 原始算法，"
+                    "不再降级到 Python Demo。请启动 MATLAB Bridge "
+                    "（运行 matlab_bridge_server.m）或设置 "
+                    "CSAM_ALGORITHM_ENGINE=python 以启用测试模式。",
+                )
+
+            logger.warning("测试模式（CSAM_ALGORITHM_ENGINE=python）：使用 Python 启发式算法")
+            waypoints = self._default_algorithm(xyz=xyz, meta=meta)
 
             if len(waypoints) == 0:
                 return self._build_error_result(
@@ -85,43 +157,16 @@ class MatlabAdapter(BridgeServer):
                 )
 
             elapsed_ms = int((time.time() - started) * 1000)
-
-            # ---- 优先尝试 MATLAB 形貌预测，填充真实可视化字段 ----
-            viz = self._try_profile_prediction(xyz, meta)
-
-            if viz is not None:
-                # MATLAB 形貌预测成功：使用真实计算结果
-                density_gcm3 = float(meta.get("material_density_gcm3", 7.99)) or 7.99
-                return Serializer.build_repair_result(
-                    waypoints,
-                    request_id=request_id,
-                    status_code=RepairStatusCode.SUCCESS,
-                    predicted_volume_mm3=viz["predicted_volume_mm3"],
-                    material_density_gcm3=density_gcm3,
-                    estimated_mass_g=viz["estimated_mass_g"],
-                    estimated_time_s=viz["estimated_time_s"],
-                    compute_time_ms=elapsed_ms,
-                    uniformity_score=viz["uniformity"],
-                    is_feasible=True,
-                    feasibility_reason="MATLAB profile prediction completed",
-                    layer_profiles=viz["layer_profiles"],
-                    particle_dist=viz["particle_dist"],
-                    mesh_data=viz["mesh_data"],
-                    mesh_format=viz["mesh_format"],
-                )
-
-            # ---- 降级：Python 启发式派生可视化字段 ----
             path_length = self._compute_path_length(waypoints)
             speed = max(float(meta.get("traversing_speed_mms", 500.0)), 1e-6)
             estimated_time_s = path_length / speed
 
             density_gcm3 = self._material_density_gcm3(meta)
             volume_mm3 = self._estimate_volume_mm3(waypoints, meta)
-            mass_g = volume_mm3 * density_gcm3 * 1e-3  # mm3*g/cm3 -> g
+            mass_g = volume_mm3 * density_gcm3 * 1e-3
             uniformity = self._compute_uniformity(waypoints)
             layer_profiles = self._build_layer_profiles(waypoints, meta)
             particle_dist = self._build_particle_distribution(meta)
-            # Python 降级路径也生成 mesh（Delaunay 三角剖分 → 二进制 STL）
             mesh_data, mesh_format = self._build_mesh_from_cloud(xyz)
 
             return Serializer.build_repair_result(
@@ -135,7 +180,7 @@ class MatlabAdapter(BridgeServer):
                 compute_time_ms=elapsed_ms,
                 uniformity_score=uniformity,
                 is_feasible=True,
-                feasibility_reason="MATLAB adapter path generated (heuristic viz)",
+                feasibility_reason="Python heuristic (test mode: CSAM_ALGORITHM_ENGINE=python)",
                 layer_profiles=layer_profiles,
                 particle_dist=particle_dist,
                 mesh_data=mesh_data,
@@ -154,6 +199,93 @@ class MatlabAdapter(BridgeServer):
                 request_id, RepairStatusCode.ERR_UNKNOWN,
                 str(exc), str(exc),
             )
+
+    def _invoke_pipeline_with_fallback(
+        self, xyz: np.ndarray, meta: dict[str, Any]
+    ) -> Optional[dict[str, Any]]:
+        """调用 MATLABPipeline，失败时返回 None 触发降级。
+
+        与 _invoke_with_fallback 不同：
+        - 一次调用完成路径规划 + 形貌预测
+        - 不分步调用，避免重复计算
+        - 降级后不再重试 MATLAB
+        """
+        engine_mode = os.environ.get("CSAM_ALGORITHM_ENGINE", "auto").lower()
+
+        if engine_mode == "python":
+            logger.info("算法引擎：Python（手动指定），跳过 MATLAB 管线")
+            return None
+
+        try:
+            from .matlab_pipeline import MATLABPipeline
+            pipeline = MATLABPipeline()
+            result = pipeline.run(xyz, meta)
+            # 转换为 build_repair_result 所需的格式
+            from repair_app.communication.repair_serialization import (
+                build_layer_profile,
+                build_particle_distribution,
+            )
+
+            # layer_profiles
+            layer_profiles = []
+            lp_arr = result.get("layer_profiles")
+            if lp_arr is not None and len(lp_arr) > 0:
+                lp = np.asarray(lp_arr, dtype=np.float32)
+                if lp.ndim == 2 and lp.shape[1] >= 4:
+                    for row in lp:
+                        layer_profiles.append(
+                            build_layer_profile(
+                                int(row[0]),
+                                max_height_mm=float(row[1]),
+                                avg_height_mm=float(row[2]),
+                                dep_efficiency=float(row[3]),
+                            )
+                        )
+
+            # particle_distribution
+            pd_raw = result.get("particle_distribution")
+            particle_dist = None
+            if pd_raw is not None:
+                px = np.asarray(pd_raw.get("px", []), dtype=np.float32)
+                py = np.asarray(pd_raw.get("py", []), dtype=np.float32)
+                vx = np.asarray(pd_raw.get("vx", []), dtype=np.float32)
+                vy = np.asarray(pd_raw.get("vy", []), dtype=np.float32)
+                vz = np.asarray(pd_raw.get("vz", []), dtype=np.float32)
+                vcr = np.asarray(pd_raw.get("vcr", []), dtype=np.float32)
+                diameter = np.asarray(pd_raw.get("diameter", []), dtype=np.float32)
+                temperature = np.asarray(pd_raw.get("temperature", []), dtype=np.float32)
+                dep_eff = float(pd_raw.get("dep_efficiency", 0.0) or 0.0)
+                if len(px) > 0:
+                    particle_dist = build_particle_distribution(
+                        px, py, vx, vy, vz,
+                        temperature=temperature if len(temperature) == len(px) else None,
+                        diameter=diameter if len(diameter) == len(px) else None,
+                        vcr=vcr if len(vcr) == len(px) else None,
+                        dep_efficiency=dep_eff,
+                    )
+
+            mesh_data = result.get("mesh_stl_bytes", b"")
+            mesh_format = "stl_binary" if mesh_data else ""
+
+            return {
+                "waypoints": result["waypoints"],
+                "predicted_volume_mm3": float(result.get("predicted_volume_mm3", 0.0) or 0.0),
+                "estimated_mass_g": float(result.get("estimated_mass_g", 0.0) or 0.0),
+                "estimated_time_s": float(result.get("estimated_time_s", 0.0) or 0.0),
+                "uniformity": float(result.get("uniformity", 0.78) or 0.78),
+                "layer_profiles": layer_profiles,
+                "particle_dist": particle_dist,
+                "mesh_data": mesh_data,
+                "mesh_format": mesh_format,
+                "warnings": list(result.get("warnings", []) or []),
+            }
+
+        except Exception as exc:
+            if engine_mode == "matlab":
+                logger.warning("MATLAB 管线失败（强制模式）: %s", exc)
+                raise MatlabAlgorithmError(f"MATLAB 管线失败: {exc}") from exc
+            logger.warning("MATLAB 管线不可用，将降级到 Python: %s", exc)
+            return None
 
     # ====== MATLAB 形貌预测 ======
 

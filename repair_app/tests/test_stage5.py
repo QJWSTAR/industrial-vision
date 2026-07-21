@@ -187,6 +187,15 @@ class TestS5Integration:
         from repair_app.export.export_validator import validate_toolpath
         from repair_app.export.robot_exporter import RobotExporter
         from repair_app.utils.calibration_wizard import CalibrationWizard
-        assert GCodeExporter is not None
-        assert validate_toolpath is not None
-        assert RobotExporter is not None
+        # 验证：类可实例化 / 函数可调用（不只是 not None）
+        assert callable(GCodeExporter)
+        assert callable(validate_toolpath)
+        assert callable(RobotExporter)
+        assert callable(CalibrationWizard)
+        # 验证：GCodeExporter 实例化 + 关键属性
+        exporter = GCodeExporter()
+        assert exporter.feed_rate > 0, "feed_rate 应为正数"
+        assert exporter.coordinate_mode in ("absolute", "incremental")
+        # 验证：RobotExporter 实例化
+        robot = RobotExporter()
+        assert robot.tcp_speed > 0, "tcp_speed 应为正数"

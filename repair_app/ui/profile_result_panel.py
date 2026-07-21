@@ -374,9 +374,7 @@ class ProfileResultPanel(QWidget):
         ax.set_facecolor(_BG)
         for pane in (ax.xaxis, ax.yaxis, ax.zaxis):
             pane.set_pane_color(_BG)
-        ax.xaxis._axinfo["grid"]["color"] = _GRID
-        ax.yaxis._axinfo["grid"]["color"] = _GRID
-        ax.zaxis._axinfo["grid"]["color"] = _GRID
+        ax.grid(color=_GRID, alpha=0.3)
 
         if not self._profile:
             self._render_empty(ax, "等待 MATLAB mesh 数据")
@@ -590,6 +588,8 @@ class ProfileResultPanel(QWidget):
                            edgecolor=_GRID, linewidth=1.5))
         # 数值弧
         val_angle = angle_start - unif_pct * 180
+        # 默认颜色（unif_pct=0 时不绘制数值弧，但仍需颜色用于中心数值）
+        val_color = _ERR
         if unif_pct > 0:
             if unif_pct >= 0.85:
                 val_color = _OK
@@ -668,9 +668,14 @@ class ProfileResultPanel(QWidget):
                        self._canvas_particles, self._canvas_unif):
             fig = canvas.figure
             fig.clear()
-            ax = fig.add_subplot(111, projection="3d") if canvas is self._canvas_mesh else fig.add_subplot(111)
-            ax.set_facecolor(_BG)
-            self._render_empty(ax, "已清空") if canvas is not self._canvas_mesh else self._render_empty(ax, "已清空")
+            if canvas is self._canvas_mesh:
+                ax = fig.add_subplot(111, projection="3d")
+                ax.set_facecolor(_BG)
+                self._render_empty(ax, "已清空")
+            else:
+                ax = fig.add_subplot(111)
+                ax.set_facecolor(_BG)
+                self._render_empty_2d(ax, "已清空")
             canvas.draw_idle()
         self._lb_status.setText("已清空结果")
         self._lb_status.setStyleSheet(f"color:{_TEXT}; font-size:11px;")

@@ -80,29 +80,82 @@ class TestLicenseManager:
 # 2. Logger 测试
 # ================================================================
 class TestLoggerConfig:
-    def test_setup_logging_no_crash(self):
-        from repair_app.utils.logger_config import setup_logging
-        setup_logging(level="DEBUG", console=False, app_log=False,
-                      error_log=False, json_log=False)
+    def test_setup_logging_no_crash(self, tmp_path, monkeypatch):
+        """验证 setup_logging 正常执行且创建日志目录。"""
+        # 重定向日志目录到临时目录
+        monkeypatch.setattr(
+            "repair_app.utils.logger_config.LOG_DIR", str(tmp_path)
+        )
+        from repair_app.utils.logger_config import setup_logging, LOG_DIR
+        setup_logging(level="DEBUG", console=False, app_log=True,
+                      error_log=True, json_log=False)
+        # 验证：日志目录已创建
+        assert os.path.exists(LOG_DIR), "日志目录应被创建"
+        # 验证：loguru 至少有一个 handler（app_log=True 添加了文件 handler）
+        try:
+            from loguru import logger
+            # loguru 的 _core.handlers 包含所有 handler
+            assert len(logger._core.handlers) > 0, "应至少有一个日志 handler"
+        except ImportError:
+            pass  # 无 loguru 时退化到 stdlib logging
 
     def test_get_logger(self):
         from repair_app.utils.logger_config import get_logger
         lg = get_logger("test_module")
-        assert lg is not None
+        # 验证：返回对象有标准日志方法（不论是 loguru 还是 logging.Logger）
+        assert hasattr(lg, "info"), "应有 info 方法"
+        assert hasattr(lg, "warning"), "应有 warning 方法"
+        assert hasattr(lg, "error"), "应有 error 方法"
+        assert hasattr(lg, "debug"), "应有 debug 方法"
+        # 验证：可调用（不抛异常）
+        lg.info("test get_logger info")
 
-    def test_info_debug_warning_error(self):
-        from repair_app.utils.logger_config import info, debug, warning, error
-        info("test info message")
-        debug("test debug message")
-        warning("test warning")
-        error("test error")
+    def test_info_debug_warning_error(self, tmp_path, monkeypatch):
+        """验证 4 个日志函数确实产生了日志记录（通过文件 sink 验证）。"""
+        # 重定向日志目录到临时目录
+        monkeypatch.setattr(
+            "repair_app.utils.logger_config.LOG_DIR", str(tmp_path)
+        )
+        from repair_app.utils.logger_config import setup_logging, info, debug, warning, error
+        setup_logging(level="DEBUG", console=False, app_log=True,
+                      error_log=False, json_log=False)
+        # 写入日志
+        info("test info message unique_marker_12345")
+        debug("test debug message unique_marker_67890")
+        warning("test warning unique_marker_abcde")
+        error("test error unique_marker_fghij")
+        # 验证：日志已写入文件（等待 loguru enqueue flush）
+        import time
+        time.sleep(0.2)  # loguru enqueue=True 需要时间刷新
+        log_files = list(tmp_path.glob("app_*.log"))
+        assert len(log_files) > 0, "应创建 app 日志文件"
+        content = log_files[0].read_text(encoding="utf-8")
+        assert "unique_marker_12345" in content, "info 未写入文件"
+        assert "unique_marker_67890" in content, "debug 未写入文件"
+        assert "unique_marker_abcde" in content, "warning 未写入文件"
+        assert "unique_marker_fghij" in content, "error 未写入文件"
 
-    def test_exception_logging(self):
-        from repair_app.utils.logger_config import exception
+    def test_exception_logging(self, tmp_path, monkeypatch):
+        """验证 exception() 记录了异常 traceback。"""
+        monkeypatch.setattr(
+            "repair_app.utils.logger_config.LOG_DIR", str(tmp_path)
+        )
+        from repair_app.utils.logger_config import setup_logging, exception
+        setup_logging(level="DEBUG", console=False, app_log=True,
+                      error_log=True, json_log=False)
         try:
-            raise ValueError("test exception")
+            raise ValueError("test exception unique_marker_exc_999")
         except ValueError:
-            exception("caught exception")  # 不应崩溃
+            exception("caught exception unique_marker_exc_888")
+        # 验证：异常日志已写入 error 日志文件
+        import time
+        time.sleep(0.2)
+        error_files = list(tmp_path.glob("error_*.log"))
+        assert len(error_files) > 0, "应创建 error 日志文件"
+        content = error_files[0].read_text(encoding="utf-8")
+        assert "unique_marker_exc_888" in content, "exception 消息未记录"
+        assert "ValueError" in content or "unique_marker_exc_999" in content, \
+            "异常类型/traceback 未记录"
 
 
 # ================================================================
@@ -188,5 +241,11 @@ class TestS4Integration:
         from repair_app.utils.license_manager import LicenseManager
         from repair_app.utils.logger_config import setup_logging
         from repair_app.export.report_generator import RepairReport
-        assert LicenseManager is not None
-        assert RepairReport is not None
+        # 验证：类可实例化（不只是 not None）
+        assert callable(LicenseManager), "LicenseManager 应为可调用类"
+        assert callable(RepairReport), "RepairReport 应为可调用类"
+        # 验证：实例化成功
+        report = RepairReport()
+        assert hasattr(report, "title"), "RepairReport 应有 title 属性"
+        # 验证：setup_logging 可调用
+        assert callable(setup_logging), "setup_logging 应为可调用函数"

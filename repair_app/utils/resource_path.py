@@ -56,6 +56,29 @@ def get_config_dir() -> Path:
     return Path(__file__).resolve().parent.parent.parent / 'config'
 
 
+def get_builtin_config_dir() -> Path:
+    """获取打包内置的配置目录（只读，安全关键文件从此加载）。
+
+    用于加载安全敏感的只读配置（如 public_key.pem），
+    防止用户目录替换攻击。
+
+    打包环境: _MEIPASS/config/（打包内置，用户不可修改）
+    开发环境: 项目根目录的 config/
+    """
+    if is_frozen():
+        return Path(sys._MEIPASS) / 'config'
+    return Path(__file__).resolve().parent.parent.parent / 'config'
+
+
+def get_builtin_config_file(filename: str) -> Optional[Path]:
+    """获取打包内置配置文件的完整路径（只读），不存在则返回 None。
+
+    用于安全敏感文件（如 public_key.pem），始终从 _MEIPASS 加载。
+    """
+    p = get_builtin_config_dir() / filename
+    return p if p.exists() else None
+
+
 def get_config_file(filename: str) -> Optional[Path]:
     """获取配置文件的完整路径，不存在则返回 None。"""
     p = get_config_dir() / filename

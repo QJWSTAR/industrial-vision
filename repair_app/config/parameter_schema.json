@@ -1,0 +1,584 @@
+{
+  "schema_version": "3.0.0",
+  "schema_description": "CSAM Repair 全局唯一配置中心 — 所有参数的唯一 Truth Source",
+  "last_updated": "2026-07-15",
+
+  "process_parameters": {
+    "layer_height_mm": {
+      "default": 2.0, "min": 0.1, "max": 20.0, "step": 0.1,
+      "unit": "mm", "group": "path_planning", "ui_key": "layer_height",
+      "label_zh": "层高", "label_en": "Layer Height",
+      "tooltip": "每层喷涂的高度（mm）。值越小表面越精细，但计算量越大。典型值 1-3 mm。",
+      "description": "路径规划中每层沉积的厚度，决定 Z 轴方向分辨率。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "scanning_angle_deg": {
+      "default": -45.0, "min": -360.0, "max": 360.0, "step": 1.0,
+      "unit": "°", "group": "path_planning", "ui_key": "scanning_angle",
+      "label_zh": "扫描角度", "label_en": "Scanning Angle",
+      "tooltip": "扫描方向角度（°）。-45° 和 45° 交叉扫描可提高均匀性。范围 -90° 到 90°。",
+      "description": "扫描线相对于 X 轴的夹角，影响沉积均匀性。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "scanning_step_mm": {
+      "default": 2.0, "min": 0.1, "max": 50.0, "step": 0.1,
+      "unit": "mm", "group": "path_planning", "ui_key": "scanning_step",
+      "label_zh": "扫描步长", "label_en": "Scanning Step",
+      "tooltip": "相邻扫描线间距（mm）。值越小搭接率越高，但计算更慢。典型值 1-3 mm。",
+      "description": "相邻扫描线之间的间距，决定 XY 平面分辨率。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "edge_step_size_mm": {
+      "default": 2.0, "min": 0.1, "max": 50.0, "step": 0.1,
+      "unit": "mm", "group": "path_planning", "ui_key": "edge_step_size",
+      "label_zh": "边缘步长", "label_en": "Edge Step Size",
+      "tooltip": "边缘区域的步长（mm）。控制边缘精度的精细程度。",
+      "description": "边缘区域路径点间距，影响边缘质量。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "tilt_angle_deg": {
+      "default": 60.0, "min": 0.0, "max": 90.0, "step": 1.0,
+      "unit": "°", "group": "path_planning", "ui_key": "tilt_angle",
+      "label_zh": "倾斜角度", "label_en": "Tilt Angle",
+      "tooltip": "喷嘴倾斜角度（°）。0° 为垂直喷涂，大角度适合侧壁修复。",
+      "description": "喷嘴轴线与工件法线的夹角。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "buffer_additive_mm": {
+      "default": 2.0, "min": 0.0, "max": 100.0, "step": 0.1,
+      "unit": "mm", "group": "path_planning", "ui_key": "buffer_additive",
+      "label_zh": "增材缓冲", "label_en": "Buffer Additive",
+      "tooltip": "增材模式下超出边界额外的喷涂距离（mm）。",
+      "description": "增材模式路径外扩距离。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "buffer_repairing_mm": {
+      "default": 0.0, "min": 0.0, "max": 100.0, "step": 0.1,
+      "unit": "mm", "group": "path_planning", "ui_key": "buffer_repairing",
+      "label_zh": "修复缓冲", "label_en": "Buffer Repairing",
+      "tooltip": "修复模式下超出缺陷边界的额外喷涂距离（mm）。",
+      "description": "修复模式路径外扩距离。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "num_layers": {
+      "default": 5, "min": 1, "max": 200, "step": 1,
+      "unit": "层", "group": "path_planning", "ui_key": "",
+      "label_zh": "规划层数", "label_en": "Number of Layers",
+      "tooltip": "喷涂层数。层数越多修复越厚，但计算时间越长。范围 1-200。",
+      "description": "路径规划总层数。由 main_window.py 的 pp_layers 专用 SpinBox 处理，不进入 UI_PARAM_SPECS。",
+      "read_only": false, "validation_rule": "range_int",
+      "material_override": false
+    },
+    "link_free_dist_mm": {
+      "default": 20.0, "min": 0.0, "max": 200.0, "step": 0.1,
+      "unit": "mm", "group": "path_planning", "ui_key": "link_free_dist",
+      "label_zh": "路径过渡距离", "label_en": "Link Free Distance",
+      "tooltip": "两段路径之间的空走距离（mm）。超过此距离抬刀到安全高度。",
+      "description": "空走距离阈值，超过则抬刀。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "obstacle_resolution_mm": {
+      "default": 2.0, "min": 0.1, "max": 50.0, "step": 0.1,
+      "unit": "mm", "group": "path_planning", "ui_key": "obstacle_resolution",
+      "label_zh": "避障精度", "label_en": "Obstacle Resolution",
+      "tooltip": "绕开障碍物时的路径精细程度（mm）。值越小越精细。",
+      "description": "避障路径采样精度。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "depth_compensation": {
+      "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1,
+      "unit": "x", "group": "morphology", "ui_key": "",
+      "label_zh": "深度补偿", "label_en": "Depth Compensation",
+      "tooltip": "深度补偿系数。对预测的沉积深度进行缩放，用于校准模拟与实际的偏差。典型值 0.8-1.2。",
+      "description": "形貌预测深度缩放因子。由 main_window.py 的 depth 专用 SpinBox 处理，不进入 UI_PARAM_SPECS。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "max_morphology_layers": {
+      "default": 5, "min": 1, "max": 20, "step": 1,
+      "unit": "层", "group": "morphology", "ui_key": "",
+      "label_zh": "预测层数", "label_en": "Max Morphology Layers",
+      "tooltip": "形貌预测的层数。层数越多预测越精细但计算时间越长。范围 1-20。",
+      "description": "形貌预测最大层数。由 main_window.py 的 max_layers 专用 SpinBox 处理，不进入 UI_PARAM_SPECS。",
+      "read_only": false, "validation_rule": "range_int",
+      "material_override": false
+    },
+    "particle_velocity_ms": {
+      "default": 500.0, "min": 100.0, "max": 2000.0, "step": 10.0,
+      "unit": "m/s", "group": "cold_spray", "ui_key": "particle_velocity",
+      "label_zh": "粒子速度", "label_en": "Particle Velocity",
+      "tooltip": "颗粒撞击基体的速度（m/s）。必须大于临界速度才能沉积。典型值 300-800 m/s。",
+      "description": "颗粒撞击速度，必须 > critical_velocity 才能沉积。",
+      "read_only": false, "validation_rule": "range_gt:critical_velocity_ms",
+      "material_override": false
+    },
+    "critical_velocity_ms": {
+      "default": 400.0, "min": 100.0, "max": 2000.0, "step": 10.0,
+      "unit": "m/s", "group": "cold_spray", "ui_key": "critical_velocity",
+      "label_zh": "临界速度", "label_en": "Critical Velocity",
+      "tooltip": "颗粒能附着的最小速度（m/s）。由材料数据库自动计算，不可手动修改。",
+      "description": "颗粒沉积的最小临界速度，由材料自动填入。",
+      "read_only": true, "validation_rule": "range",
+      "material_override": true
+    },
+    "nozzle_diameter_mm": {
+      "default": 6.0, "min": 1.0, "max": 20.0, "step": 0.1,
+      "unit": "mm", "group": "cold_spray", "ui_key": "nozzle_diameter",
+      "label_zh": "喷嘴直径", "label_en": "Nozzle Diameter",
+      "tooltip": "喷嘴出口直径（mm）。决定喷斑宽度。典型值 4-8 mm。",
+      "description": "喷嘴出口直径，影响喷斑宽度。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "spray_angle_deg": {
+      "default": 90.0, "min": 0.0, "max": 180.0, "step": 1.0,
+      "unit": "°", "group": "cold_spray", "ui_key": "spray_angle",
+      "label_zh": "喷涂角度", "label_en": "Spray Angle",
+      "tooltip": "喷嘴轴线与表面的夹角（°）。90° 为垂直喷涂。",
+      "description": "喷嘴轴线与工件表面夹角。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "standoff_distance_mm": {
+      "default": 30.0, "min": 5.0, "max": 100.0, "step": 0.5,
+      "unit": "mm", "group": "cold_spray", "ui_key": "standoff_distance",
+      "label_zh": "喷涂距离", "label_en": "Standoff Distance",
+      "tooltip": "喷嘴出口到工件表面的距离（mm）。影响喷斑宽度和沉积效率。典型值 20-40 mm。",
+      "description": "喷嘴到工件距离。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "particle_size_um": {
+      "default": 25.0, "min": 1.0, "max": 200.0, "step": 1.0,
+      "unit": "μm", "group": "cold_spray", "ui_key": "particle_size",
+      "label_zh": "粉末粒径", "label_en": "Particle Size",
+      "tooltip": "粉末颗粒平均直径（μm）。影响沉积效率和涂层致密度。典型值 15-45 μm。",
+      "description": "粉末颗粒平均直径。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "gas_temperature_c": {
+      "default": 800.0, "min": 20.0, "max": 1200.0, "step": 10.0,
+      "unit": "°C", "group": "cold_spray", "ui_key": "gas_temperature",
+      "label_zh": "气体温度", "label_en": "Gas Temperature",
+      "tooltip": "工作气体加热温度（°C）。提高温度可改善沉积效率。典型值 400-800 °C。",
+      "description": "工作气体加热温度。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "gas_pressure_bar": {
+      "default": 40.0, "min": 1.0, "max": 100.0, "step": 0.5,
+      "unit": "bar", "group": "cold_spray", "ui_key": "gas_pressure",
+      "label_zh": "气体压力", "label_en": "Gas Pressure",
+      "tooltip": "工作气体压力（bar）。影响粒子加速。典型值 30-50 bar。",
+      "description": "工作气体压力。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "powder_feed_rate_gmin": {
+      "default": 30.0, "min": 1.0, "max": 200.0, "step": 1.0,
+      "unit": "g/min", "group": "cold_spray", "ui_key": "powder_feed_rate",
+      "label_zh": "送粉速度", "label_en": "Powder Feed Rate",
+      "tooltip": "送粉器送粉速率（g/min）。影响沉积速率。典型值 20-50 g/min。",
+      "description": "送粉速率。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "traversing_speed_mms": {
+      "default": 500.0, "min": 10.0, "max": 2000.0, "step": 10.0,
+      "unit": "mm/s", "group": "cold_spray", "ui_key": "traversing_speed",
+      "label_zh": "移动速度", "label_en": "Traversing Speed",
+      "tooltip": "喷嘴移动速度（mm/s）。影响单道涂层厚度。典型值 100-500 mm/s。",
+      "description": "喷嘴移动速度。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": false
+    },
+    "preheat_temp_c": {
+      "default": 200.0, "min": 20.0, "max": 800.0, "step": 10.0,
+      "unit": "°C", "group": "calibration", "ui_key": "",
+      "label_zh": "预热温度", "label_en": "Preheat Temperature",
+      "tooltip": "基体预热温度（°C）。提高预热温度可改善沉积效率。",
+      "description": "基体预热温度，由 CalibrationDialog 专用 SpinBox 处理，不进入 UI_PARAM_SPECS。",
+      "read_only": false, "validation_rule": "range",
+      "material_override": true
+    }
+  },
+
+  "ui_parameters": {
+    "brush_radius_mm": {
+      "default": 2.0, "min": 0.5, "max": 20.0, "step": 0.5,
+      "unit": "mm", "group": "defect_selector",
+      "label_zh": "笔刷半径", "tooltip": "笔刷半径（仅在区域选择/取消选择模式下生效）",
+      "description": "DefectSelector 笔刷工具半径。"
+    },
+    "robot_tcp_speed_ms": {
+      "default": 0.5, "min": 0.01, "max": 2.0, "step": 0.1,
+      "unit": "m/s", "group": "robot_export",
+      "label_zh": "TCP 速度", "tooltip": "工具中心点(TCP)线速度。典型值 0.1-1.0 m/s。",
+      "description": "机器人 TCP 线速度。"
+    },
+    "robot_tool_frame": {
+      "default": 1, "min": 0, "max": 20, "step": 1,
+      "unit": "", "group": "robot_export",
+      "label_zh": "工具坐标系编号", "tooltip": "对应 KUKA $TOOL 或 ABB toolobject。",
+      "description": "工具坐标系编号。"
+    },
+    "robot_base_frame": {
+      "default": 0, "min": 0, "max": 20, "step": 1,
+      "unit": "", "group": "robot_export",
+      "label_zh": "基坐标系编号", "tooltip": "对应 KUKA $BASE 或 ABB wobj。",
+      "description": "基坐标系编号。"
+    },
+    "coord_translate_range_mm": {
+      "default": 0.0, "min": -10000.0, "max": 10000.0, "step": 0.1,
+      "unit": "mm", "group": "coord_transform",
+      "label_zh": "平移范围", "tooltip": "坐标系平移范围（mm）。",
+      "description": "坐标系变换平移分量范围。"
+    },
+    "coord_rotate_range_deg": {
+      "default": 0.0, "min": -360.0, "max": 360.0, "step": 1.0,
+      "unit": "°", "group": "coord_transform",
+      "label_zh": "旋转范围", "tooltip": "坐标系旋转范围（°）。",
+      "description": "坐标系变换旋转分量范围。"
+    },
+    "coord_scale_range": {
+      "default": 1.0, "min": 0.01, "max": 100.0, "step": 0.1,
+      "unit": "x", "group": "coord_transform",
+      "label_zh": "缩放范围", "tooltip": "坐标系缩放范围。",
+      "description": "坐标系变换缩放分量范围。"
+    },
+    "calib_measured_width_mm": {
+      "default": 0.0, "min": 0.0, "max": 50.0, "step": 0.1,
+      "unit": "mm", "group": "calibration_measure",
+      "label_zh": "实测沉积宽度",
+      "tooltip": "标定向导中单道实测沉积宽度（mm）。",
+      "description": "CalibrationDialog 实测宽度上限。"
+    },
+    "calib_measured_height_mm": {
+      "default": 0.0, "min": 0.0, "max": 10.0, "step": 0.01,
+      "unit": "mm", "group": "calibration_measure",
+      "label_zh": "实测沉积高度",
+      "tooltip": "标定向导中单道实测沉积高度（mm）。",
+      "description": "CalibrationDialog 实测高度上限。"
+    },
+    "calib_measured_efficiency": {
+      "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+      "unit": "", "group": "calibration_measure",
+      "label_zh": "实测沉积效率",
+      "tooltip": "标定向导中单道实测沉积效率（0-1）。",
+      "description": "CalibrationDialog 实测效率上限。"
+    }
+  },
+
+  "export_parameters": {
+    "gcode_feed_rate_mmpmin": {
+      "default": 500.0, "min": 1.0, "max": 10000.0, "step": 1.0,
+      "unit": "mm/min", "label_zh": "进给速度",
+      "tooltip": "G-code 进给速度（mm/min）。",
+      "description": "G-code 默认进给速度。"
+    },
+    "gcode_safe_z_mm": {
+      "default": 10.0, "min": 1.0, "max": 100.0, "step": 0.5,
+      "unit": "mm", "label_zh": "安全高度",
+      "tooltip": "G-code 安全 Z 高度（mm）。",
+      "description": "G-code 抬刀安全高度。"
+    },
+    "gcode_powder_m_code": {
+      "default": 7, "min": 1, "max": 99, "step": 1,
+      "unit": "", "label_zh": "送粉 M 代码",
+      "tooltip": "送粉开启 M 代码。送粉关闭 = 此值 + 2。",
+      "description": "G-code 送粉 M 代码编号。"
+    },
+    "gcode_spray_on_dwell_ms": {
+      "default": 200, "min": 0, "max": 5000, "step": 50,
+      "unit": "ms", "label_zh": "喷枪稳定延时",
+      "tooltip": "喷枪开启后稳定延时（ms）。",
+      "description": "G-code 喷枪开启延时。"
+    },
+    "calibration_width_factor": {
+      "default": 1.1, "min": 0.5, "max": 3.0, "step": 0.1,
+      "unit": "x", "label_zh": "喷斑扩展系数",
+      "tooltip": "理论喷斑宽度 = 喷嘴直径 × 此系数。",
+      "description": "标定向导中喷斑宽度理论值扩展系数。"
+    },
+    "calibration_height_factor": {
+      "default": 0.8, "min": 0.1, "max": 2.0, "step": 0.1,
+      "unit": "x", "label_zh": "高度速度因子",
+      "tooltip": "理论高度 = 粒径/1000 × 此因子。",
+      "description": "标定向导中理论沉积高度速度因子。"
+    },
+    "calibration_correction_min": {
+      "default": 0.1, "min": 0.01, "max": 1.0, "step": 0.01,
+      "unit": "x", "label_zh": "修正系数下限",
+      "tooltip": "修正系数的最小值，防止除零。",
+      "description": "标定向导修正系数下限。"
+    }
+  },
+
+  "network_parameters": {
+    "zmq_default_address": {
+      "value": "tcp://127.0.0.1:5555",
+      "env_var": "CSAM_ZMQ_ADDRESS",
+      "label_zh": "ZMQ 默认地址",
+      "tooltip": "ZMQ 通信默认地址。可通过环境变量 CSAM_ZMQ_ADDRESS 覆盖。",
+      "description": "Bridge REP 端口默认 5555。"
+    },
+    "zmq_progress_address": {
+      "value": "tcp://127.0.0.1:5556",
+      "label_zh": "ZMQ 进度地址",
+      "tooltip": "ZMQ PUB 进度推送地址（REP 在 5555，PUB 在 5556）。",
+      "description": "Bridge PUB 端口默认 5556。"
+    },
+    "bridge_timeout_ms": {
+      "value": 30000, "env_var": "CSAM_BRIDGE_TIMEOUT_MS",
+      "min": 1000, "max": 600000,
+      "unit": "ms", "label_zh": "Bridge 超时",
+      "tooltip": "Bridge 请求超时时间（ms）。复杂算法建议调到 120000。",
+      "description": "ZMQ 请求-应答超时。"
+    },
+    "matlab_loading_timeout_sec": {
+      "value": 180, "min": 30, "max": 600,
+      "unit": "s", "label_zh": "MATLAB 启动超时",
+      "tooltip": "MATLAB 启动等待超时（秒）。",
+      "description": "LoadingDialog 超时阈值。"
+    },
+    "thread_wait_ms": {
+      "value": 5000, "min": 1000, "max": 30000,
+      "unit": "ms", "label_zh": "线程等待超时",
+      "tooltip": "线程优雅退出等待时间（ms）。",
+      "description": "QThread quit()+wait() 超时。"
+    },
+    "thread_terminate_wait_ms": {
+      "value": 2000, "min": 500, "max": 10000,
+      "unit": "ms", "label_zh": "线程终止等待",
+      "tooltip": "线程 terminate 后等待时间（ms）。",
+      "description": "QThread terminate 后等待。"
+    },
+    "bridge_connect_timeout_ms": {
+      "value": 5000, "env_var": "CSAM_BRIDGE_CONNECT_MS",
+      "min": 500, "max": 60000,
+      "unit": "ms", "label_zh": "Bridge 连接超时",
+      "tooltip": "ZMQ 连接建立超时（ms）。",
+      "description": "Bridge connect() 超时。"
+    },
+    "bridge_health_check_timeout_ms": {
+      "value": 3000, "env_var": "CSAM_BRIDGE_HEALTH_MS",
+      "min": 500, "max": 30000,
+      "unit": "ms", "label_zh": "Bridge 健康检查超时",
+      "tooltip": "健康检查请求超时（ms）。",
+      "description": "Bridge 健康检查超时。"
+    },
+    "bridge_heartbeat_interval_ms": {
+      "value": 5000, "env_var": "CSAM_BRIDGE_HEARTBEAT_MS",
+      "min": 1000, "max": 60000,
+      "unit": "ms", "label_zh": "Bridge 心跳间隔",
+      "tooltip": "心跳发送间隔（ms）。",
+      "description": "Bridge 心跳间隔。"
+    },
+    "bridge_heartbeat_miss_threshold": {
+      "value": 3, "env_var": "CSAM_BRIDGE_HEARTBEAT_MISS",
+      "min": 1, "max": 10,
+      "unit": "次", "label_zh": "Bridge 心跳丢失阈值",
+      "tooltip": "心跳连续丢失次数达到此值视为断连。",
+      "description": "Bridge 心跳丢失阈值。"
+    },
+    "bridge_max_retries": {
+      "value": 3, "env_var": "CSAM_BRIDGE_MAX_RETRIES",
+      "min": 0, "max": 10,
+      "unit": "次", "label_zh": "Bridge 最大重试次数",
+      "tooltip": "请求失败后最大重试次数。",
+      "description": "Bridge 最大重试次数。"
+    },
+    "bridge_retry_interval_ms": {
+      "value": 2000, "env_var": "CSAM_BRIDGE_RETRY_MS",
+      "min": 100, "max": 30000,
+      "unit": "ms", "label_zh": "Bridge 重试间隔",
+      "tooltip": "重试之间的等待时间（ms）。",
+      "description": "Bridge 重试间隔。"
+    },
+    "bridge_log_latency_threshold_ms": {
+      "value": 1000, "env_var": "CSAM_BRIDGE_LATENCY_LOG_MS",
+      "min": 100, "max": 60000,
+      "unit": "ms", "label_zh": "Bridge 延迟日志阈值",
+      "tooltip": "请求延迟超过此值时记录警告日志（ms）。",
+      "description": "Bridge 延迟告警阈值。"
+    },
+    "bridge_poll_interval_ms": {
+      "value": 200, "min": 10, "max": 2000,
+      "unit": "ms", "label_zh": "Bridge Poll 间隔",
+      "tooltip": "协作式中断的 poll 间隔（ms）。",
+      "description": "Bridge 内部 poll 间隔。"
+    },
+    "bridge_large_array_warn_threshold": {
+      "value": 1000000, "min": 1000, "max": 100000000,
+      "unit": "元素", "label_zh": "Bridge 大数组告警阈值",
+      "tooltip": "数组元素数超过此值时记录警告日志。",
+      "description": "Bridge 大数组告警阈值。"
+    },
+    "bridge_protocol_version": {
+      "value": "2.1", "label_zh": "Bridge 协议版本",
+      "tooltip": "Bridge 通信协议版本号。",
+      "description": "Bridge 协议版本。"
+    },
+    "bridge_client_version": {
+      "value": "bridge-1.0.0", "label_zh": "Bridge 客户端版本",
+      "tooltip": "Bridge 客户端版本标识。",
+      "description": "Bridge 客户端版本。"
+    },
+    "launcher_startup_timeout_sec": {
+      "value": 120, "min": 30, "max": 600,
+      "unit": "s", "label_zh": "Launcher 启动超时",
+      "tooltip": "MATLAB 启动 + Bridge 就绪最长等待时间（秒）。",
+      "description": "MatlabBridgeLauncher.STARTUP_TIMEOUT_S。"
+    },
+    "launcher_poll_interval_sec": {
+      "value": 1.0, "min": 0.1, "max": 10.0,
+      "unit": "s", "label_zh": "Launcher 轮询间隔",
+      "tooltip": "等待 Bridge 就绪时的轮询间隔（秒）。",
+      "description": "MatlabBridgeLauncher.POLL_INTERVAL_S。"
+    },
+    "launcher_max_restarts": {
+      "value": 3, "min": 0, "max": 10,
+      "unit": "次", "label_zh": "Launcher 最大重启次数",
+      "tooltip": "Bridge 崩溃后最大重启次数。",
+      "description": "MatlabBridgeLauncher.MAX_RESTARTS。"
+    },
+    "launcher_restart_delay_sec": {
+      "value": 2.0, "min": 0.1, "max": 60.0,
+      "unit": "s", "label_zh": "Launcher 重启延时",
+      "tooltip": "重启 Bridge 前的等待时间（秒）。",
+      "description": "MatlabBridgeLauncher.RESTART_DELAY_S。"
+    },
+    "launcher_stop_timeout_sec": {
+      "value": 10, "min": 1, "max": 120,
+      "unit": "s", "label_zh": "Launcher 停止超时",
+      "tooltip": "terminate 后等待 MATLAB 退出的时间（秒）。",
+      "description": "MatlabBridgeLauncher.STOP_TIMEOUT_S。"
+    },
+    "launcher_kill_timeout_sec": {
+      "value": 5, "min": 1, "max": 60,
+      "unit": "s", "label_zh": "Launcher Kill 超时",
+      "tooltip": "kill 后等待进程退出的时间（秒）。",
+      "description": "MatlabBridgeLauncher.KILL_TIMEOUT_S。"
+    }
+  },
+
+  "system_parameters": {
+    "license_warning_days": {
+      "value": 7, "min": 1, "max": 90,
+      "unit": "天", "label_zh": "License 临期告警天数",
+      "tooltip": "License 剩余天数 <= 此值时显示黄色告警。",
+      "description": "License 临期告警阈值。"
+    },
+    "git_commit_timeout_sec": {
+      "value": 3, "min": 1, "max": 30,
+      "unit": "s", "label_zh": "Git 命令超时",
+      "tooltip": "获取 Git commit hash 的子进程超时（秒）。",
+      "description": "G-code 元数据 Git commit 获取超时。"
+    },
+    "convex_hull_min_points": {
+      "value": 3, "min": 3, "max": 10,
+      "unit": "点", "label_zh": "凸包最小点数",
+      "tooltip": "计算凸包边界所需的最少点数。",
+      "description": "DefectSelector 凸包计算最小点数。"
+    },
+    "timer_interval_ms": {
+      "value": 1000, "min": 100, "max": 10000,
+      "unit": "ms", "label_zh": "计时器间隔",
+      "tooltip": "LoadingDialog 倒计时刷新间隔（ms）。",
+      "description": "QTimer 刷新间隔。"
+    },
+    "window_width": {
+      "value": 1700, "min": 1024, "max": 3840,
+      "unit": "px", "label_zh": "窗口宽度",
+      "tooltip": "主窗口默认宽度。",
+      "description": "MainWindow 默认宽度。"
+    },
+    "window_height": {
+      "value": 950, "min": 768, "max": 2160,
+      "unit": "px", "label_zh": "窗口高度",
+      "tooltip": "主窗口默认高度。",
+      "description": "MainWindow 默认高度。"
+    },
+    "left_panel_width": {
+      "value": 340, "min": 200, "max": 600,
+      "unit": "px", "label_zh": "左面板宽度",
+      "tooltip": "左侧参数面板宽度。",
+      "description": "MainWindow 左面板宽度。"
+    },
+    "right_panel_width": {
+      "value": 320, "min": 200, "max": 600,
+      "unit": "px", "label_zh": "右面板宽度",
+      "tooltip": "右侧输出面板宽度。",
+      "description": "MainWindow 右面板宽度。"
+    }
+  },
+
+  "materials": {
+    "STEEL_316L": {
+      "label_zh": "316L 不锈钢",
+      "label_en": "316L Stainless Steel",
+      "overrides": {
+        "critical_velocity_ms": 600.0,
+        "preheat_temp_c": 200.0
+      }
+    },
+    "INCONEL_718": {
+      "label_zh": "Inconel 718",
+      "label_en": "Inconel 718",
+      "overrides": {
+        "critical_velocity_ms": 620.0,
+        "preheat_temp_c": 250.0
+      }
+    },
+    "TITANIUM_TI64": {
+      "label_zh": "Ti-6Al-4V",
+      "label_en": "Ti-6Al-4V",
+      "overrides": {
+        "critical_velocity_ms": 750.0,
+        "preheat_temp_c": 300.0
+      }
+    },
+    "ALUMINUM_6061": {
+      "label_zh": "6061 铝合金",
+      "label_en": "6061 Aluminum",
+      "overrides": {
+        "critical_velocity_ms": 680.0,
+        "preheat_temp_c": 150.0
+      }
+    },
+    "COPPER": {
+      "label_zh": "纯铜",
+      "label_en": "Copper",
+      "overrides": {
+        "critical_velocity_ms": 340.0,
+        "preheat_temp_c": 200.0
+      }
+    },
+    "MATERIAL_UNSPECIFIED": {
+      "label_zh": "未指定",
+      "label_en": "Unspecified",
+      "overrides": {}
+    }
+  },
+
+  "material_list_order": [
+    "MATERIAL_UNSPECIFIED", "STEEL_316L", "INCONEL_718",
+    "TITANIUM_TI64", "ALUMINUM_6061", "COPPER"
+  ],
+
+  "validation_rules": {
+    "range": "min <= value <= max",
+    "range_int": "min <= value <= max 且 value 为整数",
+    "range_gt:critical_velocity_ms": "value > critical_velocity_ms（粒子速度必须大于临界速度才能沉积）"
+  }
+}

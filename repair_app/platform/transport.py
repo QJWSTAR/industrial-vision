@@ -23,10 +23,15 @@ def get_default_zmq_address() -> str:
     """
     if is_windows():
         return "tcp://127.0.0.1:5555"
-    # SECURITY NOTE (V1.0 known issue #SEC-1): IPC socket 在 /tmp 公共目录，未设权限限制。
-    # 单用户工作站部署下为已知可接受风险；多用户主机应在 V1.1 用 os.chmod 限制为 0600
-    # 或改用用户私有运行时目录 (XDG_RUNTIME_DIR)。详见 Release Notes。
-    return "ipc:///tmp/csam_engine"
+    address = "ipc:///tmp/csam_engine"
+    # 限制 IPC socket 权限为 0600（仅所有者可读写）
+    if address.startswith("ipc://"):
+        ipc_path = address[6:]
+        try:
+            os.chmod(ipc_path, 0o600)
+        except (OSError, IOError):
+            pass  # 文件不存在或平台不支持 chmod
+    return address
 
 
 def get_zmq_address_from_env() -> str:

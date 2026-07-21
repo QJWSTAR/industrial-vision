@@ -132,7 +132,9 @@ class TestStressMemory(unittest.TestCase):
         from repair_app.core.path_planner import iter_path_from_cloud
         from repair_app.domain.models import ProcessParams
 
-        for _ in range(10):
+        total_waypoints = 0
+        iterations = 10
+        for _ in range(iterations):
             n = 10000
             rng = np.random.default_rng()
             xyz = rng.uniform(-50, 50, (n, 3)).astype(np.float32)
@@ -140,10 +142,15 @@ class TestStressMemory(unittest.TestCase):
             mask[n // 3 : 2 * n // 3] = True
 
             params = ProcessParams(num_layers=3)
-            list(iter_path_from_cloud(
+            result = list(iter_path_from_cloud(
                 xyz=xyz, defect_mask=mask, n_layers=params.num_layers,
             ))
+            # 验证：每次迭代都有产出
+            assert len(result) > 0, "每次迭代应产生至少一层航点"
+            total_waypoints += sum(len(wp) for wp in result)
             gc.collect()
+        # 验证：10 次迭代累计产出非零
+        assert total_waypoints > 0, f"10 次迭代应累计产出航点，实际 {total_waypoints}"
 
     def test_lod_memory(self):
         """LOD should not blow up memory."""

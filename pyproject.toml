@@ -37,6 +37,7 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "pytest-benchmark>=4.0",
+    "pytest-xdist>=3.0",  # 并行测试
     "flake8>=5.0",
     "bandit>=1.7",
     "pyinstaller>=6.0",
@@ -56,9 +57,49 @@ include = ["repair_app*"]
 version = {attr = "repair_app.__version__"}
 
 [tool.pytest.ini_options]
-testpaths = ["repair_app/tests"]
+testpaths = ["repair_app/tests", "repair_app/bridge/tests"]
 python_files = ["test_*.py"]
 addopts = "-v --tb=short"
+markers = [
+    "smoke: 冒烟测试 — 核心 import 与启动验证（<2s）",
+    "regression: 回归测试 — 关键 bug 修复回归",
+    "unit: 单元测试 — 函数/类级别",
+    "integration: 集成测试 — 模块间协作",
+    "gui: GUI 测试 — QtBot/QTest",
+    "export: 导出测试 — G-code/Robot/Report",
+    "performance: 性能测试 — pytest-benchmark",
+    "stress: 压力测试 — 大数据量/极端参数",
+    "mock: Mock 测试 — MATLAB Mock / License Mock",
+    "slow: 慢测试 — 运行时间 >2s",
+]
+
+[tool.coverage.run]
+source = ["repair_app"]
+omit = [
+    "repair_app/tests/*",
+    "repair_app/bridge/tests/*",
+    "repair_app/communication/repair_protocol_pb2.py",  # 自动生成
+    "*/__pycache__/*",
+]
+branch = true
+parallel = false
+
+[tool.coverage.report]
+show_missing = true
+precision = 2
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass",
+    "except ImportError:",
+    "except Exception:",
+]
+fail_under = 60
+
+[tool.coverage.html]
+directory = "htmlcov"
 
 [tool.bandit]
 exclude_dirs = ["repair_app/tests"]

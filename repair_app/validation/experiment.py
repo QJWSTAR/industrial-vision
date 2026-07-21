@@ -218,8 +218,8 @@ class ExperimentManager:
                     try:
                         record = self.load_experiment(name, exp_id)
                         result.append({"name": name, "id": exp_id, "status": record.status, "created_at": record.created_at})
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        warning(f"加载实验记录失败 ({name}/{exp_id}): {exc}")
         else:
             for d in sorted(os.listdir(exp_dir)):
                 sub = os.path.join(exp_dir, d)

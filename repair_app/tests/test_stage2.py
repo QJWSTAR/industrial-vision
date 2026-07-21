@@ -164,39 +164,78 @@ class TestFeasibilityChecker:
 
 
 # ================================================================
-# 3. DefectSelector 逻辑测试（不依赖 GUI 渲染）
+# 3. DefectSelector 选区操作测试（通过真实组件验证）
 # ================================================================
 class TestDefectSelectorLogic:
-    """测试 DefectSelector 的选取掩码逻辑，跳过 Qt 渲染部分。"""
+    """通过真实 DefectSelector 组件验证选区操作。
 
-    def test_mask_operations(self):
-        mask = np.zeros(100, dtype=bool)
-        mask[:10] = True
-        assert np.sum(mask) == 10
-        mask = ~mask
-        assert np.sum(mask) == 90
-        mask[:] = False
-        assert np.sum(mask) == 0
+    不再测试 numpy 基础操作，而是调用 DefectSelector 的公开 API：
+    set_selection_mask / clear_selection / invert_selection / get_selection_mask
+    """
 
-    def test_rect_selection_logic(self):
-        pts = np.random.default_rng(42).uniform(-5, 5, (200, 2))
-        xmin, xmax, ymin, ymax = -1, 1, -2, 2
-        inside = (pts[:, 0] >= xmin) & (pts[:, 0] <= xmax) & \
-                 (pts[:, 1] >= ymin) & (pts[:, 1] <= ymax)
-        assert 0 < np.sum(inside) < len(pts)
+    def _make_selector_with_points(self, n: int = 100):
+        """构造已加载点云的 DefectSelector（不渲染）。"""
+        from repair_app.ui.defect_selector import DefectSelector
+        # 跳过 QWidget 初始化（避免依赖 QApplication）
+        selector = DefectSelector()
+        rng = np.random.default_rng(42)
+        pts = rng.uniform(-5, 5, (n, 3)).astype(np.float32)
+        selector.set_points(pts)
+        return selector
 
-    def test_brush_radius_logic(self):
-        pts = np.random.default_rng(7).uniform(-5, 5, (100, 2))
-        cx, cy, r = 0.0, 0.0, 1.5
-        dists = np.sqrt((pts[:, 0] - cx)**2 + (pts[:, 1] - cy)**2)
-        in_brush = dists <= r
-        assert 0 < np.sum(in_brush) < len(pts)
+    def test_set_selection_mask(self, qapp):
+        """set_selection_mask 应正确设置掩码。"""
+        selector = self._make_selector_with_points(100)
+        try:
+            mask = np.zeros(100, dtype=bool)
+            mask[:30] = True
+            selector.set_selection_mask(mask)
+            result = selector.get_selection_mask()
+            assert np.sum(result) == 30
+            # 验证返回的是副本（修改不影响内部状态）
+            result[:] = False
+            assert np.sum(selector.get_selection_mask()) == 30
+        finally:
+            selector.deleteLater()
 
-    def test_width_estimation(self):
-        xy = np.random.default_rng(99).uniform(-3, 3, (30, 2))
-        spread = np.ptp(xy, axis=0)
-        max_w = float(np.max(spread))
-        assert max_w > 0
+    def test_clear_selection(self, qapp):
+        """clear_selection 应清空所有选区。"""
+        selector = self._make_selector_with_points(100)
+        try:
+            mask = np.zeros(100, dtype=bool)
+            mask[:50] = True
+            selector.set_selection_mask(mask)
+            assert np.sum(selector.get_selection_mask()) == 50
+            selector.clear_selection()
+            assert not np.any(selector.get_selection_mask())
+        finally:
+            selector.deleteLater()
+
+    def test_invert_selection(self, qapp):
+        """invert_selection 应反转选区。"""
+        selector = self._make_selector_with_points(100)
+        try:
+            mask = np.zeros(100, dtype=bool)
+            mask[:25] = True
+            selector.set_selection_mask(mask)
+            selector.invert_selection()
+            result = selector.get_selection_mask()
+            assert np.sum(result) == 75  # 100 - 25
+        finally:
+            selector.deleteLater()
+
+    def test_get_selected_points(self, qapp):
+        """get_selected_points 应返回选中点坐标。"""
+        selector = self._make_selector_with_points(100)
+        try:
+            mask = np.zeros(100, dtype=bool)
+            mask[:10] = True
+            selector.set_selection_mask(mask)
+            selected = selector.get_selected_points()
+            assert selected.shape == (10, 3)
+            assert np.array_equal(selected, selector._points[:10])
+        finally:
+            selector.deleteLater()
 
 
 # ================================================================

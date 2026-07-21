@@ -41,14 +41,29 @@ if %errorlevel% neq 0 (
 )
 echo.
 
-REM 4. 清理旧构建
-echo [4/5] 清理旧构建...
+REM 4. 生成 License 密钥对（如不存在）
+echo [4/6] 检查 License 密钥对...
+if not exist "config\public_key.pem" (
+    echo 正在生成 RSA 密钥对...
+    python -m repair_app.utils.license_manager keygen
+    if %errorlevel% neq 0 (
+        echo [错误] 密钥对生成失败！
+        pause
+        exit /b 1
+    )
+) else (
+    echo 密钥对已存在，跳过生成。
+)
+echo.
+
+REM 5. 清理旧构建
+echo [5/6] 清理旧构建...
 if exist "build" rmdir /s /q "build"
 if exist "dist" rmdir /s /q "dist"
 echo.
 
-REM 5. 运行 PyInstaller
-echo [5/5] 开始打包（可能需要 3-10 分钟）...
+REM 6. 运行 PyInstaller
+echo [6/6] 开始打包（可能需要 3-10 分钟）...
 echo.
 python -m PyInstaller --clean repair_app.spec
 if %errorlevel% neq 0 (

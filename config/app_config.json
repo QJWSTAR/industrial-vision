@@ -1,0 +1,5 @@
+{
+  "developer_mode": true,
+  "_developer_mode_doc": "开发者模式开关。true=跳过 License 验证直接启动（仅供内部开发/联调/测试）；false=执行完整商业 License 校验。生产发布前必须设为 false。",
+  "_env_override": "环境变量 CSAM_DEVELOPER_MODE 优先级高于此文件（true/false/1/0）。"
+}

@@ -149,8 +149,17 @@ class TestCheckForUpdatesWithMock:
         assert version is None
 
     def test_no_real_network_request(self):
-        """确保 urlopen 被完全 mock, 不会发起真实网络请求。"""
+        """确保 urlopen 被完全 mock，且以正确 URL 调用。"""
         with patch("urllib.request.urlopen") as mock_open:
             mock_open.return_value = _mock_response(200, {"tag_name": "v9.9.9"})
             check_for_updates("1.0.0", update_url="http://example.test")
-            assert mock_open.called
+            # 验证：urlopen 被调用（不只是 called）
+            assert mock_open.called, "urlopen 应被调用"
+            # 验证：以正确的 URL 参数调用
+            call_args = mock_open.call_args
+            assert call_args is not None, "应记录调用参数"
+            url_arg = call_args[0][0] if call_args[0] else call_args[1].get("url", "")
+            # url_arg 可能是 Request 对象或字符串
+            url_str = getattr(url_arg, "full_url", None) or str(url_arg)
+            assert "example.test" in url_str, \
+                f"应以正确 URL 调用，实际: {url_str}"

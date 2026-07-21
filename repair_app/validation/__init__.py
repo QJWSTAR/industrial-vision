@@ -1,47 +1,9 @@
-"""Validation module — scientific validation pipeline.
+"""validation — 算法验证体系
 
-Provides unified interfaces for comparing Python vs MATLAB results,
-managing datasets, running experiments, and generating validation reports.
+不开发新算法，只验证现有 MATLAB 与 Python 算法的一致性。
+
+模块：
+- algorithm_validator: 双引擎执行器（同一输入分别跑 MATLAB / Python）
+- result_comparator: 6 维结果比对（pointlist/velocitylist/Layer/Mesh/Volume/Uniformity）
+- diff_report_generator: 自动生成 Diff Report（误差/耗时/版本）
 """
-
-from repair_app.validation.validator import (
-    ValidationResult,
-    ComparisonMetric,
-    PointCloudValidator,
-    WaypointValidator,
-    MorphologyValidator,
-)
-from repair_app.validation.metrics import (
-    compute_rmse,
-    compute_chamfer_distance,
-    compute_hausdorff_distance,
-    compute_iou_3d,
-    compute_waypoint_deviation,
-)
-from repair_app.validation.dataset import DatasetManager, DatasetMetadata
-from repair_app.validation.experiment import ExperimentManager, ExperimentRecord
-from repair_app.validation.result_manager import ResultManager, ResultSummary
-
-__all__ = [
-    # Validators
-    "ValidationResult",
-    "ComparisonMetric",
-    "PointCloudValidator",
-    "WaypointValidator",
-    "MorphologyValidator",
-    # Metrics
-    "compute_rmse",
-    "compute_chamfer_distance",
-    "compute_hausdorff_distance",
-    "compute_iou_3d",
-    "compute_waypoint_deviation",
-    # Dataset
-    "DatasetManager",
-    "DatasetMetadata",
-    # Experiment
-    "ExperimentManager",
-    "ExperimentRecord",
-    # Result
-    "ResultManager",
-    "ResultSummary",
-]

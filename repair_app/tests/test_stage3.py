@@ -54,11 +54,10 @@ class TestZmqClient:
         import time
         time.sleep(0.5)
         client.close()
-        # 无 zmq 时应该收到 False
-        if client.zmq_available:
-            assert len(received) >= 0  # may not finish in time
-        else:
-            assert len(received) >= 0
+        # pyzmq 不可用时应立即收到 False 回调
+        if not client.zmq_available:
+            assert len(received) > 0, "pyzmq 不可用时应立即收到健康检查回调"
+            assert received[0][0] is False, "无连接时健康检查应返回 False"
 
     def test_request_repair_serialization_error(self):
         """传入无效请求应触发 on_error。"""
@@ -76,7 +75,8 @@ class TestZmqClient:
 
         # 传入 None 作为请求（触发序列化错误）
         client.request_repair(None, lambda r: None, on_error)
-        assert len(errors) >= 0  # 取决于是否有 zmq
+        assert len(errors) > 0, "序列化失败应触发 on_error 回调"
+        assert "序列化失败" in errors[0], f"错误消息应包含'序列化失败'，实际: {errors[0]}"
 
 
 class TestPythonRepairEngineService:
@@ -120,11 +120,9 @@ class TestPythonRepairEngineService:
 class TestCfdLookup:
     def test_parse_fluent_csv_missing_file(self):
         from cfd_to_npz import parse_fluent_csv
-        # 应该优雅处理不存在的文件
-        try:
-            parse_fluent_csv("nonexistent.csv")
-        except (FileNotFoundError, OSError):
-            pass  # 预期行为
+        # 验证：不存在的文件应抛 FileNotFoundError（而非静默通过）
+        with pytest.raises((FileNotFoundError, OSError)):
+            parse_fluent_csv("nonexistent_test_file.csv")
 
     def test_build_lookup_grid(self):
         from cfd_to_npz import build_lookup_grid
@@ -198,38 +196,72 @@ class TestRepairVisualizer:
 
     def test_colormap_exists(self):
         from repair_app.ui.repair_visualizer import _COLORMAP
-        assert _COLORMAP is not None
+        # 验证：colormap 是 matplotlib Colormap 实例（不只是 not None）
+        from matplotlib.colors import Colormap
+        assert isinstance(_COLORMAP, Colormap), "_COLORMAP 应为 matplotlib Colormap"
+        assert _COLORMAP.N > 0, "colormap 应有颜色层级"
 
     def test_data_structure(self):
-        """验证 set_data 的数据结构逻辑。"""
-        pts = np.random.default_rng(5).uniform(-5, 5, (100, 3))
-        mask = np.zeros(100, dtype=bool)
-        mask[:20] = True
-        repair = np.random.default_rng(6).uniform(-2, 2, (50, 3))
-        waypoints = np.array([[0, 0, 3], [1, 0, 3], [2, 0, 3]])
-        layers = [np.random.default_rng(7+i).uniform(-3, 3, (10, 3)) for i in range(3)]
-        # 验证数据结构正确性
-        assert pts.shape == (100, 3)
-        assert np.sum(mask) == 20
-        assert repair.shape == (50, 3)
-        assert waypoints.shape == (3, 3)
-        assert len(layers) == 3
+        """验证 RepairVisualizer.set_data 正确存储数据（调用真实组件）。"""
+        from repair_app.ui.repair_visualizer import RepairVisualizer
+        viz = RepairVisualizer()
+        try:
+            pts = np.random.default_rng(5).uniform(-5, 5, (100, 3))
+            mask = np.zeros(100, dtype=bool)
+            mask[:20] = True
+            repair = np.random.default_rng(6).uniform(-2, 2, (50, 3))
+            waypoints = np.array([[0, 0, 3], [1, 0, 3], [2, 0, 3]])
+            layers = [np.random.default_rng(7+i).uniform(-3, 3, (10, 3)) for i in range(3)]
+            # 调用真实 set_data（验证数据存储逻辑，而非自造数据）
+            viz.set_data(
+                substrate=pts, defect_mask=mask,
+                repair=repair, waypoints=waypoints, layers=layers,
+            )
+            # 验证：数据被正确存储到组件内部
+            assert viz._substrate_pts is not None
+            assert len(viz._substrate_pts) == 100
+            assert np.sum(viz._defect_mask) == 20
+            assert viz._repair_pts is not None
+            assert viz._waypoints is not None
+            assert len(viz._layer_data) == 3
+        finally:
+            viz.deleteLater()
 
 
 # ================================================================
 # 4. 主界面集成（导入验证）
 # ================================================================
 class TestMainWindowS3:
-    def test_main_window_imports_new_modules(self):
-        """验证 MainWindow 正确导入了 S3 模块。"""
+    def test_main_window_imports_new_modules(self, qapp):
+        """验证 MainWindow 正确导入并可实例化。"""
         from repair_app.ui.main_window import MainWindow, _ZMQ_AVAILABLE
         from repair_app.ui.repair_visualizer import RepairVisualizer
-        # 导入不应崩溃
-        assert MainWindow is not None
+        # 验证：MainWindow 是类（callable），且可实例化
+        assert callable(MainWindow), "MainWindow 应为可调用类"
+        # _ZMQ_AVAILABLE 在模块级别可能是 property 对象（类属性访问），
+        # 关键是 MainWindow 实例化不抛异常
+        mw = MainWindow()
+        try:
+            # 验证：MainWindow 实例有核心属性
+            assert hasattr(mw, "_visualizer"), "MainWindow 应有 _visualizer"
+            assert hasattr(mw, "_zmq_client"), "MainWindow 应有 _zmq_client"
+        finally:
+            if mw._zmq_client is not None:
+                mw._zmq_client.close()
+            mw.deleteLater()
 
-    def test_zmq_client_graceful_degradation(self):
-        """验证 ZMQ 不可用时优雅降级。"""
+    def test_zmq_client_graceful_degradation(self, qapp):
+        """验证 ZMQ 客户端 API 完整性（不论 zmq 是否可用）。"""
         from repair_app.communication.zmq_client import ZmqRepairClient
         client = ZmqRepairClient()
-        if not client.zmq_available:
-            assert True  # 不应崩溃
+        try:
+            # 不论 zmq_available 真假，都应暴露完整 API
+            assert hasattr(client, 'is_connected'), "应暴露 is_connected"
+            assert hasattr(client, 'close'), "应暴露 close"
+            assert hasattr(client, 'zmq_available'), "应暴露 zmq_available"
+            assert hasattr(client, 'request_repair'), "应暴露 request_repair"
+            assert hasattr(client, 'check_health'), "应暴露 check_health"
+            # 验证：is_connected 返回 bool（不是 None）
+            assert isinstance(client.is_connected, bool), "is_connected 应为 bool"
+        finally:
+            client.close()

@@ -4,6 +4,7 @@ stl_reader.py — STL 文件读取（二进制/ASCII）
 """
 
 from __future__ import annotations
+import os
 import struct
 import numpy as np
 
@@ -28,22 +29,27 @@ def read_stl_file(filepath: str) -> np.ndarray:
 
 
 def _read_binary(filepath: str, facet_count: int) -> np.ndarray:
-    triangles = np.zeros((facet_count, 12), dtype=np.float32)
+    """二进制 STL 向量化读取（numpy 批量解析，大文件性能优化）。"""
+    dtype = np.dtype([
+        ('normal', '<f4', 3),
+        ('v1', '<f4', 3),
+        ('v2', '<f4', 3),
+        ('v3', '<f4', 3),
+        ('attr', '<u2'),
+    ])
     with open(filepath, "rb") as f:
         f.seek(84)
-        for i in range(facet_count):
-            data = struct.unpack("<12fH", f.read(50))
-            nx, ny, nz = data[0], data[1], data[2]
-            x1, y1, z1 = data[3], data[4], data[5]
-            x2, y2, z2 = data[6], data[7], data[8]
-            x3, y3, z3 = data[9], data[10], data[11]
-            triangles[i] = [x1, y1, z1, x2, y2, z2, x3, y3, z3, nx, ny, nz]
+        data = np.frombuffer(f.read(facet_count * 50), dtype=dtype)
+    # 拼接为 N×12: [x1,y1,z1, x2,y2,z2, x3,y3,z3, nx,ny,nz]
+    triangles = np.column_stack([
+        data['v1'], data['v2'], data['v3'], data['normal'],
+    ]).astype(np.float32)
     return triangles
 
 
 def _read_ascii(filepath: str) -> np.ndarray:
     triangles = []
-    with open(filepath, "r") as f:
+    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
 
     i = 0
@@ -67,6 +73,3 @@ def _read_ascii(filepath: str) -> np.ndarray:
 def _parse_vertex(line: str):
     parts = line.strip().split()
     return [float(parts[1]), float(parts[2]), float(parts[3])]
-
-
-import os

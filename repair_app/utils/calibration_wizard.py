@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from repair_app.config import schema_loader as _schema
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -24,18 +26,23 @@ except ImportError:
 CALIBRATION_DB = "calibration_db.json"
 
 
+# 默认值从 schema process_parameters 读取（消除双源冲突）
+def _pp_default(key: str) -> float:
+    return float(_schema.get_process_default(key))
+
+
 @dataclass
 class CalibrationRecord:
-    """单次标定记录。"""
+    """单次标定记录。所有默认值从 parameter_schema.json 派生。"""
     timestamp: str = ""
     material: str = ""
-    nozzle_diameter_mm: float = 6.0
-    standoff_distance_mm: float = 30.0
-    spray_angle_deg: float = 90.0
-    particle_velocity_ms: float = 500.0
-    traversing_speed_mms: float = 500.0
-    particle_size_um: float = 25.0
-    preheat_temp_c: float = 200.0
+    nozzle_diameter_mm: float = field(default_factory=lambda: _pp_default("nozzle_diameter_mm"))
+    standoff_distance_mm: float = field(default_factory=lambda: _pp_default("standoff_distance_mm"))
+    spray_angle_deg: float = field(default_factory=lambda: _pp_default("spray_angle_deg"))
+    particle_velocity_ms: float = field(default_factory=lambda: _pp_default("particle_velocity_ms"))
+    traversing_speed_mms: float = field(default_factory=lambda: _pp_default("traversing_speed_mms"))
+    particle_size_um: float = field(default_factory=lambda: _pp_default("particle_size_um"))
+    preheat_temp_c: float = field(default_factory=lambda: _pp_default("preheat_temp_c"))
 
     # 测量结果
     measured_width_mm: float = 0.0
@@ -59,6 +66,8 @@ class CalibrationWizard:
     3. 测量沉积宽度、高度
     4. 自动计算修正系数
     5. 保存到 calibration_db.json
+
+    所有默认参数从 parameter_schema.json 读取，禁止硬编码。
     """
 
     def __init__(self) -> None:
@@ -70,14 +79,29 @@ class CalibrationWizard:
     def start_calibration(
         self,
         material: str = "STEEL_316L",
-        nozzle_diameter_mm: float = 6.0,
-        standoff_distance_mm: float = 30.0,
-        spray_angle_deg: float = 90.0,
-        particle_velocity_ms: float = 500.0,
-        traversing_speed_mms: float = 500.0,
-        particle_size_um: float = 25.0,
-        preheat_temp_c: float = 200.0,
+        nozzle_diameter_mm: Optional[float] = None,
+        standoff_distance_mm: Optional[float] = None,
+        spray_angle_deg: Optional[float] = None,
+        particle_velocity_ms: Optional[float] = None,
+        traversing_speed_mms: Optional[float] = None,
+        particle_size_um: Optional[float] = None,
+        preheat_temp_c: Optional[float] = None,
     ) -> CalibrationRecord:
+        # 未传入参数时从 schema 读取默认值
+        if nozzle_diameter_mm is None:
+            nozzle_diameter_mm = _pp_default("nozzle_diameter_mm")
+        if standoff_distance_mm is None:
+            standoff_distance_mm = _pp_default("standoff_distance_mm")
+        if spray_angle_deg is None:
+            spray_angle_deg = _pp_default("spray_angle_deg")
+        if particle_velocity_ms is None:
+            particle_velocity_ms = _pp_default("particle_velocity_ms")
+        if traversing_speed_mms is None:
+            traversing_speed_mms = _pp_default("traversing_speed_mms")
+        if particle_size_um is None:
+            particle_size_um = _pp_default("particle_size_um")
+        if preheat_temp_c is None:
+            preheat_temp_c = _pp_default("preheat_temp_c")
         self._current = CalibrationRecord(
             timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
             material=material,
@@ -106,13 +130,17 @@ class CalibrationWizard:
         self._current.measured_height_mm = height_mm
 
         # 理论值估计（简化模型）
+        # 扩展系数 / 速度因子 / 修正下限全部从 schema export_parameters 读取
+        _wf = float(_schema.get_export_value("calibration_width_factor"))
+        _hf = float(_schema.get_export_value("calibration_height_factor"))
+        _cmin = float(_schema.get_export_value("calibration_correction_min"))
         # 喷斑宽度 ≈ 喷嘴直径 * 扩展系数
-        theoretical_width = self._current.nozzle_diameter_mm * 1.1
-        self._current.width_correction = max(0.1, width_mm / max(theoretical_width, 1e-6))
+        theoretical_width = self._current.nozzle_diameter_mm * _wf
+        self._current.width_correction = max(_cmin, width_mm / max(theoretical_width, 1e-6))
 
-        # 理论高度 ≈ 粒径 * 速度因子
-        theoretical_height = self._current.particle_size_um / 1000.0 * 0.8
-        self._current.height_correction = max(0.1, height_mm / max(theoretical_height, 1e-6))
+        # 理论高度 ≈ 粒径/1000 * 速度因子
+        theoretical_height = self._current.particle_size_um / 1000.0 * _hf
+        self._current.height_correction = max(_cmin, height_mm / max(theoretical_height, 1e-6))
 
         # 沉积效率
         if deposition_efficiency is not None:
@@ -121,7 +149,7 @@ class CalibrationWizard:
             db = get_material_db()
             mat = db.get(self._current.material)
             theoretical_eff = mat.max_deposition_efficiency
-            self._current.efficiency_correction = max(0.1, deposition_efficiency / max(theoretical_eff, 1e-6))
+            self._current.efficiency_correction = max(_cmin, deposition_efficiency / max(theoretical_eff, 1e-6))
 
         self._current.notes = notes
 
@@ -146,7 +174,7 @@ class CalibrationWizard:
         if not path or not os.path.exists(path):
             return
         try:
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             for item in data.get("records", []):
                 self._records.append(CalibrationRecord(**item))
@@ -167,7 +195,7 @@ class CalibrationWizard:
                 for r in self._records
             ],
         }
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
     # ===== 查询 =====

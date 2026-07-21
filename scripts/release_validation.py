@@ -42,7 +42,7 @@ def _record(name: str, passed: bool, detail: str = "", elapsed_ms: float = 0.0):
 # =====================================================================
 def validate_stl_import():
     print("\n=== 1. STL 导入 ===")
-    stl_path = str(Path(__file__).resolve().parents[1] / "路径规划" / "substrate.stl")
+    stl_path = str(Path(__file__).resolve().parents[1] / "profile_prediction" / "substrate.stl")
     t0 = time.time()
     try:
         tris = read_stl_file(stl_path)

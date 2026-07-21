@@ -255,16 +255,37 @@ class TestBinaryFormat:
 # ================================================================
 
 class TestUIStructure:
-    def test_main_window_import(self) -> None:
+    def test_main_window_import(self, qapp) -> None:
+        """验证 MainWindow 可导入且可实例化（不只是 callable）。"""
         import repair_app.ui.main_window
         assert hasattr(repair_app.ui.main_window, "MainWindow")
         assert callable(repair_app.ui.main_window.MainWindow)
+        # 进一步验证：实例化不抛异常
+        mw = repair_app.ui.main_window.MainWindow()
+        try:
+            assert mw is not None
+            # 验证核心组件存在
+            assert hasattr(mw, "_visualizer") or hasattr(mw, "_defect_selector"), \
+                "MainWindow 应有可视化或选区组件"
+        finally:
+            if hasattr(mw, "_zmq_client") and mw._zmq_client is not None:
+                mw._zmq_client.close()
+            mw.deleteLater()
 
     def test_defect_sample_import(self) -> None:
+        """验证 defect_sample 函数可调用且返回有效数据。"""
         import repair_app.core.defect_sample as defect_sample
         assert callable(defect_sample.generate_defect_sample)
         assert callable(defect_sample.generate_mock_particle_distribution)
         assert callable(defect_sample.generate_mock_repair_result)
+        # 进一步验证：调用 generate_defect_sample 返回真实数据
+        result = defect_sample.generate_defect_sample(n_points=50)
+        assert result is not None
+        # 结果应有形状/长度属性
+        if hasattr(result, "shape"):
+            assert result.shape[0] > 0, "应返回非空数据"
+        elif hasattr(result, "__len__"):
+            assert len(result) > 0, "应返回非空数据"
 
 
 if __name__ == "__main__":

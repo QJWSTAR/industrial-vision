@@ -7,13 +7,14 @@ from __future__ import annotations
 import numpy as np
 from typing import Optional
 from repair_app.utils.logger_config import error as log_error
+from repair_app.config import schema_loader as _schema
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox,
     QLabel, QToolBar, QSizePolicy, QDoubleSpinBox,
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QEvent
-from PySide6.QtGui import QPainterPath, QPolygonF, QMouseEvent
+from PySide6.QtGui import QPainterPath, QPolygonF, QMouseEvent, QCursor
 
 import matplotlib
 matplotlib.use("QtAgg")
@@ -46,7 +47,8 @@ class DefectSelector(QWidget):
 
         self._rubber_rect: Optional[tuple[float, float, float, float]] = None
         self._lasso_verts: list[tuple[float, float]] = []
-        self._brush_radius: float = 2.0
+        # 笔刷半径默认值从 schema ui_parameters.brush_radius_mm 读取
+        self._brush_radius: float = float(_schema.get_ui_default("brush_radius_mm"))
         self._is_dragging: bool = False
         self._drag_start: Optional[tuple[float, float]] = None
         self._selecting: bool = False
@@ -93,16 +95,18 @@ class DefectSelector(QWidget):
         for key, label in self.MODES.items():
             self._cb_mode.addItem(label, key)
         self._cb_mode.setEnabled(False)
+        self._cb_mode.currentIndexChanged.connect(self._on_submode_changed)
         toolbar.addWidget(self._cb_mode)
 
         toolbar.addWidget(QLabel("笔刷:"))
         self._sp_brush = QDoubleSpinBox()
-        self._sp_brush.setRange(0.5, 20.0)
-        self._sp_brush.setValue(2.0)
-        self._sp_brush.setSingleStep(0.5)
+        _br = _schema.get_ui_param("brush_radius_mm")
+        self._sp_brush.setRange(_br["min"], _br["max"])
+        self._sp_brush.setValue(_br["default"])
+        self._sp_brush.setSingleStep(_br["step"])
         self._sp_brush.setSuffix(" mm")
         self._sp_brush.setFixedWidth(80)
-        self._sp_brush.setToolTip("笔刷半径（仅在区域选择/取消选择模式下生效）")
+        self._sp_brush.setToolTip(_br["tooltip"])
         self._sp_brush.valueChanged.connect(self._on_brush_radius_changed)
         toolbar.addWidget(self._sp_brush)
 
@@ -111,9 +115,20 @@ class DefectSelector(QWidget):
 
         layout.addLayout(toolbar)
 
+        # MF-1: 当前模式提示横幅（醒目显示导航/选取状态）
+        self._lb_mode_banner = QLabel("🧭 当前：导航模式 — 可用鼠标旋转/缩放 3D 视图，无法框选缺陷")
+        self._lb_mode_banner.setWordWrap(True)
+        self._lb_mode_banner.setStyleSheet(
+            "background:#1E3A5F; color:#DBEAFE; padding:6px 10px; "
+            "font-size:12px; font-weight:600; border-left:3px solid #3B82F6;"
+        )
+        layout.addWidget(self._lb_mode_banner)
+
         self._fig = Figure(figsize=(6, 5), dpi=100)
         self._canvas = FigureCanvas(self._fig)
         self._canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # MF-1: 默认导航模式光标（手掌）
+        self._canvas.setCursor(QCursor(Qt.OpenHandCursor))
         layout.addWidget(self._canvas)
 
         self._ax = self._fig.add_subplot(111, projection="3d")
@@ -201,22 +216,16 @@ class DefectSelector(QWidget):
         return True
 
     # ========== 坐标转换 ==========
-    def _screen_to_data(self, sx: int, sy: int):
-        """屏幕像素坐标 → 数据坐标（使用 matplotlib transData 变换）。"""
+    def _screen_to_data(self, sx: float, sy: float) -> tuple[float, float]:
+        """将 Qt 屏幕坐标转换为 matplotlib 数据坐标。"""
         try:
-            fig_w, fig_h = self._fig.get_size_inches() * self._fig.dpi
-
-            if fig_w < 1 or fig_h < 1:
-                return None, None
-
-            display_coords = self._fig.transFigure.inverted().transform((sx / fig_w, sy / fig_h))
-            data_coords = self._ax.transData.inverted().transform(display_coords)
-
-            return data_coords[0], data_coords[1]
-        except Exception as e:
-            from repair_app.utils.logger_config import warning as _log_warning
-            _log_warning(f"坐标转换失败: {e}")
-            return None, None
+            # Qt 原点左上 → matplotlib 原点左下，需要 y 翻转
+            display_y = self._canvas.height() - sy
+            # transData.inverted() 期望显示坐标（像素）
+            data_coords = self._ax.transData.inverted().transform((sx, display_y))
+            return float(data_coords[0]), float(data_coords[1])
+        except Exception:
+            return 0.0, 0.0
 
     # ========== 导航/选取切换 ==========
     def _on_nav_toggled(self, checked: bool) -> None:
@@ -225,14 +234,46 @@ class DefectSelector(QWidget):
             self._selecting = False
             self._cb_mode.setEnabled(False)
             self._sp_brush.setEnabled(False)
+            # MF-1: 更新模式横幅 + 鼠标光标
+            self._lb_mode_banner.setText(
+                "🧭 当前：导航模式 — 可用鼠标旋转/缩放 3D 视图，无法框选缺陷"
+            )
+            self._lb_mode_banner.setStyleSheet(
+                "background:#1E3A5F; color:#DBEAFE; padding:6px 10px; "
+                "font-size:12px; font-weight:600; border-left:3px solid #3B82F6;"
+            )
+            self._canvas.setCursor(QCursor(Qt.OpenHandCursor))
         else:
             self._btn_nav.setText("✂️ 选取模式（框选缺陷）")
             self._selecting = True
             self._cb_mode.setEnabled(True)
             self._sp_brush.setEnabled(self._mode in ("brush", "erase"))
+            # MF-1: 更新模式横幅 + 鼠标光标
+            mode_name = self.MODES.get(self._mode, "框选")
+            self._lb_mode_banner.setText(
+                f"✂️ 当前：选取模式（{mode_name}）— 在 3D 视图中按住鼠标拖动以选择缺陷区域"
+            )
+            self._lb_mode_banner.setStyleSheet(
+                "background:#3B2F1E; color:#FEF3C7; padding:6px 10px; "
+                "font-size:12px; font-weight:600; border-left:3px solid #F59E0B;"
+            )
+            self._canvas.setCursor(QCursor(Qt.CrossCursor))
 
     def _on_brush_radius_changed(self, value: float) -> None:
         self._brush_radius = value
+
+    def _on_submode_changed(self, idx: int) -> None:
+        """MF-1: 选取子模式切换时更新 self._mode 和模式横幅。"""
+        key = self._cb_mode.itemData(idx)
+        if key:
+            self._mode = key
+            self._sp_brush.setEnabled(self._mode in ("brush", "erase"))
+            # 更新模式横幅
+            if not self._btn_nav.isChecked():
+                mode_name = self.MODES.get(self._mode, "框选")
+                self._lb_mode_banner.setText(
+                    f"✂️ 当前：选取模式（{mode_name}）— 在 3D 视图中按住鼠标拖动以选择缺陷区域"
+                )
 
     # ========== 选取逻辑 ==========
     def _apply_rect_select(self) -> None:
@@ -321,9 +362,10 @@ class DefectSelector(QWidget):
         self._mask_history.clear()
         self._update_info()
         self._redraw()
-        # 自动切换到选区模式，方便用户开始选择
+        # 加载点云后自动切换到选取模式，避免用户在导航模式下点击无反应
         if self._btn_nav.isChecked():
             self._btn_nav.setChecked(False)
+            self._on_nav_toggled(False)
 
     def get_selected_points(self) -> np.ndarray:
         if self._points is None or not np.any(self._mask):
@@ -332,6 +374,35 @@ class DefectSelector(QWidget):
 
     def get_selection_mask(self) -> np.ndarray:
         return self._mask.copy()
+
+    def set_selection_mask(self, mask: np.ndarray) -> None:
+        """设置选区掩码（供 UndoStack 调用）。"""
+        if self._points is not None and mask is not None:
+            if mask.shape == self._mask.shape:
+                self._mask = mask.copy()
+                self._mask_history.append(self._mask.copy())
+                self._redraw()
+                self._update_info()
+
+    def clear_selection(self) -> None:
+        """清除全部选区。"""
+        if self._points is not None:
+            self._mask[:] = False
+            self._mask_history.append(self._mask.copy())
+            if hasattr(self, "_btn_undo"):
+                self._btn_undo.setEnabled(len(self._mask_history) > 0)
+            self._redraw()
+            self._update_info()
+
+    def invert_selection(self) -> None:
+        """反选（已选 ↔ 未选）。"""
+        if self._points is not None:
+            self._mask = ~self._mask
+            self._mask_history.append(self._mask.copy())
+            if hasattr(self, "_btn_undo"):
+                self._btn_undo.setEnabled(len(self._mask_history) > 0)
+            self._redraw()
+            self._update_info()
 
     def set_mode(self, mode: str) -> None:
         idx = self._cb_mode.findData(mode)
@@ -344,7 +415,8 @@ class DefectSelector(QWidget):
             return
         total = len(self._points)
         sel = int(np.sum(self._mask))
-        self._lb_info.setText(f"选中: {sel} / {total} 点")
+        mode_tag = "导航" if self._btn_nav.isChecked() else self.MODES.get(self._mode, "选取")
+        self._lb_info.setText(f"[{mode_tag}] 选中: {sel} / {total} 点")
 
     # ========== 渲染 ==========
     def _redraw(self) -> None:
@@ -368,8 +440,9 @@ class DefectSelector(QWidget):
                 sel[:, 0], sel[:, 1], sel[:, 2],
                 s=8, c="red", alpha=0.8, label="缺陷区域（已选）"
             )
-            # 绘制选中区域边界
-            if len(sel) >= 3:
+            # 绘制选中区域边界（凸包最小点数从 schema 读取）
+            _ch_min = int(_schema.get_system_value("convex_hull_min_points"))
+            if len(sel) >= _ch_min:
                 try:
                     from scipy.spatial import ConvexHull
                     xy_sel = sel[:, :2]

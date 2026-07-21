@@ -1,6 +1,6 @@
 # CSAM Repair — 冷喷涂增材制造缺陷修复软件
 
-**版本**：1.0.0 (Release Candidate) | **协议**：v2.1 (ZeroMQ + Protobuf) | **MATLAB**：R2025b
+**版本**：1.0.0 (Stable Release) | **协议**：v2.1 (ZeroMQ + Protobuf) | **MATLAB**：R2025b
 
 ## 这是什么
 
@@ -14,7 +14,7 @@ CSAM Repair 是一款工业级桌面软件，用于冷喷涂增材制造（Cold 
 - **形貌预测**：调用 MATLAB `run_profile_prediction.m` 预测沉积形貌
 - **原生渲染**：Python GUI 直接渲染 MATLAB 结果（沉积网格 / 逐层轮廓 / 粒子分布 / 均匀性仪表盘）
 - **导出结果**：G-code（.nc 刀具路径）+ PDF 修复报告
-- **自动降级**：MATLAB 不可用时自动降级到 Python 启发式算法
+- **MATLAB 自动启动**：软件自动以 `-nodesktop -nosplash -r` 模式启动 MATLAB Bridge，用户无需手动操作
 
 ## 5 分钟快速开始
 
@@ -42,16 +42,11 @@ pip install -r requirements.txt
 python run_app.py
 ```
 
-### 3.（可选）启动 MATLAB 算法引擎
+### 3. MATLAB 自动启动（无需手动操作）
 
-```matlab
-% 在 MATLAB R2025b 中执行
-cd('D:\work\demo\industrial-vision')
-pyenv('Version', 'D:\work\demo\industrial-vision\venv\Scripts\python.exe')
-matlab_bridge_server
-```
+软件启动后会自动以 `-nodesktop -nosplash -r` 模式拉起 MATLAB Bridge 服务（监听 `tcp://127.0.0.1:5555`）。用户无需手动打开 MATLAB 或运行任何脚本。
 
-> 不启动 MATLAB 也能运行 — 软件会自动降级到 Python 启发式算法。
+> 如果 MATLAB 未安装，软件会提示功能不可用。生产环境必须安装 MATLAB R2024b+。
 
 ### 4. 完成一次完整演示
 
@@ -61,7 +56,7 @@ matlab_bridge_server
 4. 切换到 **"02 形貌预测"** → 点击 **"执行形貌预测"**
 5. 点击 **"导出 G-code"** 和 **"导出 PDF 报告"**
 
-> 详细步骤请参阅 [docs/01_快速开始.md](docs/01_快速开始.md)
+> 详细步骤请参阅 [快速开始](docs/用户手册/快速开始.md)
 
 ## 项目结构
 
@@ -92,36 +87,28 @@ industrial-vision/
 │   ├── repository/                 # 文件 I/O + 材料数据
 │   ├── platform/                   # 平台抽象（ZMQ 传输、CJK 字体）
 │   ├── communication/              # 旧版通信层（已弃用）
-│   ├── tests/                      # 单元测试（15 个文件，276 个测试）
+│   ├── tests/                      # 单元测试（15 个文件，402 个测试）
 │   ├── tools/                      # 性能分析工具
 │   └── utils/                      # 配置、日志、许可证、崩溃处理
 │
-├── 路径规划/                        # MATLAB 形貌预测算法（12 个 .m 文件）
-├── 形貌预测/                        # MATLAB 路径规划算法（6 个 .m 文件）
-├── morphology_prediction/          # CFD 数据（pointlist / velocitylist）
+├── path_planning/                  # 路径规划算法（6 个 .m 文件）
+├── profile_prediction/             # 形貌预测算法（12 个 .m 文件）
 ├── config/                         # 标定数据库 + 许可证
 ├── docs/                           # 完整文档（见下方导航）
 ├── scripts/                        # 验证脚本
 └── .github/                        # CI/CD + Issue 模板
 ```
 
-> **注意**：`路径规划/` 和 `形貌预测/` 两个目录名与实际内容互换（历史命名原因）。`路径规划/` 存放形貌预测算法，`形貌预测/` 存放路径规划算法。详见 [docs/04_MATLAB算法说明.md](docs/04_MATLAB算法说明.md)。
+## MATLAB 集成
 
-## 如何启动 MATLAB
+软件启动时自动以 `-nodesktop -nosplash -r` 模式拉起 MATLAB Bridge 服务：
 
-```matlab
-% 1. 打开 MATLAB R2025b
-% 2. 配置 Python 环境
-pyenv('Version', '<项目路径>/venv/Scripts/python.exe')
+- 自动检测 MATLAB 安装路径（R2025b 优先，向下兼容 R2024b+）
+- 自动启动 `matlab_bridge_server.m`，监听 `tcp://127.0.0.1:5555`
+- 自动崩溃恢复（看门狗 3 秒轮询，最大 3 次自动重启）
+- 自动清理（退出时三阶段 terminate → kill → taskkill）
 
-% 3. 切换到项目根目录
-cd('<项目路径>')
-
-% 4. 启动 Bridge 服务
-matlab_bridge_server
-```
-
-MATLAB 会共享引擎会话（名称 `matlab_bridge`）并监听 `tcp://127.0.0.1:5555`。命令窗口会阻塞 — 这是正常的。
+**用户无需手动打开 MATLAB 或运行任何脚本。** 详细说明请参阅 [算法说明](docs/MATLAB集成/算法说明.md)。
 
 ## 如何启动 Python
 
@@ -146,7 +133,7 @@ csam-repair
 | `CSAM_LOG_LEVEL` | 日志级别 | `INFO` |
 | `CSAM_HMAC_SECRET` | 许可证 HMAC 密钥（生产必须设置） | 开发回退密钥 |
 
-> 完整环境变量列表请参阅 [docs/02_安装部署.md](docs/02_安装部署.md)
+> 完整环境变量列表请参阅 [安装部署](docs/用户手册/安装部署.md)
 
 ## 打包
 
@@ -162,7 +149,7 @@ bash build_macos.sh
 ```
 输出：`dist/CSAM_Repair.app`
 
-> Linux 仅支持从源码运行，详见 [docs/02_安装部署.md](docs/02_安装部署.md)
+> Linux 仅支持从源码运行，详见 [安装部署](docs/用户手册/安装部署.md)
 
 ## 开发
 
@@ -170,7 +157,7 @@ bash build_macos.sh
 # 安装开发依赖
 pip install -e ".[dev]"
 
-# 运行全部测试（276 个）
+# 运行全部测试（402 个）
 pytest repair_app/tests/ repair_app/bridge/tests/ -v
 
 # 端到端验证（27 项）
@@ -181,33 +168,51 @@ flake8 repair_app/ --count --max-complexity=15
 bandit -r repair_app/ -x repair_app/tests/ -ll
 ```
 
-> 详细开发指南请参阅 [docs/07_开发指南.md](docs/07_开发指南.md)
+> 详细开发指南请参阅 [开发指南](docs/开发文档/开发指南.md)
 
 ## 文档导航
 
-| 编号 | 文档 | 适合读者 |
+完整文档索引请参阅 [DOCUMENT_INDEX.md](DOCUMENT_INDEX.md)。
+
+| 分类 | 文档 | 适合读者 |
 |------|------|---------|
-| 01 | [快速开始](docs/01_快速开始.md) | 所有人 |
-| 02 | [安装部署](docs/02_安装部署.md) | 用户、运维 |
-| 03 | [用户使用手册](docs/03_用户使用手册.md) | 操作员、工程师 |
-| 04 | [MATLAB 算法说明](docs/04_MATLAB算法说明.md) | 算法工程师 |
-| 05 | [软件架构](docs/05_软件架构.md) | 架构师 |
-| 06 | [通信协议](docs/06_通信协议.md) | 开发者、架构师 |
-| 07 | [开发指南](docs/07_开发指南.md) | 开发者 |
-| 08 | [API 接口](docs/08_API接口.md) | 开发者 |
-| 09 | [测试验证](docs/09_测试验证.md) | QA、发布工程师 |
-| 10 | [FAQ](docs/10_FAQ.md) | 所有人 |
-| 11 | [故障排查](docs/11_故障排查.md) | 操作员、运维 |
-| — | [CHANGELOG](docs/CHANGELOG.md) | 所有人 |
-| — | [RELEASE_NOTES](docs/RELEASE_NOTES.md) | 所有人 |
+| 用户手册 | [快速开始](docs/用户手册/快速开始.md) | 所有人 |
+| 用户手册 | [安装部署](docs/用户手册/安装部署.md) | 用户、运维 |
+| 用户手册 | [使用手册](docs/用户手册/使用手册.md) | 操作员、工程师 |
+| 用户手册 | [软件工程化功能](docs/用户手册/软件工程化功能.md) | 操作员、工程师 |
+| MATLAB 集成 | [算法说明](docs/MATLAB集成/算法说明.md) | 算法工程师 |
+| MATLAB 集成 | [算法架构](docs/MATLAB集成/算法架构.md) | 算法工程师、架构师 |
+| MATLAB 集成 | [生命周期管理](docs/MATLAB集成/生命周期管理.md) | 运维、架构师 |
+| MATLAB 集成 | [Pipeline 设计](docs/MATLAB集成/Pipeline设计.md) | 算法工程师 |
+| MATLAB 集成 | [Bridge 稳定性审计](docs/MATLAB集成/Bridge稳定性审计.md) | 架构师 |
+| MATLAB 集成 | [算法集成报告](docs/MATLAB集成/算法集成报告.md) | 架构师 |
+| MATLAB 集成 | [算法验证体系](docs/MATLAB集成/算法验证体系.md) | QA、算法工程师 |
+| 架构设计 | [软件架构](docs/架构设计/软件架构.md) | 架构师 |
+| 架构设计 | [UX 重设计报告](docs/架构设计/UX重设计报告.md) | 产品、设计 |
+| 架构设计 | [Windows 界面优化](docs/架构设计/Windows界面优化.md) | 前端开发 |
+| 架构设计 | [文档代码一致性报告](docs/架构设计/文档代码一致性报告.md) | 架构师 |
+| 架构设计 | [文档重构报告](docs/架构设计/文档重构报告.md) | 架构师 |
+| 开发文档 | [开发指南](docs/开发文档/开发指南.md) | 开发者 |
+| 开发文档 | [贡献指南](docs/开发文档/贡献指南.md) | 开发者 |
+| 开发文档 | [计算流程设计](docs/开发文档/计算流程设计.md) | 开发者 |
+| 开发文档 | [Pipeline 中间文件消除](docs/开发文档/Pipeline中间文件消除.md) | 开发者 |
+| 开发文档 | [实时可视化说明](docs/开发文档/实时可视化说明.md) | 开发者 |
+| 开发文档 | [可视化集成验证](docs/开发文档/可视化集成验证.md) | 开发者、QA |
+| API | [通信协议](docs/API/通信协议.md) | 开发者、架构师 |
+| API | [API 接口](docs/API/API接口.md) | 开发者 |
+| 调试指南 | [测试验证](docs/调试指南/测试验证.md) | QA、发布工程师 |
+| 调试指南 | [故障排查](docs/调试指南/故障排查.md) | 操作员、运维 |
+| FAQ | [常见问题](docs/FAQ/常见问题.md) | 所有人 |
+| 发布说明 | [发布说明](docs/发布说明/发布说明.md) | 所有人 |
+| 更新日志 | [更新日志](docs/更新日志/更新日志.md) | 所有人 |
 | — | [archive/](docs/archive/) | 历史参考 |
 
 ## 许可证
 
 MIT License。详见 [LICENSE](LICENSE)。
 
-应用在无许可证文件的情况下即可启动（会记录警告）。要启用完整许可证验证，将 `license.key` 和 `public_key.pem` 放置在 `config/` 目录中。
+软件使用 License 验证（HMAC + RSA 公钥 + 机器码绑定）。生产环境必须将 `license.key` 放置在 `dist/config/` 目录中。`public_key.pem` 从打包内置只读目录（`_MEIPASS`）加载，防止替换攻击。
 
 ## 贡献
 
-欢迎提交 Pull Request。请参阅 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [docs/07_开发指南.md](docs/07_开发指南.md)。
+欢迎提交 Pull Request。请参阅 [贡献指南](docs/开发文档/贡献指南.md) 和 [开发指南](docs/开发文档/开发指南.md)。
