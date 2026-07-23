@@ -29,6 +29,32 @@ import numpy as np
 import pytest
 
 
+def _make_future(result_or_exception):
+    """创建一个模拟 FutureResult 对象，用于 mock MATLAB background=True 调用。
+
+    Args:
+        result_or_exception:
+            - 如果是 Exception 实例，.result() 会抛出它
+            - 否则 .result() 返回它
+    """
+    class _MockFuture:
+        def __init__(self, value):
+            self._value = value
+
+        def result(self, timeout=None):
+            if isinstance(self._value, Exception):
+                raise self._value
+            return self._value
+
+        def cancel(self):
+            return False
+
+        def done(self):
+            return True
+
+    return _MockFuture(result_or_exception)
+
+
 # ============================================================
 # Fixtures
 # ============================================================
@@ -497,7 +523,7 @@ class TestMatlabEngineProxyCall:
         feed_rates = np.array([300.0, 500.0, 500.0], dtype=np.float32)
         layer_indices = np.array([0, 0, 1], dtype=np.float32)
         meta_out = {"compute_time_s": 1.5}
-        mock_eng.run_path_planning.return_value = (pointlist, feed_rates, layer_indices, meta_out)
+        mock_eng.run_path_planning.return_value = _make_future((pointlist, feed_rates, layer_indices, meta_out))
 
         from repair_app.bridge.adapters.matlab_engine_proxy import MatlabEngineProxy
         proxy = MatlabEngineProxy(connect_retry=1, connect_interval_s=0)
@@ -529,9 +555,9 @@ class TestMatlabEngineProxyCall:
         feed_rates = np.array([500.0], dtype=np.float32)
         layer_indices = np.array([0.0], dtype=np.float32)
 
-        def capture(stl_path, params, nargout=4):
+        def capture(stl_path, params, nargout=4, **kwargs):
             captured_paths.append(stl_path)
-            return (pointlist, feed_rates, layer_indices, {})
+            return _make_future((pointlist, feed_rates, layer_indices, {}))
         mock_eng.run_path_planning.side_effect = capture
 
         from repair_app.bridge.adapters.matlab_engine_proxy import MatlabEngineProxy
@@ -550,12 +576,12 @@ class TestMatlabEngineProxyCall:
         mock_me.find_matlab.return_value = ["matlab_bridge"]
         mock_me.connect_matlab.return_value = mock_eng
 
-        mock_eng.run_path_planning.return_value = (
+        mock_eng.run_path_planning.return_value = _make_future((
             np.zeros((1, 6), dtype=np.float32),
             np.array([500.0], dtype=np.float32),
             np.array([0.0], dtype=np.float32),
             {},
-        )
+        ))
 
         from repair_app.bridge.adapters.matlab_engine_proxy import MatlabEngineProxy
         proxy = MatlabEngineProxy(connect_retry=1, connect_interval_s=0)
@@ -598,7 +624,7 @@ class TestMatlabEngineProxyProfilePrediction:
                 "diameter": np.zeros(5), "temperature": np.zeros(5),
             },
         }
-        mock_eng.run_profile_prediction.return_value = raw
+        mock_eng.run_profile_prediction.return_value = _make_future(raw)
 
         from repair_app.bridge.adapters.matlab_engine_proxy import MatlabEngineProxy
         proxy = MatlabEngineProxy(connect_retry=1, connect_interval_s=0)
@@ -624,7 +650,7 @@ class TestMatlabEngineProxyProfilePrediction:
         mock_eng = MagicMock()
         mock_me.find_matlab.return_value = ["matlab_bridge"]
         mock_me.connect_matlab.return_value = mock_eng
-        mock_eng.run_profile_prediction.return_value = {}
+        mock_eng.run_profile_prediction.return_value = _make_future({})
 
         from repair_app.bridge.adapters.matlab_engine_proxy import MatlabEngineProxy
         proxy = MatlabEngineProxy(connect_retry=1, connect_interval_s=0)
@@ -648,9 +674,9 @@ class TestMatlabEngineProxyProfilePrediction:
         mock_me.connect_matlab.return_value = mock_eng
 
         captured = []
-        def capture(stl_path, excel_path, params, nargout=1):
+        def capture(stl_path, excel_path, params, nargout=1, **kwargs):
             captured.append(stl_path)
-            return {}
+            return _make_future({})
         mock_eng.run_profile_prediction.side_effect = capture
 
         from repair_app.bridge.adapters.matlab_engine_proxy import MatlabEngineProxy
@@ -680,7 +706,7 @@ class TestMatlabEngineProxyFullPipeline:
         feed_rates = np.array([300.0, 500.0], dtype=np.float32)
         layer_indices = np.array([0, 1], dtype=np.float32)
         meta_out = {"compute_time_s": 1.0}
-        mock_eng.run_path_planning.return_value = (pointlist, feed_rates, layer_indices, meta_out)
+        mock_eng.run_path_planning.return_value = _make_future((pointlist, feed_rates, layer_indices, meta_out))
 
         raw_profile = {
             "uniformity": 0.9,
@@ -689,7 +715,7 @@ class TestMatlabEngineProxyFullPipeline:
             "waypoint_count": 2,
             "mesh": np.zeros((1, 9), dtype=np.float32),
         }
-        mock_eng.run_profile_prediction.return_value = raw_profile
+        mock_eng.run_profile_prediction.return_value = _make_future(raw_profile)
 
         from repair_app.bridge.adapters.matlab_engine_proxy import MatlabEngineProxy
         proxy = MatlabEngineProxy(connect_retry=1, connect_interval_s=0)
@@ -721,11 +747,11 @@ class TestMatlabEngineProxyFullPipeline:
         feed_rates = np.array([500.0], dtype=np.float32)
         layer_indices = np.array([0.0], dtype=np.float32)
 
-        def capture_pp(stl_path, params, nargout=4):
+        def capture_pp(stl_path, params, nargout=4, **kwargs):
             captured.append(stl_path)
-            return (pointlist, feed_rates, layer_indices, {})
+            return _make_future((pointlist, feed_rates, layer_indices, {}))
         mock_eng.run_path_planning.side_effect = capture_pp
-        mock_eng.run_profile_prediction.return_value = {}
+        mock_eng.run_profile_prediction.return_value = _make_future({})
 
         from repair_app.bridge.adapters.matlab_engine_proxy import MatlabEngineProxy
         proxy = MatlabEngineProxy(connect_retry=1, connect_interval_s=0)

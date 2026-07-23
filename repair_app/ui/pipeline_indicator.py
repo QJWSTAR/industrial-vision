@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QLabel, QFrame, QSizePolicy,
 )
 
+from repair_app.ui.theme_manager import ThemeManager
+
 
 class PipelineStage:
     """单个管线阶段的状态常量。"""
@@ -24,12 +26,12 @@ class PipelineStage:
     FAILED = "failed"
 
 
-# 阶段状态 → (背景色, 文字色, 图标)
-_STAGE_STYLE = {
-    PipelineStage.WAITING: ("#1E293B", "#64748B", "○"),
-    PipelineStage.RUNNING: ("#1D4ED8", "#BFDBFE", "◐"),
-    PipelineStage.DONE:    ("#15803D", "#BBF7D0", "✓"),
-    PipelineStage.FAILED:  ("#B91C1C", "#FECACA", "✗"),
+# 阶段状态 → (图标)
+_STAGE_ICON = {
+    PipelineStage.WAITING: "○",
+    PipelineStage.RUNNING: "◐",
+    PipelineStage.DONE:    "✓",
+    PipelineStage.FAILED:  "✗",
 }
 
 
@@ -58,6 +60,7 @@ class PipelineIndicator(QWidget):
 
     def _setup_ui(self) -> None:
         """构建水平管线布局：阶段 → 箭头 → 阶段 → ..."""
+        p = ThemeManager.get_palette()
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(4)
@@ -66,7 +69,7 @@ class PipelineIndicator(QWidget):
             if i > 0:
                 arrow = QLabel("→")
                 arrow.setAlignment(Qt.AlignCenter)
-                arrow.setStyleSheet("color:#475569; font-size:16px; font-weight:bold;")
+                arrow.setStyleSheet(f"color:{p.text_muted}; font-size:16px; font-weight:bold;")
                 arrow.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
                 layout.addWidget(arrow)
                 self._arrow_labels.append(arrow)
@@ -119,11 +122,25 @@ class PipelineIndicator(QWidget):
         ]
         self._refresh_styles()
 
+    def _get_stage_colors(self, status: str) -> tuple[str, str]:
+        """根据阶段状态返回 (背景色, 文字色)。"""
+        p = ThemeManager.get_palette()
+        if status == PipelineStage.WAITING:
+            return (p.bg_hover, p.text_disabled)
+        elif status == PipelineStage.RUNNING:
+            return (p.accent_hover, p.accent_pale)
+        elif status == PipelineStage.DONE:
+            return (p.success, p.success)
+        elif status == PipelineStage.FAILED:
+            return (p.error, p.error)
+        return (p.bg_hover, p.text_disabled)
+
     def _refresh_styles(self) -> None:
         """刷新所有阶段的样式。"""
         for i, label in enumerate(self._stage_labels):
             status = self._stage_statuses[i]
-            bg, fg, icon = _STAGE_STYLE[status]
+            bg, fg = self._get_stage_colors(status)
+            icon = _STAGE_ICON[status]
             name = self.STAGE_NAMES[i]
             label.setText(f"  {icon}  {name}")
             label.setStyleSheet(

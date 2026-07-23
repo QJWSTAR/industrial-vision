@@ -177,127 +177,53 @@ class MorphologyWorker(BaseWorker):
 class ComputePipelineWorker(BaseWorker):
     """一键计算管线工作线程。
 
-    在后台 QThread 中执行完整流程：
-      1. 启动 MATLAB + Bridge（MatlabBridgeLauncher）
-      2. 通过 ZMQ 发送修复请求（MATLABPipeline 自动串联路径规划 + 形貌预测）
-      3. 返回完整结果 dict
-
-    P3-1: 继承 BaseWorker，统一取消/timeout/cleanup。
-    P3-2: ZMQ 阶段添加总超时（默认 600s），防止永久阻塞。
+    在后台 QThread 中通过 MatlabService 调用 MATLAB 完整管线。
+    不再直接操作 ZMQ / Launcher / protobuf。
 
     信号：
-        stage   (str)  : 阶段进度提示（如"正在启动 MATLAB..."）
-        result  (dict) : 完整计算结果
-        failed  (str, str, str) : 结构化错误 (code, friendly, detail)
+        stage        (str)  : 阶段进度提示
+        result       (dict) : 完整计算结果
+        failed       (str, str, str) : 结构化错误 (code, friendly, detail)
+        operation_id (str)  : 当前计算操作 ID（UUID），用于 Progress 过滤
     """
     stage = Signal(str)
     result = Signal(dict)
     # 结构化错误信号: (error_code, friendly_message, detail)
     failed = Signal(str, str, str)
+    operation_id = Signal(str)
 
     def __init__(
         self,
-        project_root: str,
+        matlab_service,  # MatlabService 实例
         request_bytes: bytes,
-        bridge_address: str = "tcp://127.0.0.1:5555",
-        startup_timeout: float = 120.0,
-        zmq_timeout: float = 600.0,  # P3-2: ZMQ 请求总超时（10 分钟）
+        operation_id: str = "",
+        zmq_timeout: float = 600.0,
     ) -> None:
-        super().__init__(timeout_s=None)  # 总超时由各阶段自行管理
-        self._project_root = project_root
+        super().__init__(timeout_s=None)
+        self._matlab_service = matlab_service
         self._request_bytes = request_bytes
-        self._bridge_address = bridge_address
-        self._startup_timeout = startup_timeout
+        self._operation_id = operation_id
         self._zmq_timeout = zmq_timeout
-        self._launcher = None
 
     @Slot()
     def run(self) -> None:
         self._mark_start()
+        # 发出 operation_id，让 MainWindow 配置 ProgressSubscriber 过滤
+        if self._operation_id:
+            self.operation_id.emit(self._operation_id)
         try:
-            # ---- 阶段 1：启动 MATLAB + Bridge ----
-            self.stage.emit("正在启动 MATLAB + Bridge...")
-            from repair_app.bridge.launcher import MatlabBridgeLauncher
-            self._launcher = MatlabBridgeLauncher(self._project_root)
-            if not self._launcher.start(timeout=self._startup_timeout):
-                # 启动失败视为 MATLAB 错误（不是异常，但需要结构化提示）
-                from repair_app.utils.error_manager import FriendlyMessage
-                friendly = ErrorManager.get_friendly_message(
-                    RuntimeError("MATLAB 启动失败"), ErrorCode.MATLAB, "MATLAB 启动"
-                )
-                self.failed.emit(
-                    ErrorCode.MATLAB.value,
-                    f"{friendly.title}\n\n{friendly.what}",
-                    "MATLAB + Bridge 启动失败（详见日志）",
-                )
-                return
-
-            if self.check_interruption():
-                return
-
-            # ---- 阶段 2：通过 ZMQ 发送计算请求（P3-2: 含总超时） ----
             self.stage.emit("正在执行路径规划 + 形貌预测...")
-            import zmq
-            ctx = zmq.Context.instance()
-            sock = ctx.socket(zmq.REQ)
-            sock.setsockopt(zmq.LINGER, 0)
-            sock.connect(self._bridge_address)
-            try:
-                sock.send(self._request_bytes)
-                # 使用 Poller 轮询，每 500ms 检查一次中断请求
-                poller = zmq.Poller()
-                poller.register(sock, zmq.POLLIN)
-                reply = b""
-                zmq_start = time.monotonic()
-                while not QThread.currentThread().isInterruptionRequested():
-                    # P3-2: ZMQ 总超时检查
-                    elapsed = time.monotonic() - zmq_start
-                    if elapsed > self._zmq_timeout:
-                        from repair_app.utils.logger_config import warning
-                        warning(f"ZMQ 请求总超时 {self._zmq_timeout}s，放弃等待")
-                        self.failed.emit(
-                            ErrorCode.NETWORK.value,
-                            "MATLAB 计算超时",
-                            f"ZMQ 请求超过 {self._zmq_timeout}s 未响应",
-                        )
-                        return
-                    events = dict(poller.poll(500))  # 500ms 超时
-                    if sock in events:
-                        reply = sock.recv()
-                        break
-                else:
-                    # 被中断
-                    return
-            finally:
-                sock.close(0)
+
+            parsed = self._matlab_service.run_full_pipeline_blocking(
+                self._request_bytes, timeout_s=self._zmq_timeout
+            )
 
             if self.check_interruption():
                 return
 
-            # ---- 阶段 3：解析结果 ----
             self.stage.emit("正在解析 MATLAB 计算结果...")
-            from repair_app.communication.repair_serialization import (
-                deserialize_result,
-                parse_repair_result,
-            )
-            msg = deserialize_result(reply)
-            parsed = parse_repair_result(msg)
             self.result.emit(parsed)
 
         except Exception as exc:
             code = ErrorManager.classify(exc, context="一键计算")
             self.failed.emit(*_pack_error(exc, code, "一键计算"))
-        finally:
-            # 不在此关闭 MATLAB，保留会话供后续计算复用
-            # MATLAB 在 GUI 退出时由 closeEvent 清理
-            pass
-
-    def stop_launcher(self) -> None:
-        """供 GUI 在退出时调用，关闭 MATLAB 子进程。"""
-        if self._launcher is not None:
-            self._launcher.stop()
-
-    def cleanup(self) -> None:
-        """P3-1: 统一 cleanup 钩子。"""
-        # 不在此关闭 MATLAB（保留会话），仅清理 socket 引用
-        pass

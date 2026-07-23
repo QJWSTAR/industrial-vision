@@ -59,6 +59,26 @@ class EngineCrashError(EngineUnavailableError):
     """MATLAB 引擎在处理过程中崩溃。"""
 
 
+class MatlabCallTimeoutError(BridgeError):
+    """MATLAB 算法调用超时。"""
+
+    def __init__(self, message: str = "MATLAB 调用超时", *, timeout_s: float = 0.0, **kwargs):
+        super().__init__(message, **kwargs)
+        self.timeout_s = timeout_s
+
+
+class MatlabEngineUnhealthyError(EngineUnavailableError):
+    """MATLAB 引擎因超时/崩溃进入不健康状态，需要恢复。"""
+
+    def __init__(self, message: str = "MATLAB 引擎不健康", *, reason: str = "", **kwargs):
+        super().__init__(message, **kwargs)
+        self.reason = reason
+
+
+class MatlabRecoveryError(EngineUnavailableError):
+    """MATLAB 引擎恢复失败。"""
+
+
 class ProtocolError(BridgeError):
     """协议版本不兼容或消息格式错误。"""
 

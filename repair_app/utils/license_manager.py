@@ -58,19 +58,61 @@ if _DEFAULT_HMAC_SECRET is None:
         )
 
 
-def _get_machine_id() -> str:
-    """获取机器唯一标识。
+def get_machine_id() -> str:
+    """获取机器唯一标识（公开 API）。
 
     基于 MAC 地址 (uuid.getnode) 与主机名的组合哈希，比纯 hostname 方案
     更稳定且更难伪造。异常时退化为 UNKNOWN_MACHINE。
+
+    终端用户可通过此函数获取机器码，用于向管理员申请 License。
     """
     try:
         node = uuid.getnode()
         raw = f"{node}:{platform.node()}"
         return str(uuid.UUID(bytes=hashlib.sha256(raw.encode()).digest()[:16]))
     except Exception as e:
-        _log_warning(f"_get_machine_id failed: {e}")
+        _log_warning(f"get_machine_id failed: {e}")
         return "UNKNOWN_MACHINE"
+
+
+# 向后兼容别名
+_get_machine_id = get_machine_id
+
+
+def install_license(source_path: str) -> tuple[bool, str]:
+    """将 License 文件安装到配置目录。
+
+    从用户指定的路径复制 license.key 到 config 目录，供后续运行时验证使用。
+
+    Args:
+        source_path: 用户提供的 license.key 文件路径。
+
+    Returns:
+        (success, message): 是否成功及说明信息。
+    """
+    from pathlib import Path
+    import shutil
+
+    src = Path(source_path)
+    if not src.exists():
+        return False, f"License 文件不存在: {source_path}"
+    if not src.is_file():
+        return False, f"路径不是文件: {source_path}"
+
+    try:
+        # 验证文件是否为有效 JSON（基本格式检查）
+        with open(src, "r", encoding="utf-8") as f:
+            json.load(f)
+    except json.JSONDecodeError as e:
+        return False, f"License 文件格式错误: {e}"
+
+    dst = get_config_dir() / LICENSE_FILE
+    try:
+        os.makedirs(str(get_config_dir()), exist_ok=True)
+        shutil.copy2(str(src), str(dst))
+        return True, f"License 已安装到 {dst}"
+    except OSError as e:
+        return False, f"安装失败: {e}"
 
 
 def _get_machine_id_legacy() -> str:
@@ -415,7 +457,7 @@ def generate_keypair(output_dir: Optional[str] = None) -> tuple[str, str]:
 
 def generate_license(
     output_path: str,
-    machine_id: Optional[str] = None,
+    machine_id: str,
     issued_to: str = "User",
     days_valid: int = 365,
     features: Optional[list[str]] = None,
@@ -424,8 +466,16 @@ def generate_license(
 
     优先使用 RSA 私钥签名（与验证端算法匹配）；
     无私钥时退化为 HMAC 签名（仅限开发模式）。
+
+    Args:
+        output_path: License 文件输出路径。
+        machine_id: 目标机器的机器码（必填，通过 get_machine_id() 获取）。
+                    必须由终端用户提供，不能使用签发机器的机器码。
+        issued_to: 授权对象名称。
+        days_valid: 有效天数。
+        features: 功能列表。
     """
-    mid = machine_id or _get_machine_id()
+    mid = machine_id
     now = datetime.now()
 
     payload = {
@@ -472,11 +522,22 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "keygen":
         generate_keypair()
+    elif len(sys.argv) > 1 and sys.argv[1] == "machine-id":
+        mid = get_machine_id()
+        print(f"机器码: {mid}")
+        print()
+        print("将此机器码发送给管理员以获取 License 文件。")
     elif len(sys.argv) > 1 and sys.argv[1] == "issue":
+        if len(sys.argv) < 3:
+            print("用法: python -m repair_app.utils.license_manager issue <machine_id> [issued_to] [days]")
+            print()
+            print("  获取机器码: python -m repair_app.utils.license_manager machine-id")
+            sys.exit(1)
         generate_license(
             str(get_config_dir() / LICENSE_FILE),
-            issued_to=sys.argv[2] if len(sys.argv) > 2 else "Developer",
-            days_valid=int(sys.argv[3]) if len(sys.argv) > 3 else 365,
+            machine_id=sys.argv[2],
+            issued_to=sys.argv[3] if len(sys.argv) > 3 else "Developer",
+            days_valid=int(sys.argv[4]) if len(sys.argv) > 4 else 365,
         )
     else:
         lm = LicenseManager()

@@ -26,10 +26,10 @@ class TestLicenseManager:
         assert "不存在" in lm.error
 
     def test_generate_and_verify(self):
-        from repair_app.utils.license_manager import generate_license, LicenseManager, _get_machine_id
+        from repair_app.utils.license_manager import generate_license, LicenseManager, get_machine_id
         with tempfile.TemporaryDirectory() as tmpdir:
             lic_path = os.path.join(tmpdir, "test_license.key")
-            generate_license(lic_path, issued_to="TestUser", days_valid=30)
+            generate_license(lic_path, machine_id=get_machine_id(), issued_to="TestUser", days_valid=30)
             assert os.path.exists(lic_path)
 
             # 验证生成的 license

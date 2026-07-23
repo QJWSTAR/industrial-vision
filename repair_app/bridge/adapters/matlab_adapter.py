@@ -30,6 +30,7 @@ from repair_app.communication.repair_serialization import (
     build_particle_distribution,
 )
 from ..communication.config import BridgeConfig
+from ..communication.exceptions import MatlabCallTimeoutError
 from ..communication.serializer import Serializer
 from ..communication.zmq_server import BridgeServer
 
@@ -280,6 +281,12 @@ class MatlabAdapter(BridgeServer):
                 "warnings": list(result.get("warnings", []) or []),
             }
 
+        except MatlabCallTimeoutError as exc:
+            logger.error("MATLAB 管线超时: %s", exc)
+            if engine_mode == "matlab":
+                raise MatlabAlgorithmError(f"MATLAB 管线超时 ({exc.timeout_s}s)") from exc
+            logger.warning("MATLAB 管线超时，降级到 Python: %s", exc)
+            return None
         except Exception as exc:
             if engine_mode == "matlab":
                 logger.warning("MATLAB 管线失败（强制模式）: %s", exc)

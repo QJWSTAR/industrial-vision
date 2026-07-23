@@ -22,8 +22,9 @@ import logging
 import os
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Generator, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot, QTimer
 
@@ -39,9 +40,11 @@ class LifecycleStatus:
     STARTING = "starting"             # 正在启动 MATLAB + Bridge
     READY = "ready"                   # Bridge 已就绪
     BUSY = "busy"                     # 正在执行计算
+    RECOVERING = "recovering"         # 超时/崩溃后正在恢复
     CRASHED = "crashed"               # 检测到崩溃
     RESTARTING = "restarting"         # 正在重启
     FAILED = "failed"                 # 启动失败/重启次数耗尽
+    STOPPING = "stopping"             # 正在关闭
     STOPPED = "stopped"               # 已主动停止
 
 
@@ -82,6 +85,21 @@ class MatlabLifecycleManager(QObject):
         self._auto_restart_enabled = True
         self._is_starting = False  # 防止并发启动
         self._state_lock = threading.Lock()  # 保护 _status/_message/_is_starting
+
+        # 合法状态转换表
+        self._VALID_TRANSITIONS = {
+            LifecycleStatus.UNKNOWN:    {LifecycleStatus.STARTING, LifecycleStatus.STOPPED},
+            LifecycleStatus.DETECTING:  {LifecycleStatus.STARTING, LifecycleStatus.FAILED, LifecycleStatus.STOPPED},
+            LifecycleStatus.STARTING:   {LifecycleStatus.READY, LifecycleStatus.FAILED, LifecycleStatus.STOPPING},
+            LifecycleStatus.READY:      {LifecycleStatus.BUSY, LifecycleStatus.STOPPING, LifecycleStatus.CRASHED},
+            LifecycleStatus.BUSY:       {LifecycleStatus.READY, LifecycleStatus.RECOVERING, LifecycleStatus.CRASHED, LifecycleStatus.STOPPING},
+            LifecycleStatus.RECOVERING: {LifecycleStatus.READY, LifecycleStatus.FAILED, LifecycleStatus.STOPPING},
+            LifecycleStatus.CRASHED:    {LifecycleStatus.RESTARTING, LifecycleStatus.FAILED, LifecycleStatus.STOPPING},
+            LifecycleStatus.RESTARTING: {LifecycleStatus.READY, LifecycleStatus.FAILED, LifecycleStatus.STOPPING},
+            LifecycleStatus.FAILED:     {LifecycleStatus.STARTING, LifecycleStatus.STOPPING},
+            LifecycleStatus.STOPPING:   {LifecycleStatus.STOPPED},
+            LifecycleStatus.STOPPED:    set(),
+        }
 
     # ------------------------------------------------------------------
     # 单例
@@ -138,11 +156,21 @@ class MatlabLifecycleManager(QObject):
     # ------------------------------------------------------------------
     # 状态管理
     # ------------------------------------------------------------------
+    def _validate_transition(self, new_status: str) -> None:
+        """验证状态转换是否合法（开发阶段检查，生产环境仅警告）。"""
+        allowed = self._VALID_TRANSITIONS.get(self._status, set())
+        if new_status not in allowed:
+            logger.warning(
+                "非标准状态转换: %s → %s (允许: %s)",
+                self._status, new_status, allowed,
+            )
+
     def _set_status(self, status: str, message: str = "") -> None:
         """更新状态并发出信号。"""
         with self._state_lock:
             if self._status == status and self._message == message:
                 return
+            self._validate_transition(status)
             old = self._status
             self._status = status
             self._message = message
@@ -318,18 +346,51 @@ class MatlabLifecycleManager(QObject):
     # ------------------------------------------------------------------
     # 计算状态标记
     # ------------------------------------------------------------------
+    @contextmanager
+    def execution_scope(self) -> Generator[None, None, None]:
+        """执行上下文管理器：自动管理 BUSY/READY 状态转换。
+
+        用法：
+            with manager.execution_scope():
+                result = do_matlab_computation()
+
+        自动完成：
+        - 进入时：READY → BUSY
+        - 正常退出时：BUSY → READY
+        - 异常退出时：BUSY → RECOVERING（不自动回 READY）
+        """
+        if self._status != LifecycleStatus.READY:
+            self.ensure_ready()
+            if not self.is_ready:
+                raise RuntimeError(
+                    f"MATLAB 未就绪（当前状态: {self._status}），无法执行计算"
+                )
+
+        self._set_status(LifecycleStatus.BUSY, "正在执行计算...")
+        try:
+            yield
+            # 正常完成：恢复 READY 并重置重启计数
+            self._launcher.reset_restart_count()
+            version = self._launcher.matlab_version or "unknown"
+            self._set_status(LifecycleStatus.READY, f"MATLAB {version} 已就绪")
+        except Exception:
+            # 异常：进入 RECOVERING 状态
+            self._set_status(
+                LifecycleStatus.RECOVERING,
+                "计算异常，MATLAB 需要恢复",
+            )
+            raise
+
     def mark_busy(self) -> None:
-        """标记为计算中状态（暂停崩溃检测，避免误判）。"""
+        """DEPRECATED: 使用 execution_scope() 替代。"""
+        logger.warning("mark_busy() 已废弃，请使用 execution_scope()")
         if self._status == LifecycleStatus.READY:
             self._set_status(LifecycleStatus.BUSY, "正在执行计算...")
 
     def mark_idle(self) -> None:
-        """标记为空闲状态（恢复崩溃检测）。"""
+        """DEPRECATED: 使用 execution_scope() 替代。"""
+        logger.warning("mark_idle() 已废弃，请使用 execution_scope()")
         if self._status == LifecycleStatus.BUSY:
-            # 计算成功后重置重启计数
             self._launcher.reset_restart_count()
             version = self._launcher.matlab_version or "unknown"
-            self._set_status(
-                LifecycleStatus.READY,
-                f"MATLAB {version} 已就绪",
-            )
+            self._set_status(LifecycleStatus.READY, f"MATLAB {version} 已就绪")

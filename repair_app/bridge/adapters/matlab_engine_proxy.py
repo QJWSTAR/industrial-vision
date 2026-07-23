@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
 import tempfile
@@ -79,6 +80,7 @@ class MatlabEngineProxy:
         self._connect_interval = connect_interval_s
         self._connected = False
         self._started_independently = False
+        self._unhealthy = False  # True after timeout/error, requires recovery
 
     # ================================================================
     # 引擎连接
@@ -207,6 +209,22 @@ class MatlabEngineProxy:
                 except Exception as exc:
                     logger.warning("addpath 失败（共享会话应已预加载）: %s", exc)
 
+    @property
+    def is_healthy(self) -> bool:
+        """引擎是否健康（非 unhealthy 状态）。"""
+        with self._lock:
+            return self._connected and not self._unhealthy
+
+    def _check_healthy(self) -> None:
+        """检查引擎健康状态，不健康时拒绝请求。"""
+        with self._lock:
+            if self._unhealthy:
+                from repair_app.bridge.communication.exceptions import MatlabEngineUnhealthyError
+                raise MatlabEngineUnhealthyError(
+                    "MATLAB 引擎因超时进入不健康状态，需要恢复",
+                    reason="previous call timed out",
+                )
+
     def disconnect(self) -> None:
         """断开 MATLAB 引擎连接，释放资源。
 
@@ -229,6 +247,37 @@ class MatlabEngineProxy:
                     self._connected = False
                     self._started_independently = False
 
+    def recover(self) -> bool:
+        """尝试从不健康状态恢复。
+
+        Returns:
+            True if recovery successful (engine is healthy again).
+        """
+        with self._lock:
+            if not self._unhealthy:
+                return True
+
+        logger.info("尝试恢复 MATLAB 引擎...")
+        with self._lock:
+            self._unhealthy = False
+            self._connected = False
+            self._eng = None
+
+        try:
+            self._ensure_connected()
+            with self._lock:
+                if self._connected and self._eng is not None:
+                    self._unhealthy = False
+                    logger.info("MATLAB 引擎恢复成功")
+                    return True
+        except Exception as exc:
+            logger.error("MATLAB 引擎恢复失败: %s", exc)
+            with self._lock:
+                self._unhealthy = True
+
+        from repair_app.bridge.communication.exceptions import MatlabRecoveryError
+        raise MatlabRecoveryError("MATLAB 引擎恢复失败")
+
     @classmethod
     def reset_singleton(cls) -> None:
         """重置单例实例（用于 Bridge 重启场景）。"""
@@ -236,6 +285,75 @@ class MatlabEngineProxy:
             if cls._instance is not None:
                 cls._instance.disconnect()
             cls._instance = None
+
+    # ================================================================
+    # 超时保护调用
+    # ================================================================
+
+    def _call_with_timeout(self, func_name: str, *args, **kwargs) -> Any:
+        """使用 background=True + timeout 调用 MATLAB 函数。
+
+        Args:
+            func_name: MATLAB 函数名（用于日志）
+            *args, **kwargs: 传递给 eng.func_name() 的参数（不含 nargout/background）
+
+        Returns:
+            MATLAB 函数返回值（Future.result()）
+
+        Raises:
+            MatlabCallTimeoutError: 超时
+            MatlabEngineUnhealthyError: 引擎不健康
+            EngineUnavailableError: 引擎不可用
+        """
+        from repair_app.bridge.communication.exceptions import (
+            MatlabCallTimeoutError,
+            MatlabEngineUnhealthyError,
+        )
+
+        self._check_healthy()
+        self._ensure_connected()
+
+        # 获取 MATLAB 函数引用
+        func = getattr(self._eng, func_name)
+
+        try:
+            # background=True 返回 FutureResult
+            future = func(*args, **kwargs, background=True)
+
+            # 等待结果（带超时）
+            result = future.result(timeout=self._call_timeout)
+
+            return result
+        except concurrent.futures.TimeoutError:
+            # 超时：标记引擎不健康，断开连接
+            with self._lock:
+                self._unhealthy = True
+            logger.error(
+                "MATLAB %s 超时 (%.1fs)，引擎进入不健康状态",
+                func_name, self._call_timeout,
+            )
+            try:
+                self.disconnect()
+            except Exception:
+                pass
+            raise MatlabCallTimeoutError(
+                f"MATLAB {func_name} 超时 ({self._call_timeout}s)",
+                timeout_s=self._call_timeout,
+            )
+        except (MatlabEngineUnhealthyError, MatlabCallTimeoutError):
+            raise
+        except Exception as exc:
+            # 其他异常也可能是引擎崩溃
+            if "MATLAB Engine" in str(exc) or "connection" in str(exc).lower():
+                with self._lock:
+                    self._unhealthy = True
+                try:
+                    self.disconnect()
+                except Exception:
+                    pass
+                from repair_app.bridge.communication.exceptions import EngineUnavailableError
+                raise EngineUnavailableError(f"MATLAB 引擎连接丢失: {exc}") from exc
+            raise
 
     # ================================================================
     # _algorithm_fn 签名实现
@@ -250,13 +368,14 @@ class MatlabEngineProxy:
         3. 调用 eng.run_path_planning(stl_path, params)
         4. 将返回值组装为 (M, 8) ndarray
         """
-        self._ensure_connected()
+        self._check_healthy()
 
         stl_path = self._write_xyz_as_stl(xyz)
         params = self._meta_to_matlab_struct(meta)
 
         try:
-            result = self._eng.run_path_planning(
+            result = self._call_with_timeout(
+                "run_path_planning",
                 stl_path, params, nargout=4,
             )
             pointlist, feed_rates, layer_indices, meta_out = result
@@ -297,7 +416,7 @@ class MatlabEngineProxy:
            particle_distribution、uniformity、estimated_mass_g、estimated_time_s、
            warnings）
         """
-        self._ensure_connected()
+        self._check_healthy()
 
         stl_path = self._write_xyz_as_stl(xyz)
         params = self._meta_to_profile_params(meta)
@@ -305,7 +424,8 @@ class MatlabEngineProxy:
         excel_path = str(meta.get("cfd_excel_path", ""))
 
         try:
-            raw = self._eng.run_profile_prediction(
+            raw = self._call_with_timeout(
+                "run_profile_prediction",
                 stl_path, excel_path, params, nargout=1,
             )
             result = self._parse_profile_result(raw)
@@ -340,7 +460,7 @@ class MatlabEngineProxy:
         - 避免重复调用 run_path_planning（1 次而非 2 次）
         - 计算时间减少 30-50%
         """
-        self._ensure_connected()
+        self._check_healthy()
 
         stl_path = self._write_xyz_as_stl(xyz)
         params = self._meta_to_profile_params(meta)
@@ -349,7 +469,8 @@ class MatlabEngineProxy:
         try:
             # ---- 阶段 1：路径规划 ----
             logger.info("MATLABPipeline 阶段 1/2：路径规划")
-            pp_result = self._eng.run_path_planning(
+            pp_result = self._call_with_timeout(
+                "run_path_planning",
                 stl_path, params, nargout=4,
             )
             pointlist, feed_rates, layer_indices, meta_out = pp_result
@@ -372,7 +493,8 @@ class MatlabEngineProxy:
 
             # ---- 阶段 2：形貌预测（传入预计算航点） ----
             logger.info("MATLABPipeline 阶段 2/2：形貌预测（使用预计算航点）")
-            raw = self._eng.run_profile_prediction(
+            raw = self._call_with_timeout(
+                "run_profile_prediction",
                 stl_path, excel_path, params, pointlist, velocitylist, nargout=1,
             )
             result = self._parse_profile_result(raw)

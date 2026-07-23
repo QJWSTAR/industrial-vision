@@ -32,12 +32,12 @@ class Toast(QWidget):
     - 多条堆叠
     """
 
-    # 级别样式
+    # 级别 → 图标
     _STYLES = {
-        "info":    {"color": "#3B82F6", "icon": "ℹ"},
-        "success": {"color": "#10B981", "icon": "✓"},
-        "warning": {"color": "#F59E0B", "icon": "⚠"},
-        "error":   {"color": "#EF4444", "icon": "✕"},
+        "info":    {"icon": "ℹ"},
+        "success": {"icon": "✓"},
+        "warning": {"icon": "⚠"},
+        "error":   {"icon": "✕"},
     }
 
     # 堆叠管理：当前活跃的 Toast 列表
@@ -56,10 +56,16 @@ class Toast(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
 
         style = self._STYLES.get(level, self._STYLES["info"])
-        accent_color = style["color"]
         icon = style["icon"]
 
         p = ThemeManager.get_palette()
+        _accent_colors = {
+            "info":    p.info,
+            "success": p.success,
+            "warning": p.warning,
+            "error":   p.error,
+        }
+        accent_color = _accent_colors.get(level, p.info)
 
         # 布局
         layout = QVBoxLayout(self)

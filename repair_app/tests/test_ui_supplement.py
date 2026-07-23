@@ -354,7 +354,7 @@ class TestEnsureReadyWorker:
         manager = MagicMock()
         manager.ensure_ready.return_value = True
         manager.message = "ready"
-        worker = _EnsureReadyWorker(manager)
+        worker = _EnsureReadyWorker(manager.ensure_ready)
         worker.run()
         manager.ensure_ready.assert_called_once()
         _cleanup_widget(worker, qapp)
@@ -364,7 +364,7 @@ class TestEnsureReadyWorker:
         from repair_app.ui.dialogs import _EnsureReadyWorker
         manager = MagicMock()
         manager.ensure_ready.return_value = False
-        worker = _EnsureReadyWorker(manager)
+        worker = _EnsureReadyWorker(manager.ensure_ready)
         worker.run()
         manager.ensure_ready.assert_called_once()
         _cleanup_widget(worker, qapp)
@@ -374,7 +374,7 @@ class TestEnsureReadyWorker:
         from repair_app.ui.dialogs import _EnsureReadyWorker
         manager = MagicMock()
         manager.ensure_ready.side_effect = RuntimeError("crash")
-        worker = _EnsureReadyWorker(manager)
+        worker = _EnsureReadyWorker(manager.ensure_ready)
         worker.run()
         manager.ensure_ready.assert_called_once()
         _cleanup_widget(worker, qapp)

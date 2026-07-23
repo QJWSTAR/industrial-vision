@@ -94,7 +94,7 @@ def test_stl_readers_direct(tmp_path) -> None:
         f.write(b" " * 80)
         f.write((1).to_bytes(4, "little"))
         import struct
-        f.write(struct.pack("<12fH", 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0))
+        f.write(struct.pack("<12fH", 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0))
     arr = read_stl_file(str(path))
     assert arr.shape[1] == 12
 

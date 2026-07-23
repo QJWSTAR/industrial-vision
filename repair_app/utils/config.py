@@ -80,8 +80,6 @@ MAT_KEY_MAP: Dict[int, str] = {
 _PROJECT_ROOT = str(get_data_dir())
 _MORPH_DIR_ASCII = "morphology_prediction"
 _MORPH_DIR_LEGACY = "形貌预测"
-_P1_FRAME_DIR_ASCII = "matlab_frames"
-_P1_FRAME_DIR_LEGACY = "Matlab图片保存"
 
 
 def get_morph_dir() -> str:
@@ -109,18 +107,6 @@ def get_velocitylist_file() -> str:
     """返回 velocitylist.npz 缓存路径（系统临时目录）。"""
     from repair_app.repository.file_repository import _get_cache_dir
     return os.path.join(_get_cache_dir(), "velocitylist.npz")
-
-
-def get_p1_frame_dir() -> str:
-    """返回 P1 动画帧图片目录路径。
-
-    若旧版中文目录 (Matlab图片保存) 已存在则回退使用，否则使用 ASCII 目录名
-    (matlab_frames)。
-    """
-    legacy = os.path.join(_PROJECT_ROOT, _P1_FRAME_DIR_LEGACY)
-    if os.path.isdir(legacy):
-        return legacy
-    return os.path.join(_PROJECT_ROOT, _P1_FRAME_DIR_ASCII)
 
 
 # ============================================================

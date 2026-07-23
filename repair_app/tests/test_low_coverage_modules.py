@@ -197,7 +197,14 @@ class TestPathPlanner:
             f.write(b"test" * 20)
             f.write(struct.pack("<I", len(tris)))
             for t in tris:
-                f.write(struct.pack("<12fH", *t, 0))
+                # 二进制 STL 格式: normal(3) + v1(3) + v2(3) + v3(3) + attr(1)
+                # t = [v1,v1,v1, v2,v2,v2, v3,v3,v3, nx,ny,nz]
+                f.write(struct.pack("<12fH",
+                    t[9], t[10], t[11],   # nx, ny, nz
+                    t[0], t[1], t[2],      # v1
+                    t[3], t[4], t[5],      # v2
+                    t[6], t[7], t[8],      # v3
+                    0))
         try:
             pts, vels = plan_path_from_stl(str(stl_path), layer_height=3.0)
             assert pts.shape[1] == 6
@@ -381,8 +388,8 @@ class TestLicenseManager:
         import repair_app.utils.license_manager as lm_mod
         monkeypatch.setattr(lm_mod, "get_config_dir", lambda: tmp_path)
         monkeypatch.setattr(lm_mod, "get_builtin_config_file", lambda fn: None)
-        from repair_app.utils.license_manager import LicenseManager, generate_license
-        generate_license(str(tmp_path / "license.key"), issued_to="Test", days_valid=30)
+        from repair_app.utils.license_manager import LicenseManager, generate_license, get_machine_id
+        generate_license(str(tmp_path / "license.key"), machine_id=get_machine_id(), issued_to="Test", days_valid=30)
         lm = LicenseManager()
         assert lm.load_license() is True
         assert lm.is_valid is True
@@ -404,8 +411,8 @@ class TestLicenseManager:
         import repair_app.utils.license_manager as lm_mod
         monkeypatch.setattr(lm_mod, "get_config_dir", lambda: tmp_path)
         monkeypatch.setattr(lm_mod, "get_builtin_config_file", lambda fn: None)
-        from repair_app.utils.license_manager import LicenseManager, generate_license
-        generate_license(str(tmp_path / "license.key"), days_valid=-1)
+        from repair_app.utils.license_manager import LicenseManager, generate_license, get_machine_id
+        generate_license(str(tmp_path / "license.key"), machine_id=get_machine_id(), days_valid=-1)
         lm = LicenseManager()
         assert lm.load_license() is False
         assert "过期" in lm.error
@@ -454,8 +461,8 @@ class TestLicenseManager:
         monkeypatch.setattr(lm_mod, "get_config_dir", lambda: tmp_path)
         # No private key file → HMAC fallback
         lic_path = str(tmp_path / "license.key")
-        from repair_app.utils.license_manager import generate_license
-        generate_license(lic_path, issued_to="Test", days_valid=10)
+        from repair_app.utils.license_manager import generate_license, get_machine_id
+        generate_license(lic_path, machine_id=get_machine_id(), issued_to="Test", days_valid=10)
         data = json.loads(Path(lic_path).read_text(encoding="utf-8"))
         assert "signature" in data
         assert data["issued_to"] == "Test"
@@ -465,13 +472,13 @@ class TestLicenseManager:
         import repair_app.utils.license_manager as lm_mod
         monkeypatch.setattr(lm_mod, "get_config_dir", lambda: tmp_path)
         from repair_app.utils.license_manager import (
-            generate_keypair, generate_license, _CRYPTO_AVAILABLE,
+            generate_keypair, generate_license, _CRYPTO_AVAILABLE, get_machine_id,
         )
         if not _CRYPTO_AVAILABLE:
             pytest.skip("cryptography not available")
         generate_keypair(str(tmp_path))
         lic_path = str(tmp_path / "license.key")
-        generate_license(lic_path, issued_to="RSA", days_valid=10,
+        generate_license(lic_path, machine_id=get_machine_id(), issued_to="RSA", days_valid=10,
                          features=["repair", "export"])
         data = json.loads(Path(lic_path).read_text(encoding="utf-8"))
         assert len(data["signature"]) > 100  # RSA signature is long
@@ -487,12 +494,12 @@ class TestLicenseManager:
             return p if p.exists() else None
         monkeypatch.setattr(lm_mod, "get_builtin_config_file", mock_builtin)
         from repair_app.utils.license_manager import (
-            generate_keypair, generate_license, LicenseManager, _CRYPTO_AVAILABLE,
+            generate_keypair, generate_license, LicenseManager, _CRYPTO_AVAILABLE, get_machine_id,
         )
         if not _CRYPTO_AVAILABLE:
             pytest.skip("cryptography not available")
         generate_keypair(str(tmp_path))
-        generate_license(str(tmp_path / "license.key"), days_valid=30)
+        generate_license(str(tmp_path / "license.key"), machine_id=get_machine_id(), days_valid=30)
         lm = LicenseManager()
         assert lm.load_license() is True
         assert lm.is_valid is True
@@ -537,8 +544,8 @@ class TestLicenseManager:
         import repair_app.utils.license_manager as lm_mod
         monkeypatch.setattr(lm_mod, "get_config_dir", lambda: tmp_path)
         monkeypatch.setattr(lm_mod, "get_builtin_config_file", lambda fn: None)
-        from repair_app.utils.license_manager import LicenseManager, generate_license
-        generate_license(str(tmp_path / "license.key"), days_valid=30)
+        from repair_app.utils.license_manager import LicenseManager, generate_license, get_machine_id
+        generate_license(str(tmp_path / "license.key"), machine_id=get_machine_id(), days_valid=30)
         from repair_app.utils.app_config import AppConfig
         with AppConfig.override(developer_mode=False):
             lm = LicenseManager()
@@ -572,8 +579,8 @@ class TestLicenseManager:
         import repair_app.utils.license_manager as lm_mod
         monkeypatch.setattr(lm_mod, "get_config_dir", lambda: tmp_path)
         monkeypatch.setattr(lm_mod, "get_builtin_config_file", lambda fn: None)
-        from repair_app.utils.license_manager import LicenseManager, generate_license
-        generate_license(str(tmp_path / "license.key"), days_valid=3)
+        from repair_app.utils.license_manager import LicenseManager, generate_license, get_machine_id
+        generate_license(str(tmp_path / "license.key"), machine_id=get_machine_id(), days_valid=3)
         lm = LicenseManager()
         lm.load_license()
         assert lm.expiring_soon is True
@@ -2226,20 +2233,6 @@ class TestConfig:
         legacy.mkdir()
         monkeypatch.setattr(cfg_mod, "_PROJECT_ROOT", str(tmp_path))
         result = cfg_mod.get_morph_dir()
-        assert result == str(legacy)
-
-    def test_get_p1_frame_dir_default(self):
-        from repair_app.utils.config import get_p1_frame_dir
-        d = get_p1_frame_dir()
-        assert isinstance(d, str)
-        assert len(d) > 0
-
-    def test_get_p1_frame_dir_legacy(self, monkeypatch, tmp_path):
-        import repair_app.utils.config as cfg_mod
-        legacy = tmp_path / "Matlab图片保存"
-        legacy.mkdir()
-        monkeypatch.setattr(cfg_mod, "_PROJECT_ROOT", str(tmp_path))
-        result = cfg_mod.get_p1_frame_dir()
         assert result == str(legacy)
 
     def test_get_pointlist_file(self):

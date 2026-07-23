@@ -116,6 +116,16 @@ class MatlabService:
     def address(self) -> str:
         return self._client.address
 
+    @property
+    def message(self) -> str:
+        """获取 LifecycleManager 的当前状态消息。"""
+        from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
+        try:
+            manager = MatlabLifecycleManager.get_instance()
+            return manager.message
+        except Exception:
+            return ""
+
     # ---- 健康检查 ----
     def check_health(self, on_health: Callable[[bool, str], None]) -> None:
         """检查引擎健康状态。"""
@@ -129,6 +139,45 @@ class MatlabService:
 
     def stop_heartbeat(self) -> None:
         self._client.stop_heartbeat()
+
+    # ---- 生命周期管理 ----
+    def ensure_ready(self, project_root: str = None) -> bool:
+        """确保 MATLAB + Bridge 服务就绪。
+
+        Args:
+            project_root: 项目根目录（用于查找 matlab_bridge_server.m）
+
+        Returns:
+            True if MATLAB is ready for computation
+        """
+        from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
+
+        if project_root is None:
+            import os
+            project_root = os.environ.get("CSAM_PROJECT_ROOT", "")
+
+        manager = MatlabLifecycleManager.get_instance(project_root)
+        return manager.ensure_ready()
+
+    def health_check(self) -> dict:
+        """执行 MATLAB 服务健康检查。"""
+        try:
+            if not self._client.is_connected:
+                return {"status": "unhealthy", "error": "Bridge 未连接"}
+            from repair_app.communication.repair_protocol_pb2 import EngineStatus
+            return {"status": "healthy", "engine": "connected"}
+        except Exception as exc:
+            return {"status": "unhealthy", "error": str(exc)}
+
+    def shutdown(self) -> None:
+        """关闭 MATLAB 服务（停止 Bridge + MATLAB 进程）。"""
+        from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
+        try:
+            manager = MatlabLifecycleManager.get_instance()
+            manager.stop()
+        except Exception as exc:
+            logger.warning("MatlabService shutdown 异常: %s", exc)
+        self.close()
 
     # ---- 路径规划请求 ----
     def request_path_planning(
@@ -220,6 +269,69 @@ class MatlabService:
 
         logger.info("发起路径规划 [%s]: %d 点 -> %s", request_id, len(xyz), self.address)
         return self._client.request_repair(request, _on_result, _on_error)
+
+    # ---- 完整管线计算（阻塞，任务7 Phase 1） ----
+    def run_full_pipeline_blocking(
+        self, request_bytes: bytes, timeout_s: float = 600.0
+    ) -> dict:
+        """阻塞执行完整计算管线（路径规划 + 形貌预测）。
+
+        自动管理 MATLAB 生命周期状态（BUSY → READY/RECOVERING）。
+
+        Args:
+            request_bytes: 序列化后的 protobuf RepairRequest 字节
+            timeout_s: 超时（秒），默认 600s
+
+        Returns:
+            解析后的结果 dict（与旧版 parse_repair_result 格式一致）
+
+        Raises:
+            BridgeError: 通信失败
+            RuntimeError: 结果解析失败
+        """
+        import time as _time
+        from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
+        from repair_app.communication.repair_serialization import (
+            deserialize_result,
+            parse_repair_result,
+        )
+
+        started = _time.time()
+        logger.info("发起完整管线计算 -> %s", self.address)
+
+        manager = MatlabLifecycleManager.get_instance()
+        with manager.execution_scope():
+            try:
+                reply_bytes = self._client.request_blocking(
+                    request_bytes, timeout_ms=int(timeout_s * 1000)
+                )
+            except BridgeError as exc:
+                logger.error("完整管线计算通信失败: %s", exc)
+                raise
+
+            elapsed_ms = int((_time.time() - started) * 1000)
+
+            try:
+                msg = deserialize_result(reply_bytes)
+                parsed = parse_repair_result(msg)
+            except Exception as exc:
+                logger.error("完整管线计算解析失败: %s", exc)
+                raise RuntimeError(f"MATLAB 结果解析失败: {exc}") from exc
+
+            if elapsed_ms > self._latency_log_threshold:
+                logger.warning(
+                    "完整管线计算延迟高: %dms (阈值=%dms)",
+                    elapsed_ms, self._latency_log_threshold
+                )
+            else:
+                logger.info(
+                    "完整管线计算完成: %s, %d 航点, %dms",
+                    parsed.get("status_name", "UNKNOWN"),
+                    len(parsed.get("waypoints", [])),
+                    elapsed_ms,
+                )
+
+            return parsed
 
     # ---- 清理 ----
     def close(self, wait_ms: int = 4000) -> None:

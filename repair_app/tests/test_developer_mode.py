@@ -370,12 +370,12 @@ class TestModeIsolation:
         """Release Mode 下 License 算法未被修改（机器码/签名/过期校验完整）。"""
         from repair_app.utils.app_config import AppConfig
         from repair_app.utils.license_manager import (
-            LicenseManager, generate_license, _get_machine_id,
+            LicenseManager, generate_license, get_machine_id,
         )
 
         # 生成有效 License（HMAC 签名，因为临时目录无私钥）
         lic_path = tmp_path / "license.key"
-        generate_license(str(lic_path), issued_to="TestUser", days_valid=30)
+        generate_license(str(lic_path), machine_id=get_machine_id(), issued_to="TestUser", days_valid=30)
 
         # 指向临时目录 + 禁用 builtin 公钥（强制 HMAC 校验路径）
         import repair_app.utils.license_manager as lm_module
@@ -475,10 +475,10 @@ class TestStartupFlowIntegration:
         """模拟启动：Release Mode 下有效 License 通过。"""
         from repair_app.utils.app_config import AppConfig
         from repair_app.utils.license_manager import (
-            LicenseManager, generate_license,
+            LicenseManager, generate_license, get_machine_id,
         )
 
-        generate_license(str(tmp_path / "license.key"), issued_to="Test", days_valid=30)
+        generate_license(str(tmp_path / "license.key"), machine_id=get_machine_id(), issued_to="Test", days_valid=30)
 
         # 指向临时目录 + 禁用 builtin 公钥（强制 HMAC 校验路径）
         import repair_app.utils.license_manager as lm_module

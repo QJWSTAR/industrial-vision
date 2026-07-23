@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QLabel, QSpinBox, QSizePolicy,
 )
 
+from repair_app.ui.theme_manager import ThemeManager
+
 
 class LayerPlayer(QWidget):
     """逐层播放控制器。
@@ -48,13 +50,14 @@ class LayerPlayer(QWidget):
 
     def _setup_ui(self) -> None:
         """构建播放控制布局。"""
+        p = ThemeManager.get_palette()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(4)
 
         # 标题行
         title = QLabel("🎬 逐层查看")
-        title.setStyleSheet("color:#93C5FD; font-size:12px; font-weight:bold;")
+        title.setStyleSheet(f"color:{p.title_accent}; font-size:12px; font-weight:bold;")
         layout.addWidget(title)
 
         # 控制按钮行
@@ -72,9 +75,9 @@ class LayerPlayer(QWidget):
         self._btn_play.setToolTip("自动逐层播放")
         self._btn_play.clicked.connect(self._on_play_pause)
         self._btn_play.setStyleSheet(
-            "QPushButton{background:#1D4ED8;color:#FFF;border:none;border-radius:4px;"
-            "font-weight:bold;padding:4px 8px;}"
-            "QPushButton:hover{background:#2563EB;}"
+            f"QPushButton{{background:{p.accent_hover};color:#FFF;border:none;border-radius:4px;"
+            f"font-weight:bold;padding:4px 8px;}}"
+            f"QPushButton:hover{{background:{p.accent};}}"
         )
         ctrl_row.addWidget(self._btn_play)
 
@@ -86,7 +89,7 @@ class LayerPlayer(QWidget):
 
         # 层号显示
         self._lb_layer = QLabel("Layer: 0 / 0")
-        self._lb_layer.setStyleSheet("color:#CBD5E1; font-size:11px; min-width:90px;")
+        self._lb_layer.setStyleSheet(f"color:{p.text_secondary}; font-size:11px; min-width:90px;")
         self._lb_layer.setAlignment(Qt.AlignCenter)
         ctrl_row.addWidget(self._lb_layer)
 
@@ -106,7 +109,7 @@ class LayerPlayer(QWidget):
 
         # 速度控制
         speed_label = QLabel("速度:")
-        speed_label.setStyleSheet("color:#64748B; font-size:11px;")
+        speed_label.setStyleSheet(f"color:{p.text_disabled}; font-size:11px;")
         slider_row.addWidget(speed_label)
 
         self._sp_speed = QSpinBox()

@@ -57,6 +57,13 @@ from repair_app.utils.logger_config import (
     exception as _log_exception,
     get_logger,
 )
+from repair_app.utils.path_sanitizer import PathSanitizer
+
+
+# 项目根目录（用于路径脱敏）
+_PROJECT_ROOT = os.path.normpath(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 
 
 # ============================================================
@@ -148,6 +155,8 @@ class LogManager:
             traceback 文本（供 ErrorDialog 技术日志区展示）
         """
         tb_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        # 路径脱敏：替换敏感路径为占位符
+        tb_text = PathSanitizer.sanitize(tb_text, project_root=_PROJECT_ROOT)
         tag = f"[{code.value.upper()}]"
         ctx = f" | context={context}" if context else ""
         # 同时记录简短错误消息和完整 traceback

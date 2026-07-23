@@ -16,12 +16,19 @@ import threading
 from datetime import datetime
 from typing import Optional, Callable
 
+from repair_app.utils.path_sanitizer import PathSanitizer
+
 try:
     from repair_app.utils.resource_path import get_data_dir
 except ImportError:
     def get_data_dir():
         from pathlib import Path
         return Path(__file__).resolve().parent.parent.parent
+
+# 项目根目录（用于路径脱敏）
+_PROJECT_ROOT = os.path.normpath(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 
 
 def install_crash_handler(
@@ -42,6 +49,8 @@ def install_crash_handler(
         # Format the traceback
         tb_lines = traceback.format_exception(exc_type, exc_value, exc_tb)
         tb_text = "".join(tb_lines)
+        # 路径脱敏：替换敏感路径为占位符
+        tb_text = PathSanitizer.sanitize(tb_text, project_root=_PROJECT_ROOT)
 
         # Write crash log
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

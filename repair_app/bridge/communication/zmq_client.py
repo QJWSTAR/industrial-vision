@@ -7,12 +7,23 @@
 - 延迟日志（任务10）
 - 心跳集成（任务7）
 - 资源自动清理
+
+ZMQ Socket Thread Ownership:
+- 每个 ZMQ socket 由单个线程创建和独占使用。
+- BridgeClient.request_blocking(): 在调用线程中创建 REQ socket。
+- _RequestWorker: 在其 QThread 中创建 REQ socket。
+- ProgressPublisher: PUB socket 由主线程持有。
+- ProgressSubscriber: SUB socket 由其 QThread 持有。
+- 严禁跨线程共享 ZMQ socket。
 """
 from __future__ import annotations
 
+import logging
 import time
 import threading
 from typing import Callable, Optional
+
+logger = logging.getLogger("csam.bridge.client")
 
 from PySide6.QtCore import QThread, Signal
 
@@ -245,6 +256,123 @@ class BridgeClient:
         self._request_worker.finished.connect(self._on_worker_finished)
         self._request_worker.start()
         return getattr(request, "request_id", "")
+
+    # ---- 显式重连（Phase 3） ----
+    def reconnect(self) -> bool:
+        """显式重连：创建新 socket 并验证连接。
+
+        ZMQ REQ/REP 有严格的 send→recv→send→recv 状态机。
+        timeout 后必须关闭旧 socket 并创建新 socket 才能安全复用。
+
+        Returns:
+            True if reconnection successful
+        """
+        if self._closed:
+            logger.warning("BridgeClient: 客户端已关闭，跳过重连")
+            return False
+
+        logger.info("BridgeClient: 尝试重连 %s ...", self._address)
+
+        if not _ZMQ_AVAILABLE:
+            logger.error("BridgeClient: 重连失败 - pyzmq 未安装")
+            return False
+
+        try:
+            # 创建新 socket 并测试连接
+            ctx = zmq.Context.instance()
+            sock = ctx.socket(zmq.REQ)
+            sock.setsockopt(zmq.LINGER, 0)
+            sock.setsockopt(zmq.RCVTIMEO, self._config.health_check_timeout_ms)
+            sock.setsockopt(zmq.SNDTIMEO, 2000)
+
+            try:
+                sock.connect(self._address)
+                hb = Serializer.build_health_check()
+                sock.send(Serializer.serialize_health(hb))
+
+                if sock.poll(self._config.health_check_timeout_ms, zmq.POLLIN):
+                    resp_bytes = sock.recv()
+                    resp = HealthCheckResponse()
+                    resp.ParseFromString(resp_bytes)
+                    parsed = Serializer.parse_health_response(resp)
+                    if parsed.get("status_code") == 0:
+                        logger.info(
+                            "BridgeClient: 重连成功 - %s (latency: %s)",
+                            parsed.get("status", "OK"),
+                            parsed.get("latency_ms", "N/A"),
+                        )
+                        return True
+                    else:
+                        logger.warning(
+                            "BridgeClient: 重连失败 - %s",
+                            parsed.get("status", "UNKNOWN"),
+                        )
+                else:
+                    logger.warning("BridgeClient: 重连超时")
+            finally:
+                sock.close(linger=0)
+        except Exception as exc:
+            logger.warning("BridgeClient: 重连异常: %s", exc)
+
+        return False
+
+    # ---- 阻塞请求（任务7 Phase 1） ----
+    def request_blocking(self, request_bytes: bytes, timeout_ms: int = 600000) -> bytes:
+        """阻塞请求：在调用线程中直接发送 ZMQ 请求并等待响应。
+
+        用于 ComputePipelineWorker 等已在 QThread 中的调用者。
+
+        Args:
+            request_bytes: 序列化后的 protobuf 请求字节
+            timeout_ms: 超时（毫秒），默认 600s
+
+        Returns:
+            原始响应字节
+
+        Raises:
+            BridgeError: 超时、连接失败、序列化错误等
+        """
+        if self._closed:
+            raise ShutdownError("客户端已关闭")
+
+        if not _ZMQ_AVAILABLE:
+            raise BridgeError("pyzmq 未安装")
+
+        ctx = zmq.Context.instance()
+        sock = ctx.socket(zmq.REQ)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
+        sock.setsockopt(zmq.SNDTIMEO, self._config.connect_timeout_ms)
+
+        try:
+            sock.connect(self._address)
+            sock.send(request_bytes)
+
+            poll_interval = self._config.poll_interval_ms
+            elapsed = 0
+            while elapsed < timeout_ms:
+                if sock.poll(poll_interval, zmq.POLLIN):
+                    reply = sock.recv()
+                    return reply
+                elapsed += poll_interval
+                if self._closed:
+                    raise ShutdownError("客户端在请求期间被关闭")
+
+            # 超时：ZMQ REQ/REP socket 状态不确定，必须重置
+            logger.warning(
+                "BridgeClient REQ socket 超时 (%dms)，重置 socket 并尝试重连",
+                timeout_ms,
+            )
+            self.reconnect()  # 验证连接可用性，为下次请求做准备
+            raise ConnectionTimeoutError(
+                f"请求超时 ({timeout_ms}ms)", timeout_ms=timeout_ms
+            )
+        except (BridgeError, ShutdownError, ConnectionTimeoutError):
+            raise
+        except Exception as exc:
+            raise translate_zmq_error(exc) from exc
+        finally:
+            sock.close(linger=0)
 
     # ---- 健康检查 ----
     def check_health(self, on_health: Callable[[bool, str], None]) -> None:

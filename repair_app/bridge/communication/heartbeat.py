@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Callable, Optional
 
@@ -38,14 +39,14 @@ class HeartbeatMonitor(QThread):
         self._config = config or BridgeConfig.from_env()
         self._miss_count = 0
         self._last_status: Optional[EngineStatus] = None
-        self._running = False
+        self._stop_event = threading.Event()
 
     def run(self) -> None:
-        self._running = True
+        self._stop_event.clear()
         interval_ms = self._config.heartbeat_interval_ms
         threshold = self._config.heartbeat_miss_threshold
 
-        while self._running:
+        while not self._stop_event.is_set():
             if self.isInterruptionRequested():
                 break
 
@@ -73,7 +74,7 @@ class HeartbeatMonitor(QThread):
 
             # sleep 可被中断
             slept = 0
-            while slept < interval_ms and self._running:
+            while slept < interval_ms and not self._stop_event.is_set():
                 if self.isInterruptionRequested():
                     return
                 step = min(100, interval_ms - slept)
@@ -97,7 +98,7 @@ class HeartbeatMonitor(QThread):
 
     def stop(self, wait_ms: int = 3000) -> None:
         """请求停止并等待线程退出。"""
-        self._running = False
+        self._stop_event.set()
         self.requestInterruption()
         self.quit()
         if not self.wait(wait_ms):

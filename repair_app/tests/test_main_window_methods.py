@@ -12,10 +12,8 @@ DO NOT call MainWindow() directly —— __init__ 会启动 QTimer.singleShot
      然后手动赋值需要的属性。
   2. Strategy 3: MainWindow._method(stub) — 通过 SimpleNamespace stub
      作为 self 传入（参考 test_crash_recovery.py 中已验证的模式）。
-  3. 模块级函数（_friendly_error / _show_error / _list_p1_frame_paths）
+  3. 模块级函数（_friendly_error / _show_error）
      直接调用，无需任何实例。
-
-P1FramePlayer 是独立 QWidget（无重型初始化），可直接实例化。
 
 conftest.py 已在 session 级别禁用 QTimer.singleShot（替换为 no-op），
 并移除 loguru stderr sink 避免多线程日志死锁。
@@ -58,9 +56,7 @@ from repair_app.ui.main_window import (
     PAGE_MORPH,
     PAGE_OUTPUT,
     PAGE_PATH,
-    P1FramePlayer,
     _friendly_error,
-    _list_p1_frame_paths,
     _show_error,
 )
 
@@ -163,7 +159,7 @@ def _make_main_window_new():
 
 @pytest.mark.unit
 class TestModuleFunctions:
-    """模块级函数 _friendly_error / _show_error / _list_p1_frame_paths 测试。"""
+    """模块级函数 _friendly_error / _show_error 测试。"""
 
     def test_friendly_error_returns_string_for_file_error(self):
         """文件异常翻译为友好消息（含标题 + 详细说明）。"""
@@ -205,317 +201,9 @@ class TestModuleFunctions:
         assert called["parent"] is parent
         assert called["show_dialog"] is True
 
-    def test_list_p1_frame_paths_nonexistent_dir(self, monkeypatch):
-        """目录不存在时返回空列表。"""
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", "/nonexistent/path/xyz_abc")
-        result = _list_p1_frame_paths()
-        assert result == []
-
-    def test_list_p1_frame_paths_empty_dir(self, tmp_path, monkeypatch):
-        """空目录返回空列表。"""
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        result = _list_p1_frame_paths()
-        assert result == []
-
-    def test_list_p1_frame_paths_numeric_sort(self, tmp_path, monkeypatch):
-        """按数字顺序排序（1, 2, 10 而非 1, 10, 2）。"""
-        for name in ["1.jpg", "10.jpg", "2.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        # 非图片文件应被忽略
-        (tmp_path / "readme.txt").write_bytes(b"\x00")
-        # 非数字名应排到最后（sort key = 10**9）
-        (tmp_path / "abc.jpg").write_bytes(b"\x00")
-        # .jpeg / .png 也应被识别
-        (tmp_path / "3.jpeg").write_bytes(b"\x00")
-        (tmp_path / "4.png").write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        result = _list_p1_frame_paths()
-        names = [os.path.basename(p) for p in result]
-        # 数字升序：1, 2, 3, 4, 10, abc
-        assert names == ["1.jpg", "2.jpg", "3.jpeg", "4.png", "10.jpg", "abc.jpg"]
-
 
 # ============================================================
-# 2. P1FramePlayer — 直接实例化（无重型初始化）
-# ============================================================
-
-@pytest.mark.gui
-class TestP1FramePlayer:
-    """P1FramePlayer 控件测试。"""
-
-    def test_construction_empty_dir(self, qapp, tmp_path):
-        """空目录构造：无帧。"""
-        player = P1FramePlayer(str(tmp_path))
-        assert player.has_frames() is False
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_refresh_frames_returns_false_when_empty(self, qapp, tmp_path, monkeypatch):
-        """空目录 refresh_frames 返回 False。"""
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        assert player.refresh_frames() is False
-        assert player.has_frames() is False
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_refresh_frames_returns_true_with_files(self, qapp, tmp_path, monkeypatch):
-        """有图片帧时 refresh_frames 返回 True。"""
-        for name in ["1.jpg", "2.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        assert player.refresh_frames() is True
-        assert player.has_frames() is True
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_start_with_frames(self, qapp, tmp_path, monkeypatch):
-        """start() 在有帧时启动定时器。"""
-        for name in ["1.jpg", "2.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        assert player.start() is True
-        assert player._timer.isActive()
-        player.pause()
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_start_without_frames_calls_refresh(self, qapp, tmp_path, monkeypatch):
-        """无帧时 start() 调用 refresh_frames；仍无帧则返回 False。"""
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        # 清空 paths 模拟无帧
-        player._paths = []
-        result = player.start()
-        assert result is False
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_pause_stops_timer(self, qapp, tmp_path, monkeypatch):
-        """pause() 停止定时器并更新按钮文案。"""
-        for name in ["1.jpg", "2.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        player.start()
-        player.pause()
-        assert not player._timer.isActive()
-        assert "▶" in player._btn_play.text()
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_toggle_playback_start_then_pause(self, qapp, tmp_path, monkeypatch):
-        """toggle_playback 在停止时启动、在播放时暂停。"""
-        for name in ["1.jpg", "2.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        # 初始停止状态
-        player.toggle_playback()
-        assert player._timer.isActive()
-        # 再切换 → 暂停
-        player.toggle_playback()
-        assert not player._timer.isActive()
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_on_speed_changed_active_timer(self, qapp, tmp_path, monkeypatch):
-        """定时器活动时切换速度，重启定时器。"""
-        for name in ["1.jpg", "2.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        player.start()
-        # 切到 0 索引（2 fps）
-        player._cb_speed.setCurrentIndex(0)
-        # _on_speed_changed 已通过 currentIndexChanged 自动调用
-        assert player._timer.isActive()
-        player.pause()
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_on_speed_changed_inactive_timer_noop(self, qapp, tmp_path, monkeypatch):
-        """定时器未活动时 _on_speed_changed 不启动。"""
-        for name in ["1.jpg", "2.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        assert not player._timer.isActive()
-        player._on_speed_changed(0)
-        assert not player._timer.isActive()
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_on_slider_changed_updates_index(self, qapp, tmp_path, monkeypatch):
-        """_on_slider_changed 更新当前索引并渲染。"""
-        for name in ["1.jpg", "2.jpg", "3.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        player._on_slider_changed(1)
-        assert player._idx == 1
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_jump_relative_forward(self, qapp, tmp_path, monkeypatch):
-        """_jump_relative(+1) 前进一帧。"""
-        for name in ["1.jpg", "2.jpg", "3.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        player._idx = 0
-        player._jump_relative(1)
-        assert player._idx == 1
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_jump_relative_backward_clamped(self, qapp, tmp_path, monkeypatch):
-        """_jump_relative(-1) 在 idx=0 时被钳制为 0。"""
-        for name in ["1.jpg", "2.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        player._idx = 0
-        player._jump_relative(-1)
-        assert player._idx == 0
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_jump_relative_forward_clamped(self, qapp, tmp_path, monkeypatch):
-        """_jump_relative(+1) 在末尾时被钳制。"""
-        for name in ["1.jpg", "2.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        player._idx = 1  # 最后一帧
-        player._jump_relative(1)
-        assert player._idx == 1
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_jump_relative_no_frames_is_noop(self, qapp, tmp_path, monkeypatch):
-        """无帧时 _jump_relative 不抛异常。"""
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        player._jump_relative(1)  # 不应抛
-        assert player._idx == 0
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_next_frame_loop_wraps_to_zero(self, qapp, tmp_path, monkeypatch):
-        """循环模式下末帧后回到 0。"""
-        for name in ["1.jpg", "2.jpg", "3.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        player._chk_loop.setChecked(True)
-        player._idx = 2  # 末帧
-        player._next_frame()
-        assert player._idx == 0
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_next_frame_no_loop_pauses_at_end(self, qapp, tmp_path, monkeypatch):
-        """非循环模式下到达末帧时暂停。"""
-        for name in ["1.jpg", "2.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        player._chk_loop.setChecked(False)
-        player._idx = 1  # 末帧
-        player._next_frame()
-        assert not player._timer.isActive()
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_next_frame_advances(self, qapp, tmp_path, monkeypatch):
-        """_next_frame 推进到下一帧。"""
-        for name in ["1.jpg", "2.jpg", "3.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        player._idx = 0
-        player._next_frame()
-        assert player._idx == 1
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_next_frame_no_frames_pauses(self, qapp, tmp_path, monkeypatch):
-        """无帧时 _next_frame 调用 pause。"""
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        player._next_frame()  # 不应抛
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_render_no_frames(self, qapp, tmp_path, monkeypatch):
-        """无帧时 _render 显示未找到提示。"""
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        player._paths = []
-        player._render()
-        assert player._current_pixmap is None
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_render_invalid_pixmap(self, qapp, tmp_path, monkeypatch):
-        """无效图片字节时 _render 显示读取失败。"""
-        # 写入无效图片字节
-        (tmp_path / "1.jpg").write_bytes(b"not an image")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        # QPixmap 加载无效字节返回 null pixmap
-        assert player._current_pixmap is None
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_paint_current_pixmap_none_is_noop(self, qapp, tmp_path, monkeypatch):
-        """_paint_current_pixmap 在 pixmap 为 None 时不抛。"""
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        player._current_pixmap = None
-        player._paint_current_pixmap()  # 不应抛
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-    def test_resize_event(self, qapp, tmp_path, monkeypatch):
-        """resizeEvent 触发重绘。"""
-        for name in ["1.jpg", "2.jpg"]:
-            (tmp_path / name).write_bytes(b"\x00")
-        monkeypatch.setattr(_mw_mod, "_P1_FRAME_DIR", str(tmp_path))
-        player = P1FramePlayer(str(tmp_path))
-        event = QResizeEvent(QSize(640, 360), QSize(320, 180))
-        player.resizeEvent(event)  # 不应抛
-        player.close()
-        player.deleteLater()
-        qapp.processEvents()
-
-
-# ============================================================
-# 3. MainWindow 静态方法
+# 2. MainWindow 静态方法
 # ============================================================
 
 @pytest.mark.unit
@@ -895,11 +583,11 @@ class TestComputeSlots:
             _lb_prog=MagicMock(),
             _sb=MagicMock(),
             _prog=MagicMock(),
-            _pipeline=MagicMock(),
+            _workflow_controller=MagicMock(),
         )
         MainWindow._on_compute_stage(stub, "启动 MATLAB")
         stub._prog.setValue.assert_called_with(10)
-        stub._pipeline.set_running.assert_called_with(1)
+        stub._workflow_controller.set_step_running.assert_called_with(1)
 
     def test_on_compute_stage_execute(self):
         """_on_compute_stage '执行' 分支。"""
@@ -961,12 +649,12 @@ class TestComputeSlots:
             _lb_prog=MagicMock(),
             _sb=MagicMock(),
             _stop_progress_subscriber=MagicMock(),
-            _pipeline=MagicMock(),
+            _workflow_controller=MagicMock(),
         )
         MainWindow._on_compute_failed(stub, "E_TEST", "friendly msg", "detail")
         stub._set_busy.assert_called_with(False)
         stub._prog.setValue.assert_called_with(0)
-        stub._pipeline.mark_running_as_failed.assert_called_once()
+        stub._workflow_controller.mark_running_as_failed.assert_called_once()
         stub._stop_progress_subscriber.assert_called_once()
 
     def test_on_compute_result_not_success_shows_error(self, monkeypatch):
@@ -980,12 +668,12 @@ class TestComputeSlots:
         stub = _make_stub(
             _set_busy=MagicMock(),
             _stop_progress_subscriber=MagicMock(),
-            _pipeline=MagicMock(),
+            _workflow_controller=MagicMock(),
         )
         result = {"status_name": "FAILED", "error_message": "matlab boom"}
         MainWindow._on_compute_result(stub, result)
         stub._set_busy.assert_called_with(False)
-        stub._pipeline.mark_running_as_failed.assert_called_once()
+        stub._workflow_controller.mark_running_as_failed.assert_called_once()
 
 
 # ============================================================
@@ -1292,11 +980,11 @@ class TestPathAndMorphSlots:
 
         stub = _make_stub(
             _set_busy=MagicMock(),
-            _pipeline=MagicMock(),
+            _workflow_controller=MagicMock(),
         )
         MainWindow._on_zmq_path_error(stub, "connection refused")
         stub._set_busy.assert_called_with(False)
-        stub._pipeline.mark_running_as_failed.assert_called_once()
+        stub._workflow_controller.mark_running_as_failed.assert_called_once()
 
     def test_on_morph_partial_updates_progress(self):
         """_on_morph_partial 更新进度。"""
@@ -2710,10 +2398,9 @@ class TestUIBuilderMethods:
         mw = _make_main_window_new()
         mw._switch_to_step = MagicMock()
         mw._on_material_changed = MagicMock()
-        mw._build_path_planning_panel = MagicMock(return_value=QWidget())
-        mw._build_morphology_panel = MagicMock(return_value=QWidget())
-        mw._build_output_panel = MagicMock(return_value=QWidget())
         mw._style_workflow_label = MagicMock()
+        mw._pp_fields = {}
+        mw._cs_fields = {}
         result = mw._left_column()
         assert result is not None
         assert hasattr(mw, "_step1_btn")
@@ -3067,7 +2754,7 @@ class TestLoadDemoAndLoad:
         mw._sp_max_layers.value.return_value = 5
         mw._sb = MagicMock()
         mw._lb_prog = MagicMock()
-        mw._pipeline = MagicMock()
+        mw._workflow_controller = MagicMock()
         mw._export_service = ExportService()
         mw._cs_fields = {k: MagicMock(value=MagicMock(return_value=500.0)) for k in [
             "particle_velocity", "critical_velocity", "nozzle_diameter",
@@ -3083,7 +2770,7 @@ class TestLoadDemoAndLoad:
         mw._sp_depth.value.return_value = 1.0
 
         mw._auto_generate_report()
-        mw._pipeline.mark_running_as_failed.assert_called_once()
+        mw._workflow_controller.mark_running_as_failed.assert_called_once()
         mw.deleteLater()
         qapp.processEvents()
 
@@ -4130,6 +3817,24 @@ class TestCalculationFlow:
         mw._selector = MagicMock()
         mw._selector.get_selection_mask.return_value = np.zeros(5, dtype=bool)
         mw._sb = MagicMock()
+        mw._cb_mat = MagicMock()
+        mw._cb_mat.currentIndex.return_value = 1
+        mw._cs_fields = {k: MagicMock(value=MagicMock(return_value=500.0)) for k in [
+            "particle_velocity", "critical_velocity", "nozzle_diameter",
+            "spray_angle", "standoff_distance", "particle_size",
+            "gas_temperature", "gas_pressure", "powder_feed_rate", "traversing_speed",
+        ]}
+        mw._pp_fields = {k: MagicMock(value=MagicMock(return_value=2.0)) for k in [
+            "layer_height", "scanning_angle", "scanning_step",
+            "edge_step_size", "tilt_angle", "buffer_additive",
+            "buffer_repairing", "link_free_dist", "obstacle_resolution",
+        ]}
+        mw._sp_depth = MagicMock()
+        mw._sp_depth.value.return_value = 1.0
+        mw._sp_max_layers = MagicMock()
+        mw._sp_max_layers.value.return_value = 5
+        mw._progress_subscriber = None
+        mw._matlab_service = MagicMock()
         mw._on_start_calculation()
         mw.deleteLater()
         qapp.processEvents()

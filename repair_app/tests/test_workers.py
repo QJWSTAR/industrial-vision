@@ -9,7 +9,7 @@
   - BaseWorker / WorkerManager / _pack_error：直接调用，无需事件循环
   - Worker.run() 正常/异常路径：直接同步调用（信号同步发射，便于覆盖率统计）
   - Worker.run() 中断路径：QThread + requestInterruption（必须真实线程）
-  - ComputePipelineWorker.run()：mock launcher / fake zmq 覆盖各阶段分支
+  - ComputePipelineWorker.run()：mock MatlabService 覆盖各阶段分支
 
 运行：pytest -m unit tests/test_workers.py -v
 """
@@ -147,28 +147,16 @@ def _make_fake_zmq(poll_result: str, reply: bytes = b"\x07fake"):
     return _Zmq()
 
 
-class _MockLauncherOk:
-    """模拟启动成功的 launcher（start 返回 True）。"""
-    def __init__(self, project_root):
-        self.project_root = project_root
+class _MockMatlabService:
+    """模拟 MatlabService，用于测试 ComputePipelineWorker。"""
+    def __init__(self):
+        self._run_full_pipeline_blocking_side_effect = None
+        self._run_full_pipeline_blocking_result = None
 
-    def start(self, timeout=None):
-        return True
-
-    def stop(self):
-        pass
-
-
-class _MockLauncherFail:
-    """模拟启动失败的 launcher（start 返回 False）。"""
-    def __init__(self, project_root):
-        self.project_root = project_root
-
-    def start(self, timeout=None):
-        return False
-
-    def stop(self):
-        pass
+    def run_full_pipeline_blocking(self, request_bytes, timeout_s=600.0):
+        if self._run_full_pipeline_blocking_side_effect:
+            raise self._run_full_pipeline_blocking_side_effect
+        return self._run_full_pipeline_blocking_result
 
 
 # ================================================================
@@ -669,36 +657,31 @@ class TestComputePipelineWorker:
     """一键计算管线 Worker 构造 / 信号签名 / run 各阶段分支 测试。"""
 
     def test_construction(self, qapp):
-        """构造：保存所有参数，_launcher 初始为 None。"""
+        """构造：保存所有参数，默认值正确。"""
+        mock_svc = _MockMatlabService()
         worker = ComputePipelineWorker(
-            project_root="/tmp/proj",
+            matlab_service=mock_svc,
             request_bytes=b"\x00\x01\x02",
-            bridge_address="tcp://127.0.0.1:5555",
-            startup_timeout=60.0,
             zmq_timeout=300.0,
         )
-        assert worker._project_root == "/tmp/proj"
+        assert worker._matlab_service is mock_svc
         assert worker._request_bytes == b"\x00\x01\x02"
-        assert worker._bridge_address == "tcp://127.0.0.1:5555"
-        assert worker._startup_timeout == 60.0
         assert worker._zmq_timeout == 300.0
-        assert worker._launcher is None
         # 继承 BaseWorker，总超时由各阶段管理（None）
         assert worker._timeout_s is None
         assert worker._worker_name == "ComputePipelineWorker"
         worker.deleteLater()
 
     def test_default_values(self, qapp):
-        """默认 bridge_address / startup_timeout / zmq_timeout。"""
-        worker = ComputePipelineWorker(project_root="/tmp", request_bytes=b"")
-        assert worker._bridge_address == "tcp://127.0.0.1:5555"
-        assert worker._startup_timeout == 120.0
+        """默认 zmq_timeout。"""
+        mock_svc = _MockMatlabService()
+        worker = ComputePipelineWorker(matlab_service=mock_svc, request_bytes=b"")
         assert worker._zmq_timeout == 600.0
         worker.deleteLater()
 
     def test_failed_signal_signature(self, qapp):
         """failed 信号签名：接受 3 个 str 参数 (code, friendly, detail)。"""
-        worker = ComputePipelineWorker(project_root="/tmp", request_bytes=b"")
+        worker = ComputePipelineWorker(matlab_service=_MockMatlabService(), request_bytes=b"")
         received = []
         worker.failed.connect(lambda c, f, d: received.append((c, f, d)))
         worker.failed.emit("network", "友好消息", "技术详情")
@@ -708,7 +691,7 @@ class TestComputePipelineWorker:
 
     def test_stage_signal_signature(self, qapp):
         """stage 信号签名：接受 1 个 str 参数。"""
-        worker = ComputePipelineWorker(project_root="/tmp", request_bytes=b"")
+        worker = ComputePipelineWorker(matlab_service=_MockMatlabService(), request_bytes=b"")
         received = []
         worker.stage.connect(lambda s: received.append(s))
         worker.stage.emit("正在启动 MATLAB...")
@@ -718,7 +701,7 @@ class TestComputePipelineWorker:
 
     def test_result_signal_signature(self, qapp):
         """result 信号签名：接受 1 个 dict 参数。"""
-        worker = ComputePipelineWorker(project_root="/tmp", request_bytes=b"")
+        worker = ComputePipelineWorker(matlab_service=_MockMatlabService(), request_bytes=b"")
         received = []
         worker.result.connect(lambda r: received.append(r))
         payload = {"waypoints": np.zeros((1, 3)), "layers": 2}
@@ -729,93 +712,62 @@ class TestComputePipelineWorker:
 
     def test_cleanup_no_op(self, qapp):
         """cleanup() 默认为空实现，调用不抛异常。"""
-        worker = ComputePipelineWorker(project_root="/tmp", request_bytes=b"")
+        worker = ComputePipelineWorker(matlab_service=_MockMatlabService(), request_bytes=b"")
         worker.cleanup()  # 不应抛异常
         worker.deleteLater()
 
-    def test_stop_launcher_no_launcher(self, qapp):
-        """stop_launcher() 在无 launcher 时不抛异常。"""
-        worker = ComputePipelineWorker(project_root="/tmp", request_bytes=b"")
-        worker.stop_launcher()  # _launcher 为 None，不应抛异常
-        assert worker._launcher is None
-        worker.deleteLater()
-
-    def test_stop_launcher_with_launcher(self, qapp, monkeypatch):
-        """stop_launcher() 在有 launcher 时调用其 stop()。"""
-        from repair_app.bridge import launcher as launcher_mod
-        monkeypatch.setattr(launcher_mod, "MatlabBridgeLauncher", _MockLauncherOk)
-        worker = ComputePipelineWorker(project_root="/tmp", request_bytes=b"\x00")
-        # 直接调用 run() 让 launcher 启动成功（mock start=True），随后 ZMQ 阶段会失败
-        # 这里仅验证 stop_launcher 在 _launcher 已设置时能调用 stop
-        worker._launcher = _MockLauncherOk("/tmp")
-        worker.stop_launcher()  # 不应抛异常
-        worker.deleteLater()
-
-    def test_run_launcher_start_failure(self, qapp, monkeypatch):
-        """run() 中 launcher.start() 返回 False 时 emit failed(MATLAB)。"""
-        from repair_app.bridge import launcher as launcher_mod
-        monkeypatch.setattr(launcher_mod, "MatlabBridgeLauncher", _MockLauncherFail)
+    def test_run_service_error(self, qapp):
+        """run() 中 matlab_service.run_full_pipeline_blocking() 抛异常时 emit failed。"""
+        mock_svc = _MockMatlabService()
+        mock_svc._run_full_pipeline_blocking_side_effect = RuntimeError("MATLAB 启动失败")
 
         worker = ComputePipelineWorker(
-            project_root="/tmp/proj",
+            matlab_service=mock_svc,
             request_bytes=b"\x00",
-            startup_timeout=5.0,
             zmq_timeout=10.0,
         )
         stages = []
         failed = []
         worker.stage.connect(lambda s: stages.append(s))
         worker.failed.connect(lambda c, f, d: failed.append((c, f, d)))
-        worker.run()  # 直接调用：launcher 启动失败分支
-        assert len(failed) == 1, "launcher 启动失败应发出 failed 信号"
+        worker.run()
+        assert len(failed) == 1, "service 抛异常应发出 failed 信号"
         code, friendly, detail = failed[0]
-        assert code == ErrorCode.MATLAB.value
+        assert isinstance(code, str)
         assert isinstance(friendly, str) and len(friendly) > 0
         assert isinstance(detail, str)
         assert len(stages) >= 1, "应至少发出一次 stage 信号"
-        assert worker._launcher is not None
         worker.deleteLater()
 
-    def test_run_zmq_timeout(self, qapp, monkeypatch):
-        """run() 中 ZMQ 轮询超时 时 emit failed(NETWORK)。"""
-        from repair_app.bridge import launcher as launcher_mod
-        monkeypatch.setattr(launcher_mod, "MatlabBridgeLauncher", _MockLauncherOk)
-        # 注入 fake zmq：poll 始终无事件，触发超时
-        monkeypatch.setitem(sys.modules, "zmq", _make_fake_zmq("empty"))
+    def test_run_service_timeout(self, qapp):
+        """run() 中 matlab_service 超时时 emit failed。"""
+        mock_svc = _MockMatlabService()
+        mock_svc._run_full_pipeline_blocking_side_effect = TimeoutError("ZMQ 请求超时")
 
         worker = ComputePipelineWorker(
-            project_root="/tmp/proj",
+            matlab_service=mock_svc,
             request_bytes=b"\x00",
-            startup_timeout=5.0,
-            zmq_timeout=0.1,  # 很短的超时，快速触发
+            zmq_timeout=0.1,
         )
         stages = []
         failed = []
         worker.stage.connect(lambda s: stages.append(s))
         worker.failed.connect(lambda c, f, d: failed.append((c, f, d)))
-        worker.run()  # 直接调用：ZMQ 超时分支
-        assert len(failed) == 1, "ZMQ 超时应发出 failed 信号"
+        worker.run()
+        assert len(failed) == 1, "超时应发出 failed 信号"
         code, friendly, detail = failed[0]
-        assert code == ErrorCode.NETWORK.value
-        assert "超时" in friendly
-        assert len(stages) >= 2, "应发出启动 + 计算两个 stage 信号"
+        assert isinstance(code, str)
+        assert len(stages) >= 1, "应发出 stage 信号"
         worker.deleteLater()
 
-    def test_run_zmq_success(self, qapp, monkeypatch):
-        """run() 中 ZMQ 收到回复后解析结果并 emit result(dict)。"""
-        from repair_app.bridge import launcher as launcher_mod
-        monkeypatch.setattr(launcher_mod, "MatlabBridgeLauncher", _MockLauncherOk)
-        monkeypatch.setitem(sys.modules, "zmq", _make_fake_zmq("event", reply=b"\x07ok"))
-
-        # mock 反序列化：跳过真实 protobuf 解析
-        from repair_app.communication import repair_serialization as rs_mod
-        monkeypatch.setattr(rs_mod, "deserialize_result", lambda data: {"raw": data})
-        monkeypatch.setattr(rs_mod, "parse_repair_result", lambda msg: {"parsed": True, "n": 3})
+    def test_run_service_success(self, qapp):
+        """run() 中 matlab_service 返回结果后 emit result(dict)。"""
+        mock_svc = _MockMatlabService()
+        mock_svc._run_full_pipeline_blocking_result = {"parsed": True, "n": 3}
 
         worker = ComputePipelineWorker(
-            project_root="/tmp/proj",
+            matlab_service=mock_svc,
             request_bytes=b"\x00",
-            startup_timeout=5.0,
             zmq_timeout=10.0,
         )
         stages = []
@@ -824,37 +776,28 @@ class TestComputePipelineWorker:
         worker.stage.connect(lambda s: stages.append(s))
         worker.result.connect(lambda r: results.append(r))
         worker.failed.connect(lambda c, f, d: failed.append((c, f, d)))
-        worker.run()  # 直接调用：完整成功路径
+        worker.run()
         assert len(failed) == 0, "成功路径不应发出 failed 信号"
         assert len(results) == 1, "应发出一次 result 信号"
         assert results[0] == {"parsed": True, "n": 3}
-        assert len(stages) >= 3, "应发出启动/计算/解析三个 stage 信号"
+        assert len(stages) >= 2, "应发出计算和解析两个 stage 信号"
         worker.deleteLater()
 
-    def test_run_parse_exception(self, qapp, monkeypatch):
-        """run() 中结果解析抛异常时 emit failed（走 _pack_error 路径）。"""
-        from repair_app.bridge import launcher as launcher_mod
-        monkeypatch.setattr(launcher_mod, "MatlabBridgeLauncher", _MockLauncherOk)
-        monkeypatch.setitem(sys.modules, "zmq", _make_fake_zmq("event", reply=b"\x07bad"))
-
-        from repair_app.communication import repair_serialization as rs_mod
-
-        def _raise(data):
-            raise RuntimeError("反序列化失败")
-
-        monkeypatch.setattr(rs_mod, "deserialize_result", _raise)
+    def test_run_parse_exception(self, qapp):
+        """run() 中任意异常走 _pack_error 路径 emit failed。"""
+        mock_svc = _MockMatlabService()
+        mock_svc._run_full_pipeline_blocking_side_effect = RuntimeError("解析失败")
 
         worker = ComputePipelineWorker(
-            project_root="/tmp/proj",
+            matlab_service=mock_svc,
             request_bytes=b"\x00",
-            startup_timeout=5.0,
             zmq_timeout=10.0,
         )
         failed = []
         worker.failed.connect(lambda c, f, d: failed.append((c, f, d)))
-        worker.run()  # 直接调用：解析异常 → except → emit failed
-        assert len(failed) == 1, "解析异常应发出 failed 信号"
+        worker.run()
+        assert len(failed) == 1, "异常应发出 failed 信号"
         code, friendly, detail = failed[0]
         assert isinstance(code, str)
-        assert "反序列化失败" in detail or "Traceback" in detail
+        assert "解析失败" in detail or "Traceback" in detail
         worker.deleteLater()

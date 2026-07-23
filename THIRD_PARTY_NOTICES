@@ -1,0 +1,81 @@
+THIRD PARTY NOTICES
+
+CSAM Repair Software v1.0.0
+Copyright (c) 2026 CSAM Team
+
+This software includes or depends on the following third-party components:
+
+===============================================================================
+1. NumPy
+   Version: 1.21+
+   License: BSD 3-Clause
+   Copyright: NumPy Developers
+   URL: https://numpy.org/
+
+2. SciPy
+   Version: 1.7+
+   License: BSD 3-Clause
+   Copyright: SciPy Developers
+   URL: https://scipy.org/
+
+3. PySide6 (Qt for Python)
+   Version: 6.4+
+   License: LGPLv3 / GPLv2 / Commercial
+   Copyright: The Qt Company Ltd.
+   URL: https://www.qt.io/
+
+4. Matplotlib
+   Version: 3.5+
+   License: Matplotlib License (BSD-compatible)
+   Copyright: Matplotlib Development Team
+   URL: https://matplotlib.org/
+
+5. Shapely
+   Version: 1.8+
+   License: BSD 3-Clause
+   Copyright: Sean Gillies
+   URL: https://shapely.readthedocs.io/
+
+6. PyZMQ
+   Version: 24+
+   License: BSD 3-Clause
+   Copyright: Brian E. Granger, Min Ragan-Kelley
+   URL: https://pyzmq.readthedocs.io/
+
+7. Protocol Buffers (protobuf)
+   Version: 5.26+
+   License: BSD 3-Clause
+   Copyright: Google LLC
+   URL: https://protobuf.dev/
+
+8. ReportLab
+   Version: 4.0+
+   License: BSD 3-Clause
+   Copyright: ReportLab Inc.
+   URL: https://www.reportlab.com/
+
+9. cryptography
+   Version: 41.0+
+   License: Apache 2.0 / BSD 3-Clause
+   Copyright: The Python Cryptographic Authority
+   URL: https://cryptography.io/
+
+10. Loguru
+    Version: 0.7+
+    License: MIT
+    Copyright: Delgan
+    URL: https://github.com/Delgan/loguru
+
+11. ZeroMQ (libzmq)
+    License: MPL 2.0
+    Copyright: iMatix Corporation and Contributors
+    URL: https://zeromq.org/
+
+===============================================================================
+
+The MIT License text for this software is available in the LICENSE file.
+
+Copies of the above licenses may be found at their respective project URLs
+or in the 'licenses' directory if distributed with this software.
+
+For questions about open source compliance, contact the CSAM Team.

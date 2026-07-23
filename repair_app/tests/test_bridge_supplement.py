@@ -591,7 +591,12 @@ class TestLifecycleStatus:
         from repair_app.bridge.lifecycle_manager import LifecycleStatus
         assert LifecycleStatus.UNKNOWN == "unknown"
         assert LifecycleStatus.READY == "ready"
+        assert LifecycleStatus.BUSY == "busy"
+        assert LifecycleStatus.RECOVERING == "recovering"
         assert LifecycleStatus.CRASHED == "crashed"
+        assert LifecycleStatus.RESTARTING == "restarting"
+        assert LifecycleStatus.FAILED == "failed"
+        assert LifecycleStatus.STOPPING == "stopping"
         assert LifecycleStatus.STOPPED == "stopped"
 
 

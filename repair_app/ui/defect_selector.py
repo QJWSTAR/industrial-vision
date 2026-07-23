@@ -8,6 +8,7 @@ import numpy as np
 from typing import Optional
 from repair_app.utils.logger_config import error as log_error
 from repair_app.config import schema_loader as _schema
+from repair_app.ui.theme_manager import ThemeManager
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox,
@@ -57,6 +58,7 @@ class DefectSelector(QWidget):
         self._canvas.installEventFilter(self)
 
     def _init_ui(self) -> None:
+        p = ThemeManager.get_palette()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -119,8 +121,8 @@ class DefectSelector(QWidget):
         self._lb_mode_banner = QLabel("🧭 当前：导航模式 — 可用鼠标旋转/缩放 3D 视图，无法框选缺陷")
         self._lb_mode_banner.setWordWrap(True)
         self._lb_mode_banner.setStyleSheet(
-            "background:#1E3A5F; color:#DBEAFE; padding:6px 10px; "
-            "font-size:12px; font-weight:600; border-left:3px solid #3B82F6;"
+            f"background:{p.accent_bg}; color:{p.accent_pale}; padding:6px 10px; "
+            f"font-size:12px; font-weight:600; border-left:3px solid {p.accent_light};"
         )
         layout.addWidget(self._lb_mode_banner)
 
@@ -229,6 +231,7 @@ class DefectSelector(QWidget):
 
     # ========== 导航/选取切换 ==========
     def _on_nav_toggled(self, checked: bool) -> None:
+        p = ThemeManager.get_palette()
         if checked:
             self._btn_nav.setText("🧭 导航模式（旋转/缩放）")
             self._selecting = False
@@ -239,8 +242,8 @@ class DefectSelector(QWidget):
                 "🧭 当前：导航模式 — 可用鼠标旋转/缩放 3D 视图，无法框选缺陷"
             )
             self._lb_mode_banner.setStyleSheet(
-                "background:#1E3A5F; color:#DBEAFE; padding:6px 10px; "
-                "font-size:12px; font-weight:600; border-left:3px solid #3B82F6;"
+                f"background:{p.accent_bg}; color:{p.accent_pale}; padding:6px 10px; "
+                f"font-size:12px; font-weight:600; border-left:3px solid {p.accent_light};"
             )
             self._canvas.setCursor(QCursor(Qt.OpenHandCursor))
         else:
@@ -254,8 +257,8 @@ class DefectSelector(QWidget):
                 f"✂️ 当前：选取模式（{mode_name}）— 在 3D 视图中按住鼠标拖动以选择缺陷区域"
             )
             self._lb_mode_banner.setStyleSheet(
-                "background:#3B2F1E; color:#FEF3C7; padding:6px 10px; "
-                "font-size:12px; font-weight:600; border-left:3px solid #F59E0B;"
+                f"background:{p.warning_bg}; color:{p.warning}; padding:6px 10px; "
+                f"font-size:12px; font-weight:600; border-left:3px solid {p.warning};"
             )
             self._canvas.setCursor(QCursor(Qt.CrossCursor))
 

@@ -861,6 +861,170 @@ class TestLifecycleManagerWatchdog:
 
 
 # ================================================================
+# 4.5 MatlabLifecycleManager Phase 4 测试 (execution_scope, 状态转换验证)
+# ================================================================
+class TestLifecycleManagerPhase4:
+    """测试 Phase 4 新增功能：execution_scope, 状态转换验证, 废弃方法。"""
+
+    def setup_method(self):
+        from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
+        MatlabLifecycleManager.reset_singleton()
+
+    def teardown_method(self):
+        from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
+        MatlabLifecycleManager.reset_singleton()
+
+    # --- execution_scope ---
+
+    def test_execution_scope_success_flow(self, tmp_path, monkeypatch):
+        """execution_scope 正常流程：READY → BUSY → READY。"""
+        from repair_app.bridge.lifecycle_manager import (
+            MatlabLifecycleManager, LifecycleStatus,
+        )
+        m = MatlabLifecycleManager.get_instance(str(tmp_path))
+        monkeypatch.setattr(type(m._launcher), "matlab_version", PropertyMock(return_value="R2025b"))
+        monkeypatch.setattr(m._launcher, "reset_restart_count", MagicMock())
+        m._set_status(LifecycleStatus.READY, "ready")
+
+        with m.execution_scope():
+            assert m.status == LifecycleStatus.BUSY
+
+        assert m.status == LifecycleStatus.READY
+        m._launcher.reset_restart_count.assert_called_once()
+
+    def test_execution_scope_exception_triggers_recovering(self, tmp_path, monkeypatch):
+        """execution_scope 异常退出时进入 RECOVERING。"""
+        from repair_app.bridge.lifecycle_manager import (
+            MatlabLifecycleManager, LifecycleStatus,
+        )
+        m = MatlabLifecycleManager.get_instance(str(tmp_path))
+        monkeypatch.setattr(type(m._launcher), "matlab_version", PropertyMock(return_value="R2025b"))
+        m._set_status(LifecycleStatus.READY, "ready")
+
+        with pytest.raises(ValueError, match="test error"):
+            with m.execution_scope():
+                raise ValueError("test error")
+
+        assert m.status == LifecycleStatus.RECOVERING
+
+    def test_execution_scope_not_ready_triggers_ensure(self, tmp_path, monkeypatch):
+        """execution_scope 在非 READY 状态时自动调用 ensure_ready。"""
+        from repair_app.bridge.lifecycle_manager import (
+            MatlabLifecycleManager, LifecycleStatus,
+        )
+        m = MatlabLifecycleManager.get_instance(str(tmp_path))
+        monkeypatch.setattr(type(m._launcher), "matlab_version", PropertyMock(return_value="R2025b"))
+        monkeypatch.setattr(m._launcher, "reset_restart_count", MagicMock())
+        # 模拟 ensure_ready 成功，并将状态设置为 READY
+        def _fake_ensure():
+            m._set_status(LifecycleStatus.READY, "ready")
+            return True
+        monkeypatch.setattr(m, "ensure_ready", _fake_ensure)
+        m._set_status(LifecycleStatus.UNKNOWN, "")
+
+        with m.execution_scope():
+            assert m.status == LifecycleStatus.BUSY
+
+        assert m.status == LifecycleStatus.READY
+
+    def test_execution_scope_not_ready_and_ensure_fails(self, tmp_path, monkeypatch):
+        """execution_scope 在 ensure_ready 失败时抛出 RuntimeError。"""
+        from repair_app.bridge.lifecycle_manager import (
+            MatlabLifecycleManager, LifecycleStatus,
+        )
+        m = MatlabLifecycleManager.get_instance(str(tmp_path))
+        monkeypatch.setattr(m, "ensure_ready", lambda: False)
+        m._set_status(LifecycleStatus.UNKNOWN, "")
+
+        with pytest.raises(RuntimeError, match="MATLAB 未就绪"):
+            with m.execution_scope():
+                pass
+
+    # --- 状态转换验证 ---
+
+    def test_validate_transition_legal(self, tmp_path, caplog):
+        """合法状态转换不应产生警告。"""
+        from repair_app.bridge.lifecycle_manager import (
+            MatlabLifecycleManager, LifecycleStatus,
+        )
+        import logging
+        m = MatlabLifecycleManager.get_instance(str(tmp_path))
+        m._set_status(LifecycleStatus.UNKNOWN, "")
+        with caplog.at_level(logging.WARNING, logger="csam.bridge.lifecycle"):
+            m._set_status(LifecycleStatus.STARTING, "starting")
+        # 不应有非标准状态转换警告
+        transition_warnings = [r for r in caplog.records if "非标准状态转换" in r.message]
+        assert len(transition_warnings) == 0
+
+    def test_validate_transition_illegal_warns(self, tmp_path, caplog):
+        """非法状态转换（如 STOPPED → STARTING）应产生警告但继续执行。"""
+        from repair_app.bridge.lifecycle_manager import (
+            MatlabLifecycleManager, LifecycleStatus,
+        )
+        import logging
+        m = MatlabLifecycleManager.get_instance(str(tmp_path))
+        m._set_status(LifecycleStatus.STOPPED, "stopped")
+        with caplog.at_level(logging.WARNING, logger="csam.bridge.lifecycle"):
+            m._set_status(LifecycleStatus.STARTING, "starting")
+        transition_warnings = [r for r in caplog.records if "非标准状态转换" in r.message]
+        assert len(transition_warnings) >= 1
+        # 状态仍然被更新了（警告不影响执行）
+        assert m.status == LifecycleStatus.STARTING
+
+    def test_all_defined_transitions_exist(self, tmp_path):
+        """验证所有在 _VALID_TRANSITIONS 中定义的状态都在 LifecycleStatus 中。"""
+        from repair_app.bridge.lifecycle_manager import (
+            MatlabLifecycleManager, LifecycleStatus,
+        )
+        m = MatlabLifecycleManager.get_instance(str(tmp_path))
+        all_states = {
+            LifecycleStatus.UNKNOWN, LifecycleStatus.DETECTING,
+            LifecycleStatus.STARTING, LifecycleStatus.READY,
+            LifecycleStatus.BUSY, LifecycleStatus.RECOVERING,
+            LifecycleStatus.CRASHED, LifecycleStatus.RESTARTING,
+            LifecycleStatus.FAILED, LifecycleStatus.STOPPING,
+            LifecycleStatus.STOPPED,
+        }
+        for src in m._VALID_TRANSITIONS:
+            assert src in all_states, f"源状态 {src} 不在 LifecycleStatus 中"
+            for dst in m._VALID_TRANSITIONS[src]:
+                assert dst in all_states, f"目标状态 {dst} 不在 LifecycleStatus 中"
+
+    # --- 废弃方法 ---
+
+    def test_mark_busy_deprecated_warns(self, tmp_path, caplog):
+        """mark_busy 应产生废弃警告。"""
+        from repair_app.bridge.lifecycle_manager import (
+            MatlabLifecycleManager, LifecycleStatus,
+        )
+        import logging
+        m = MatlabLifecycleManager.get_instance(str(tmp_path))
+        m._set_status(LifecycleStatus.READY, "ready")
+        with caplog.at_level(logging.WARNING, logger="csam.bridge.lifecycle"):
+            m.mark_busy()
+        deprecated_warnings = [r for r in caplog.records if "已废弃" in r.message]
+        assert len(deprecated_warnings) >= 1
+        assert m.status == LifecycleStatus.BUSY
+
+    def test_mark_idle_deprecated_warns(self, tmp_path, monkeypatch, caplog):
+        """mark_idle 应产生废弃警告。"""
+        from repair_app.bridge.lifecycle_manager import (
+            MatlabLifecycleManager, LifecycleStatus,
+        )
+        import logging
+        m = MatlabLifecycleManager.get_instance(str(tmp_path))
+        monkeypatch.setattr(type(m._launcher), "matlab_version", PropertyMock(return_value="R2025b"))
+        monkeypatch.setattr(m._launcher, "reset_restart_count", MagicMock())
+        m._set_status(LifecycleStatus.READY, "ready")
+        m.mark_busy()
+        with caplog.at_level(logging.WARNING, logger="csam.bridge.lifecycle"):
+            m.mark_idle()
+        deprecated_warnings = [r for r in caplog.records if "已废弃" in r.message]
+        assert len(deprecated_warnings) >= 1
+        assert m.status == LifecycleStatus.READY
+
+
+# ================================================================
 # 5. RepairOutcome / MatlabService 测试 (bridge/services/matlab_service.py)
 # ================================================================
 class TestRepairOutcome:

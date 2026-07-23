@@ -21,7 +21,10 @@ logger = logging.getLogger("csam.ui.progress")
 
 
 class ProgressSubscriberWorker(QObject):
-    """在 QThread 中运行 ZMQ SUB 订阅器。"""
+    """在 QThread 中运行 ZMQ SUB 订阅器。
+
+    支持 operation_id 过滤：只处理与当前操作 ID 匹配的进度消息。
+    """
 
     progress_received = Signal(dict)
     layer_completed = Signal(int)
@@ -32,6 +35,7 @@ class ProgressSubscriberWorker(QObject):
     def __init__(self, address: str = "tcp://127.0.0.1:5556") -> None:
         super().__init__()
         self._address = address
+        self._operation_id: str = ""
 
     @Slot()
     def run(self) -> None:
@@ -69,6 +73,10 @@ class ProgressSubscriberWorker(QObject):
             logger.warning("ProgressSubscriber 关闭异常: %s", exc)
         self.finished.emit()
 
+    def set_operation_id(self, operation_id: str) -> None:
+        """设置当前操作 ID，用于过滤进度消息。"""
+        self._operation_id = operation_id
+
     def _process_message(self, data: bytes, start_time: float) -> None:
         """解析 ProgressUpdate 消息并发出信号。"""
         try:
@@ -77,6 +85,15 @@ class ProgressSubscriberWorker(QObject):
 
             msg = ProgressUpdate()
             msg.ParseFromString(data)
+
+            # 过滤：只处理与当前 operation_id 匹配的消息
+            if self._operation_id and msg.request_id != self._operation_id:
+                logger.debug(
+                    "忽略旧操作进度: request_id=%s (当前=%s)",
+                    msg.request_id, self._operation_id,
+                )
+                return
+
             parsed = parse_progress_update(msg)
 
             # 发出完整解析结果
@@ -128,10 +145,17 @@ class ProgressSubscriber(QObject):
         super().__init__(parent)
         self._thread: Optional[QThread] = None
         self._worker: Optional[ProgressSubscriberWorker] = None
+        self._operation_id: str = ""
 
     @property
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.isRunning()
+
+    def set_operation_id(self, operation_id: str) -> None:
+        """设置当前操作 ID，用于过滤旧操作的延迟进度消息。"""
+        self._operation_id = operation_id
+        if self._worker is not None:
+            self._worker.set_operation_id(operation_id)
 
     def start(self, address: str = "tcp://127.0.0.1:5556") -> None:
         """启动订阅器。"""

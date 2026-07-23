@@ -52,6 +52,7 @@ class ProgressPublisher:
         self._sock = None
         self._ctx = None
         self._enabled = False
+        self._send_lock = threading.Lock()
 
     @classmethod
     def get_instance(cls) -> "ProgressPublisher":
@@ -62,35 +63,37 @@ class ProgressPublisher:
 
     def start(self) -> bool:
         """启动 PUB socket（幂等：已启动时直接返回 True）。"""
-        if self._enabled and self._sock is not None:
-            return True
-        try:
-            import zmq
-            self._ctx = zmq.Context()
-            self._sock = self._ctx.socket(zmq.PUB)
-            self._sock.setsockopt(zmq.LINGER, 0)
-            self._sock.bind(self._address)
-            self._enabled = True
-            logger.info("ProgressPublisher 已启动: %s", self._address)
-            return True
-        except Exception as exc:
-            logger.warning("ProgressPublisher 启动失败: %s", exc)
-            self._enabled = False
-            return False
+        with self._lock:
+            if self._enabled and self._sock is not None:
+                return True
+            try:
+                import zmq
+                self._ctx = zmq.Context()
+                self._sock = self._ctx.socket(zmq.PUB)
+                self._sock.setsockopt(zmq.LINGER, 0)
+                self._sock.bind(self._address)
+                self._enabled = True
+                logger.info("ProgressPublisher 已启动: %s", self._address)
+                return True
+            except Exception as exc:
+                logger.warning("ProgressPublisher 启动失败: %s", exc)
+                self._enabled = False
+                return False
 
     def stop(self) -> None:
         """停止 PUB socket。"""
-        self._enabled = False
-        try:
-            if self._sock is not None:
-                self._sock.close(0)
-            if self._ctx is not None:
-                self._ctx.term()
-        except Exception as exc:
-            logger.warning("ProgressPublisher 停止异常: %s", exc)
-        finally:
-            self._sock = None
-            self._ctx = None
+        with self._lock:
+            self._enabled = False
+            try:
+                if self._sock is not None:
+                    self._sock.close(0)
+                if self._ctx is not None:
+                    self._ctx.term()
+            except Exception as exc:
+                logger.warning("ProgressPublisher 停止异常: %s", exc)
+            finally:
+                self._sock = None
+                self._ctx = None
 
     def publish_progress(
         self,
@@ -126,67 +129,71 @@ class ProgressPublisher:
         if not self._enabled or self._sock is None:
             return
 
-        try:
-            from repair_app.communication.repair_protocol_pb2 import (
-                ProgressUpdate, LayerProfile, Waypoint,
-            )
-            from repair_app.communication.repair_serialization import (
-                build_progress_update, build_layer_profile,
-            )
+        with self._send_lock:
+            if not self._enabled or self._sock is None:
+                return
 
-            # 转换 waypoints
-            wp_np = None
-            if waypoints is not None and len(waypoints) > 0:
-                wp_np = np.asarray(waypoints, dtype=np.float32)
-                if wp_np.ndim == 2 and wp_np.shape[1] >= 3:
-                    pass
-                else:
-                    wp_np = None
+            try:
+                from repair_app.communication.repair_protocol_pb2 import (
+                    ProgressUpdate, LayerProfile, Waypoint,
+                )
+                from repair_app.communication.repair_serialization import (
+                    build_progress_update, build_layer_profile,
+                )
 
-            # 转换 mesh → STL bytes
-            partial_mesh = b""
-            mesh_format = ""
-            mesh_count = 0
-            if mesh_triangles is not None and len(mesh_triangles) > 0:
-                tris = np.asarray(mesh_triangles, dtype=np.float32)
-                if tris.ndim == 2 and tris.shape[1] >= 9:
-                    partial_mesh = _triangles_to_stl_bytes(tris)
-                    mesh_format = "stl_binary"
-                    mesh_count = len(tris)
+                # 转换 waypoints
+                wp_np = None
+                if waypoints is not None and len(waypoints) > 0:
+                    wp_np = np.asarray(waypoints, dtype=np.float32)
+                    if wp_np.ndim == 2 and wp_np.shape[1] >= 3:
+                        pass
+                    else:
+                        wp_np = None
 
-            # 构建 LayerProfile
-            layer_profiles = None
-            if total_layers > 0:
-                layer_profiles = [build_layer_profile(
-                    layer_index,
-                    max_height_mm=float(layer_max_height),
-                    avg_height_mm=float(layer_avg_height),
-                    dep_efficiency=float(layer_dep_eff),
-                )]
+                # 转换 mesh → STL bytes
+                partial_mesh = b""
+                mesh_format = ""
+                mesh_count = 0
+                if mesh_triangles is not None and len(mesh_triangles) > 0:
+                    tris = np.asarray(mesh_triangles, dtype=np.float32)
+                    if tris.ndim == 2 and tris.shape[1] >= 9:
+                        partial_mesh = _triangles_to_stl_bytes(tris)
+                        mesh_format = "stl_binary"
+                        mesh_count = len(tris)
 
-            msg = build_progress_update(
-                request_id=str(request_id),
-                stage=int(stage),
-                layer_index=int(layer_index),
-                total_layers=int(total_layers),
-                progress=float(progress),
-                message=str(message),
-                waypoints=wp_np,
-                layer_profiles=layer_profiles,
-                partial_mesh_data=partial_mesh,
-                partial_mesh_format=mesh_format,
-            )
+                # 构建 LayerProfile
+                layer_profiles = None
+                if total_layers > 0:
+                    layer_profiles = [build_layer_profile(
+                        layer_index,
+                        max_height_mm=float(layer_max_height),
+                        avg_height_mm=float(layer_avg_height),
+                        dep_efficiency=float(layer_dep_eff),
+                    )]
 
-            # 附加统计信息到 message
-            stats = f" | layers={layer_index+1}/{total_layers} mesh={mesh_count} elapsed={elapsed_s:.1f}s"
-            msg.message = str(message) + stats
+                msg = build_progress_update(
+                    request_id=str(request_id),
+                    stage=int(stage),
+                    layer_index=int(layer_index),
+                    total_layers=int(total_layers),
+                    progress=float(progress),
+                    message=str(message),
+                    waypoints=wp_np,
+                    layer_profiles=layer_profiles,
+                    partial_mesh_data=partial_mesh,
+                    partial_mesh_format=mesh_format,
+                )
 
-            data = msg.SerializeToString()
-            self._sock.send(data)
-            logger.debug("进度已发布: layer=%d/%d progress=%.1f%%",
-                         layer_index, total_layers, progress * 100)
-        except Exception as exc:
-            logger.debug("发布进度异常（不影响算法）: %s", exc)
+                # 附加统计信息到 message
+                stats = f" | layers={layer_index+1}/{total_layers} mesh={mesh_count} elapsed={elapsed_s:.1f}s"
+                msg.message = str(message) + stats
+
+                data = msg.SerializeToString()
+                self._sock.send(data)
+                logger.debug("进度已发布: layer=%d/%d progress=%.1f%%",
+                             layer_index, total_layers, progress * 100)
+            except Exception as exc:
+                logger.debug("发布进度异常（不影响算法）: %s", exc)
 
 
 def publish_progress(**kwargs) -> None:

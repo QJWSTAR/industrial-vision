@@ -317,9 +317,8 @@ class TestToast:
         assert "success" in Toast._STYLES, "应包含 success 级别"
         assert "warning" in Toast._STYLES, "应包含 warning 级别"
         assert "error" in Toast._STYLES, "应包含 error 级别"
-        # 每个级别应有 color 和 icon
+        # 每个级别应有 icon（颜色已迁移到 ThemeManager palette）
         for level, style in Toast._STYLES.items():
-            assert "color" in style, f"{level} 应有 color 属性"
             assert "icon" in style, f"{level} 应有 icon 属性"
 
     def test_toast_info(self, qapp):

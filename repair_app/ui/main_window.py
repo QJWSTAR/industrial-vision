@@ -5,7 +5,6 @@ v0.10: 三面板可视化 + 增材/修复双模式 + 气体参数
 
 from __future__ import annotations
 import os, sys
-from typing import Optional
 import numpy as np
 
 from repair_app.utils.resource_path import get_data_dir
@@ -17,10 +16,10 @@ from PySide6.QtWidgets import (
     QProgressBar, QGroupBox, QStatusBar, QFrame,
     QFileDialog, QMessageBox, QApplication, QTabWidget, QTextEdit,
     QStackedWidget, QCheckBox, QSplitter, QRadioButton, QButtonGroup,
-    QSlider, QSizePolicy, QToolBar, QMenu,
+    QToolBar, QMenu,
 )
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSize
-from PySide6.QtGui import QPixmap, QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence
 
 # H1-H3 修复：UI 层通过 CoordinationService 访问 core/communication 模块
 from repair_app.service.coordination_service import CoordinationService as _Coord
@@ -38,6 +37,7 @@ from repair_app.ui.toast import Toast
 from repair_app.ui.busy_indicator import BusyLabel
 from repair_app.ui.context_menu import ContextMenuManager
 from repair_app.ui.undo_framework import UndoStack
+from repair_app.ui.panel_builder import PanelBuilder
 
 _ZMQ_AVAILABLE = _Coord().zmq_available
 
@@ -54,7 +54,7 @@ from repair_app.core.repair_session import RepairSession
 from repair_app.utils.config import (
     APP_TITLE, MATERIALS, MAT_KEY_MAP, window as _win_cfg, mode as _mode_cfg,
     page as _page_cfg, style as _style_cfg,
-    get_morph_dir, get_pointlist_file, get_velocitylist_file, get_p1_frame_dir,
+    get_morph_dir, get_pointlist_file, get_velocitylist_file,
     get_ui_param, UI_PARAM_SPECS,
 )
 from repair_app.config import schema_loader
@@ -80,7 +80,7 @@ MODE_REPAIRING = _mode_cfg.repairing  # 修复模式
 _MORPH_DIR = get_morph_dir()
 _POINTLIST_FILE = get_pointlist_file()
 _VELOCITYLIST_FILE = get_velocitylist_file()
-_P1_FRAME_DIR = get_p1_frame_dir()
+
 
 PAGE_PATH = _page_cfg.path
 PAGE_MORPH = _page_cfg.morph
@@ -124,214 +124,6 @@ _ARROW = _style_cfg.arrow_normal
 _ARROW_READY = _style_cfg.arrow_ready
 
 
-def _list_p1_frame_paths() -> list[str]:
-    """Return MATLAB-exported P1 JPG frames in numeric order."""
-    if not os.path.isdir(_P1_FRAME_DIR):
-        return []
-
-    def _frame_no(path: str) -> tuple[int, str]:
-        name = os.path.splitext(os.path.basename(path))[0]
-        try:
-            return int(name), path
-        except ValueError:
-            return 10**9, path
-
-    paths = [
-        os.path.join(_P1_FRAME_DIR, name)
-        for name in os.listdir(_P1_FRAME_DIR)
-        if name.lower().endswith((".jpg", ".jpeg", ".png"))
-    ]
-    return [p for _, p in sorted(_frame_no(p) for p in paths)]
-
-
-class P1FramePlayer(QWidget):
-    """MATLAB P1 composite-frame player for demonstration mode."""
-
-    def __init__(self, frame_dir: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._frame_dir = frame_dir
-        self._paths: list[str] = []
-        self._idx = 0
-        self._current_pixmap: QPixmap | None = None
-
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._next_frame)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
-
-        header = QFrame()
-        header.setObjectName("P1Header")
-        hl = QHBoxLayout(header)
-        hl.setContentsMargins(14, 10, 14, 10)
-        hl.setSpacing(10)
-
-        title_box = QVBoxLayout()
-        title_box.setSpacing(2)
-        title = QLabel("P1 三视图形貌预测动画")
-        title.setStyleSheet("color:#F8FAFC;font-size:16px;font-weight:700;")
-        subtitle = QLabel("MATLAB 中间帧演示：喷嘴/射线、TCP 路径、沉积形貌色温图同步播放")
-        subtitle.setStyleSheet("color:#94A3B8;font-size:12px;")
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-        hl.addLayout(title_box, 1)
-
-        self._lb_status = QLabel("未加载")
-        self._lb_status.setStyleSheet(
-            "background:#111827;color:#BFDBFE;border:1px solid #1E3A8A;"
-            "border-radius:12px;padding:6px 10px;font-weight:600;"
-        )
-        hl.addWidget(self._lb_status)
-        layout.addWidget(header)
-
-        self._image = QLabel()
-        self._image.setObjectName("P1Image")
-        self._image.setAlignment(Qt.AlignCenter)
-        self._image.setMinimumSize(640, 360)
-        self._image.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._image.setStyleSheet(
-            "QLabel#P1Image{background:#020617;border:1px solid #1E293B;"
-            "border-radius:14px;color:#64748B;font-size:14px;}"
-        )
-        layout.addWidget(self._image, 1)
-
-        controls = QFrame()
-        controls.setObjectName("P1Controls")
-        cl = QHBoxLayout(controls)
-        cl.setContentsMargins(12, 10, 12, 10)
-        cl.setSpacing(10)
-
-        self._btn_play = QPushButton("▶ 播放")
-        self._btn_play.setMinimumWidth(86)
-        self._btn_play.clicked.connect(self.toggle_playback)
-        cl.addWidget(self._btn_play)
-
-        self._btn_prev = QPushButton("上一帧")
-        self._btn_prev.clicked.connect(lambda: self._jump_relative(-1))
-        cl.addWidget(self._btn_prev)
-
-        self._btn_next = QPushButton("下一帧")
-        self._btn_next.clicked.connect(lambda: self._jump_relative(1))
-        cl.addWidget(self._btn_next)
-
-        self._slider = QSlider(Qt.Horizontal)
-        self._slider.setRange(0, 0)
-        self._slider.valueChanged.connect(self._on_slider_changed)
-        cl.addWidget(self._slider, 1)
-
-        self._cb_speed = QComboBox()
-        self._cb_speed.addItem("2 fps", 500)
-        self._cb_speed.addItem("6 fps", 166)
-        self._cb_speed.addItem("12 fps", 83)
-        self._cb_speed.setCurrentIndex(1)
-        self._cb_speed.currentIndexChanged.connect(self._on_speed_changed)
-        cl.addWidget(self._cb_speed)
-
-        self._chk_loop = QCheckBox("循环")
-        self._chk_loop.setChecked(True)
-        cl.addWidget(self._chk_loop)
-
-        layout.addWidget(controls)
-        self.refresh_frames()
-
-    def has_frames(self) -> bool:
-        return bool(self._paths)
-
-    def refresh_frames(self) -> bool:
-        self._paths = _list_p1_frame_paths()
-        self._idx = min(self._idx, max(len(self._paths) - 1, 0))
-        self._slider.blockSignals(True)
-        self._slider.setRange(0, max(len(self._paths) - 1, 0))
-        self._slider.setValue(self._idx)
-        self._slider.blockSignals(False)
-        enabled = bool(self._paths)
-        for widget in (self._btn_play, self._btn_prev, self._btn_next, self._slider, self._cb_speed, self._chk_loop):
-            widget.setEnabled(enabled)
-        self._render()
-        return enabled
-
-    def start(self) -> bool:
-        if not self._paths and not self.refresh_frames():
-            return False
-        self._timer.start(self._cb_speed.currentData())
-        self._btn_play.setText("⏸ 暂停")
-        return True
-
-    def pause(self) -> None:
-        self._timer.stop()
-        self._btn_play.setText("▶ 播放")
-
-    @Slot()
-    def toggle_playback(self) -> None:
-        if self._timer.isActive():
-            self.pause()
-        else:
-            self.start()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._paint_current_pixmap()
-
-    def _on_speed_changed(self, _idx: int) -> None:
-        if self._timer.isActive():
-            self._timer.start(self._cb_speed.currentData())
-
-    def _on_slider_changed(self, value: int) -> None:
-        self._idx = value
-        self._render()
-
-    def _jump_relative(self, step: int) -> None:
-        if not self._paths:
-            return
-        self._idx = max(0, min(len(self._paths) - 1, self._idx + step))
-        self._slider.setValue(self._idx)
-        self._render()
-
-    def _next_frame(self) -> None:
-        if not self._paths:
-            self.pause()
-            return
-        if self._idx >= len(self._paths) - 1:
-            if not self._chk_loop.isChecked():
-                self.pause()
-                return
-            self._idx = 0
-        else:
-            self._idx += 1
-        self._slider.setValue(self._idx)
-        self._render()
-
-    def _render(self) -> None:
-        if not self._paths:
-            self._current_pixmap = None
-            self._image.setText(f"未找到 MATLAB 图片帧\n{self._frame_dir}")
-            self._lb_status.setText("P1 帧: 0")
-            return
-        path = self._paths[self._idx]
-        pixmap = QPixmap(path)
-        if pixmap.isNull():
-            self._current_pixmap = None
-            self._image.setText(f"图片读取失败\n{os.path.basename(path)}")
-        else:
-            self._current_pixmap = pixmap
-            self._paint_current_pixmap()
-        self._lb_status.setText(f"第 {self._idx + 1}/{len(self._paths)} 帧")
-
-    def _paint_current_pixmap(self) -> None:
-        if self._current_pixmap is None or self._current_pixmap.isNull():
-            return
-        target = self._image.size()
-        if target.width() <= 0 or target.height() <= 0:
-            return
-        scaled = self._current_pixmap.scaled(
-            target,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
-        self._image.setPixmap(scaled)
-
-
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -355,6 +147,10 @@ class MainWindow(QMainWindow):
         self._compute_worker = None
         self._pipeline_launcher = None  # MatlabBridgeLauncher 实例（跨计算复用）
         self._progress_subscriber = None  # ProgressSubscriber 实例（实时进度订阅）
+        self._matlab_service = None  # MatlabService 实例（Phase 5：单入口点）
+        self._compute_controller = None  # ComputeController 实例（Phase 8：计算编排）
+        self._workflow_controller = None  # WorkflowController 实例（Phase 9：工作流状态机）
+        self._notifier = None                     # NotificationService 实例（Phase 10：统一通知）
 
         # ---- 软件工程化模块 ----
         from repair_app.software.path_manager import PathManager
@@ -412,10 +208,25 @@ class MainWindow(QMainWindow):
         root.addWidget(self._app_header())
         # MF-3: License 横幅已移除 — License 验证前置到 run_app.py，失败时拒绝启动
 
-        # Pipeline 指示器（5 阶段流水线可视化）
-        from repair_app.ui.pipeline_indicator import PipelineIndicator
-        self._pipeline = PipelineIndicator()
+        # Pipeline 指示器（5 阶段流水线可视化）- 通过 WorkflowController 管理
+        from repair_app.ui.workflow_controller import WorkflowController
+        self._workflow_controller = WorkflowController(
+            parent=self,
+            session=getattr(self, '_session', None),
+            license_manager=getattr(self, '_license', None),
+        )
+        self._pipeline = self._workflow_controller.pipeline_indicator
+        self._pipeline.setObjectName("PipelineIndicator")
+        self._workflow_controller.step_state_changed.connect(self._on_step_state_changed)
+        self._workflow_controller.workflow_ready.connect(self._on_workflow_ready)
         root.addWidget(self._pipeline)
+
+        # 统一通知服务（Phase 10：封装 Toast / ErrorDialog / StatusBar）
+        from repair_app.ui.notification_service import NotificationService
+        self._notifier = NotificationService(
+            parent=self,
+            status_bar=getattr(self, '_sb', None),
+        )
 
         # 使用 QSplitter 替代固定宽度列，支持拖拽调整 + DPI 缩放
         body = QSplitter(Qt.Horizontal)
@@ -432,294 +243,22 @@ class MainWindow(QMainWindow):
         root.addWidget(body, 1)
 
     def _app_header(self) -> QWidget:
-        header = QFrame()
-        header.setObjectName("AppHeader")
-        header.setMinimumHeight(60)
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(18, 10, 18, 10)
-        layout.setSpacing(14)
-
-        title_box = QVBoxLayout()
-        title_box.setSpacing(2)
-        title = QLabel("冷喷涂缺陷修复工作流")
-        title.setObjectName("AppTitle")
-        subtitle = QLabel("数据导入 → 缺陷选区 → 路径规划 → 形貌预测 → 工艺交付")
-        subtitle.setObjectName("AppSubtitle")
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-        layout.addLayout(title_box, 1)
-
-        self._lb_mode_state = QLabel("修复模式")
-        self._lb_mode_state.setObjectName("HeaderChip")
-        self._lb_workflow_state = QLabel("等待数据")
-        self._lb_workflow_state.setObjectName("HeaderChip")
-        layout.addWidget(self._lb_mode_state)
-        layout.addWidget(self._lb_workflow_state)
-        return header
+        return PanelBuilder.build_app_header(self)
 
     def _apply_theme(self) -> None:
         """应用工业级主题（从 ThemeManager 读取统一 QSS）。"""
         self.setStyleSheet(ThemeManager.get_qss())
 
     def _left_column(self) -> QWidget:
-        outer = QWidget()
-        outer.setObjectName("SideRail")
-        outer.setMinimumWidth(220)
-        layout = QVBoxLayout(outer); layout.setContentsMargins(12, 12, 12, 12); layout.setSpacing(10)
-
-        # --- 步骤按钮栏 ---
-        workflow = QGroupBox("工作流")
-        sl = QVBoxLayout(workflow); sl.setContentsMargins(12, 18, 12, 12); sl.setSpacing(8)
-
-        self._step1_btn = QPushButton("01  数据与路径\n加载点云、选区、生成路径")
-        self._step1_btn.setMinimumHeight(58)
-        self._step1_btn.setCursor(Qt.PointingHandCursor)
-        self._step1_btn.clicked.connect(lambda: self._switch_to_step(PAGE_PATH))
-        sl.addWidget(self._step1_btn)
-
-        self._arrow_lb = QLabel("↓")
-        self._arrow_lb.setAlignment(Qt.AlignCenter)
-        sl.addWidget(self._arrow_lb)
-
-        self._step2_btn = QLabel("02  形貌预测\n等待路径规划输出")
-        self._step2_btn.setMinimumHeight(54)
-        self._step2_btn.setAlignment(Qt.AlignCenter)
-        self._style_workflow_label(self._step2_btn, "locked")
-        sl.addWidget(self._step2_btn)
-
-        self._step3_lb = QLabel("03  结果校核\n查看指标、截面和风险")
-        self._step3_lb.setMinimumHeight(54)
-        self._step3_lb.setAlignment(Qt.AlignCenter)
-        self._step3_lb.setStyleSheet(
-            "color:#475569; font-size:11px; padding:8px; "
-            "background:#0F172A; border:1px dashed #334155; border-radius:6px;"
-        )
-        sl.addWidget(self._step3_lb)
-
-        self._step4_btn = QPushButton("04  输出交付\n导出 G-code 与 PDF 报告")
-        self._step4_btn.setMinimumHeight(58)
-        self._step4_btn.setCursor(Qt.PointingHandCursor)
-        self._step4_btn.setEnabled(False)
-        self._step4_btn.clicked.connect(lambda: self._switch_to_step(PAGE_OUTPUT))
-        sl.addWidget(self._step4_btn)
-        layout.addWidget(workflow)
-
-        # --- 材料选择 ---
-        mat_bar = QGroupBox("材料选择")
-        mat_ml = QVBoxLayout(mat_bar); mat_ml.setSpacing(4)
-        mat_row = QHBoxLayout(); mat_row.addWidget(QLabel("材料"))
-        self._cb_mat = QComboBox()
-        self._cb_mat.setToolTip("选择喷涂材料。不同材料有不同的临界速度和密度，影响沉积效率和涂层质量。")
-        for label, _ in _MATERIALS: self._cb_mat.addItem(label)
-        self._cb_mat.setCurrentIndex(1)
-        self._cb_mat.currentIndexChanged.connect(self._on_material_changed)
-        mat_row.addWidget(self._cb_mat); mat_row.addStretch()
-        mat_ml.addLayout(mat_row)
-        self._lb_mat_info = QLabel("v_cr: — m/s | 密度: — kg/m³")
-        self._lb_mat_info.setStyleSheet("color:#64748B; font-size:11px; padding-left:4px;")
-        mat_ml.addWidget(self._lb_mat_info)
-        layout.addWidget(mat_bar)
-
-        # --- QStackedWidget ---
-        self._mode_stack = QStackedWidget()
-        self._mode_stack.addWidget(self._build_path_planning_panel())
-        self._mode_stack.addWidget(self._build_morphology_panel())
-        self._mode_stack.addWidget(self._build_output_panel())
-        layout.addWidget(self._mode_stack)
-        return outer
+        return PanelBuilder.build_left_column(self)
 
     # ====== Panel A: 路径规划 ======
     def _build_path_planning_panel(self) -> QWidget:
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        p = QFrame(); scroll.setWidget(p)
-        l = QVBoxLayout(p); l.setContentsMargins(10, 10, 10, 10); l.setSpacing(8)
-
-        self._btn_load = QPushButton("📂 加载点云"); self._btn_load.setMinimumHeight(38)
-        self._btn_load.setToolTip("加载点云文件（支持 CSV、TXT、XYZ、ASC 格式）")
-        self._btn_load.clicked.connect(self._on_load); l.addWidget(self._btn_load)
-        l.addWidget(self._sep())
-
-        # --- 修复模式选择 ---
-        mg = QGroupBox("修复模式"); ml = QVBoxLayout(mg); ml.setSpacing(4)
-        self._rb_additive = QRadioButton(" 增材模式（全表面覆盖）")
-        self._rb_repairing = QRadioButton(" 修复模式（缺陷填充）")
-        self._rb_repairing.setChecked(True)
-        self._mode_group = QButtonGroup(self)
-        self._mode_group.addButton(self._rb_additive, MODE_ADDITIVE)
-        self._mode_group.addButton(self._rb_repairing, MODE_REPAIRING)
-        self._mode_group.idClicked.connect(self._on_mode_changed)
-        ml.addWidget(self._rb_additive)
-        ml.addWidget(self._rb_repairing)
-        l.addWidget(mg)
-
-        self._lb_mode_hint = QLabel("💡 在中心视图框选缺陷区域 → 调参数 → 点击生成路径")
-        self._lb_mode_hint.setStyleSheet("color:#64748B; font-size:11px; padding:4px;")
-        self._lb_mode_hint.setWordWrap(True); l.addWidget(self._lb_mode_hint)
-
-        eg = QGroupBox("计算引擎"); el = QVBoxLayout(eg); el.setSpacing(4)
-        engine_row = QHBoxLayout(); engine_row.addWidget(QLabel("引擎"))
-        self._cb_engine = QComboBox()
-        self._cb_engine.setToolTip("选择计算引擎。本地引擎用于快速预览；远程服务连接 MATLAB 获取精确计算结果。生产环境建议使用远程服务。")
-        self._cb_engine.addItem("本地计算引擎", "local")
-        self._cb_engine.addItem("远程服务 (MATLAB)", "zmq")
-        if not _ZMQ_AVAILABLE:
-            self._cb_engine.model().item(1).setEnabled(False)
-        else:
-            self._cb_engine.setCurrentIndex(1)
-        self._cb_engine.currentIndexChanged.connect(self._on_engine_changed)
-        engine_row.addWidget(self._cb_engine); engine_row.addStretch(); el.addLayout(engine_row)
-        self._lb_engine_hint = QLabel("本地引擎支持逐层实时刷新；远程服务用于连接 MATLAB 获取最终计算结果。")
-        self._lb_engine_hint.setStyleSheet("color:#64748B; font-size:11px; padding:4px;")
-        self._lb_engine_hint.setWordWrap(True); el.addWidget(self._lb_engine_hint)
-        eg.setVisible(False)
-        l.addWidget(eg)
-
-        ppg = QGroupBox("路径规划参数"); ppl = QVBoxLayout(ppg); ppl.setSpacing(5)
-        # MF-8: 从 PARAM_SPECS 唯一权威源动态生成（消除硬编码范围双源冲突）
-        for spec_key, ui_key, label, suffix, tooltip, _grp, read_only in UI_PARAM_SPECS:
-            if _grp != "pp":
-                continue
-            lo, hi, default, step = get_ui_param(spec_key)[:4]
-            row = QHBoxLayout(); row.addWidget(QLabel(label))
-            sp = QDoubleSpinBox(); sp.setRange(lo, hi); sp.setValue(default)
-            sp.setSingleStep(step); sp.setSuffix(suffix); sp.setMinimumWidth(100)
-            sp.setToolTip(tooltip)
-            if read_only:
-                sp.setEnabled(False)
-            row.addWidget(sp); row.addStretch(); ppl.addLayout(row)
-            self._pp_fields[ui_key] = sp
-
-        nl_row = QHBoxLayout(); nl_row.addWidget(QLabel("规划层数"))
-        self._sp_pp_layers = QSpinBox()
-        _nl = schema_loader.get_process_param("num_layers")
-        self._sp_pp_layers.setRange(int(_nl["min"]), int(_nl["max"]))
-        self._sp_pp_layers.setSingleStep(int(_nl["step"]))
-        self._sp_pp_layers.setValue(int(_nl["default"]))
-        self._sp_pp_layers.setMinimumWidth(100)
-        self._sp_pp_layers.setToolTip(_nl["tooltip"])
-        nl_row.addWidget(self._sp_pp_layers); nl_row.addStretch(); ppl.addLayout(nl_row)
-        l.addWidget(ppg)
-
-        # --- 文件保存选项 ---
-        sg = QGroupBox("输出选项"); sl2 = QVBoxLayout(sg); sl2.setSpacing(4)
-        self._chk_save_files = QCheckBox("保存计算中间文件到磁盘")
-        self._chk_save_files.setChecked(True)
-        self._chk_save_files.setStyleSheet("color:#E2E8F0; font-size:12px;")
-        self._chk_save_files.setToolTip("勾选：保存路径与速度数据供形貌预测读取；不勾选：数据仅保留在内存中")
-        sl2.addWidget(self._chk_save_files)
-        hint2 = QLabel("  勾选：路径规划后保存中间文件，形貌预测从文件读取\n"
-                        "  不勾选：数据仅保留在内存中，不写入磁盘")
-        hint2.setStyleSheet("color:#64748B; font-size:10px;")
-        hint2.setWordWrap(True); sl2.addWidget(hint2)
-        l.addWidget(sg)
-
-        # --- 操作 ---
-        og = QGroupBox("操作"); ol = QVBoxLayout(og); ol.setSpacing(8)
-        self._btn_start_repair = QPushButton("🚀 开始修复")
-        self._btn_start_repair.setMinimumHeight(48); self._btn_start_repair.setEnabled(False)
-        self._btn_start_repair.setToolTip(
-            "一键执行完整修复流程：\n"
-            "路径规划 → 形貌预测 → 报告生成 → 安全校验\n"
-            "根据引擎自动选择本地快速预览或 MATLAB 精确计算"
-        )
-        self._btn_start_repair.clicked.connect(self._on_start_repair)
-        self._btn_start_repair.setStyleSheet(
-            "QPushButton{background:#059669;color:#FFF;border:none;border-radius:6px;"
-            "font-size:15px;font-weight:bold;}"
-            "QPushButton:hover{background:#10B981;}"
-            "QPushButton:disabled{background:#334155;color:#64748B;}"
-        )
-        ol.addWidget(self._btn_start_repair)
-
-        l.addWidget(og)
-        l.addStretch()
-        return scroll
+        return PanelBuilder.build_path_planning_panel(self)
 
     # ====== Panel B: 形貌预测 ======
     def _build_morphology_panel(self) -> QWidget:
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        p = QFrame(); scroll.setWidget(p)
-        l = QVBoxLayout(p); l.setContentsMargins(10, 10, 10, 10); l.setSpacing(8)
-
-        # --- 输入状态 ---
-        fg = QGroupBox("输入数据来源")
-        fl = QVBoxLayout(fg); fl.setSpacing(4)
-
-        self._lb_pl_status = QLabel("⏳ 请先完成路径规划")
-        self._lb_pl_status.setStyleSheet("color:#F59E0B; font-size:13px;")
-        fl.addWidget(self._lb_pl_status)
-
-        self._lb_input_source = QLabel("来源: —")
-        self._lb_input_source.setStyleSheet("color:#64748B; font-size:11px;")
-        fl.addWidget(self._lb_input_source)
-        l.addWidget(fg)
-
-        # --- 冷喷涂工艺参数 ---
-        cpg = QGroupBox("冷喷涂工艺参数"); cpl = QVBoxLayout(cpg); cpl.setSpacing(5)
-        # MF-8: 从 PARAM_SPECS 唯一权威源动态生成（消除硬编码范围双源冲突）
-        for spec_key, ui_key, label, suffix, tooltip, _grp, read_only in UI_PARAM_SPECS:
-            if _grp != "cs":
-                continue
-            lo, hi, default, step = get_ui_param(spec_key)[:4]
-            row = QHBoxLayout(); row.addWidget(QLabel(label))
-            sp = QDoubleSpinBox(); sp.setRange(lo, hi); sp.setValue(default)
-            sp.setSingleStep(step); sp.setSuffix(suffix); sp.setMinimumWidth(100)
-            sp.setToolTip(tooltip)
-            if read_only:
-                sp.setEnabled(False)
-            row.addWidget(sp); row.addStretch(); cpl.addLayout(row)
-            self._cs_fields[ui_key] = sp
-        # 临界速度只读提示（额外补充）
-        if "critical_velocity" in self._cs_fields:
-            self._cs_fields["critical_velocity"].setToolTip(
-                "临界速度由材料数据库自动计算，不可手动修改"
-            )
-        l.addWidget(cpg)
-
-        dg = QGroupBox("沉积参数"); dl = QVBoxLayout(dg); dl.setSpacing(5)
-        dr = QHBoxLayout(); dr.addWidget(QLabel("深度补偿"))
-        self._sp_depth = QDoubleSpinBox()
-        _dc = schema_loader.get_process_param("depth_compensation")
-        self._sp_depth.setRange(_dc["min"], _dc["max"])
-        self._sp_depth.setValue(_dc["default"]); self._sp_depth.setSingleStep(_dc["step"])
-        self._sp_depth.setSuffix(" x"); self._sp_depth.setMinimumWidth(90)
-        self._sp_depth.setToolTip(_dc["tooltip"])
-        dr.addWidget(self._sp_depth); dr.addStretch(); dl.addLayout(dr)
-        nr = QHBoxLayout(); nr.addWidget(QLabel("预测层数"))
-        self._sp_max_layers = QSpinBox()
-        _ml = schema_loader.get_process_param("max_morphology_layers")
-        self._sp_max_layers.setRange(int(_ml["min"]), int(_ml["max"]))
-        self._sp_max_layers.setSingleStep(int(_ml["step"]))
-        self._sp_max_layers.setValue(int(_ml["default"]))
-        self._sp_max_layers.setMinimumWidth(90)
-        self._sp_max_layers.setToolTip(_ml["tooltip"])
-        nr.addWidget(self._sp_max_layers); nr.addStretch(); dl.addLayout(nr)
-        l.addWidget(dg)
-
-        og = QGroupBox("操作"); ol = QVBoxLayout(og); ol.setSpacing(8)
-        self._btn_feas = QPushButton("🔍 可行性检查")
-        self._btn_feas.setMinimumHeight(34); self._btn_feas.setEnabled(False)
-        self._btn_feas.setToolTip("检查当前工艺参数和缺陷区域是否适合冷喷涂修复")
-        self._btn_feas.clicked.connect(self._on_feasibility_check)
-        ol.addWidget(self._btn_feas)
-
-        self._btn_fix = QPushButton("🔮 执行形貌预测")
-        self._btn_fix.setMinimumHeight(42); self._btn_fix.setEnabled(False)
-        self._btn_fix.setToolTip("基于路径规划输出模拟冷喷涂沉积过程，预测修复形貌")
-        self._btn_fix.clicked.connect(self._on_fix)
-        self._btn_fix.setStyleSheet(
-            "QPushButton{background:#7C3AED;color:#FFF;border:none;border-radius:6px;"
-            "font-size:14px;font-weight:bold;}"
-            "QPushButton:hover{background:#8B5CF6;}"
-            "QPushButton:disabled{background:#334155;color:#64748B;}"
-        )
-        ol.addWidget(self._btn_fix)
-
-        l.addWidget(og)
-        l.addStretch()
-        return scroll
+        return PanelBuilder.build_morphology_panel(self)
 
     # ====== Panel C: 输出交付 ======
     def _build_output_panel(self) -> QWidget:
@@ -728,203 +267,15 @@ class MainWindow(QMainWindow):
         P5-4: 从 ExporterRegistry 动态构建导出按钮。新增导出格式只需注册
         BaseExporter 子类，无需修改本方法或 MainWindow 任何代码。
         """
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        p = QFrame(); scroll.setWidget(p)
-        l = QVBoxLayout(p); l.setContentsMargins(10, 10, 10, 10); l.setSpacing(8)
-
-        og = QGroupBox("导出"); ol = QVBoxLayout(og); ol.setSpacing(6)
-
-        # P5-4: 从注册表动态构建按钮
-        self._export_buttons = {}
-        for exporter in ExporterRegistry.list():
-            btn = QPushButton(f"{exporter.icon} 导出 {exporter.display_name}")
-            btn.setMinimumHeight(42 if exporter.sort_order == 10 else 34)
-            btn.setEnabled(False)
-            btn.setToolTip(exporter.tooltip)
-            # 第一个导出器（G-code）使用醒目样式
-            if exporter.sort_order == 10:
-                btn.setStyleSheet(
-                    "QPushButton{background:#1D4ED8;color:#FFF;border:none;border-radius:6px;"
-                    "font-size:14px;font-weight:bold;}"
-                    "QPushButton:hover{background:#2563EB;}"
-                    "QPushButton:disabled{background:#334155;color:#64748B;}"
-                )
-            btn.clicked.connect(lambda checked, name=exporter.name: self._on_export(name))
-            ol.addWidget(btn)
-            self._export_buttons[exporter.name] = btn
-            # 向后兼容：保持 _btn_exp_gcode/_btn_exp_robot/_btn_exp_pdf 属性
-            if exporter.name == "gcode":
-                self._btn_exp_gcode = btn
-            elif exporter.name == "robot":
-                self._btn_exp_robot = btn
-            elif exporter.name == "pdf":
-                self._btn_exp_pdf = btn
-
-        l.addWidget(og)
-        l.addStretch()
-        return scroll
+        return PanelBuilder.build_output_panel(self)
 
     # ====== Center ======
     def _center(self) -> QWidget:
-        self._center_widget = QWidget()
-        self._center_widget.setObjectName("Workspace")
-        layout = QVBoxLayout(self._center_widget)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-
-        self._workspace_stack = QStackedWidget()
-        self._workspace_stack.setObjectName("WorkspaceStack")
-
-        # ---- 步骤 01：路径规划工作区 ----
-        path_workspace = QWidget()
-        path_layout = QVBoxLayout(path_workspace)
-        path_layout.setContentsMargins(0, 0, 0, 0)
-        path_layout.setSpacing(8)
-
-        self._selector = DefectSelector()
-        self._selector.selection_changed.connect(self._on_selection_changed)
-
-        self._visualizer = RepairVisualizer()
-
-        # ---- 中心区 Tab 切换：3D 预览 / MATLAB 形貌分析 ----
-        self._center_tabs = QTabWidget()
-        self._center_tabs.setStyleSheet("""
-            QTabWidget::pane { border:1px solid #1E293B; border-radius:8px; background:#0B1120; top:-1px; }
-            QTabBar::tab { background:#0F172A; color:#94A3B8; padding:6px 14px; margin-right:2px;
-                           border:1px solid #1E293B; border-bottom:none;
-                           border-top-left-radius:6px; border-top-right-radius:6px; font-weight:600; }
-            QTabBar::tab:selected { background:#1D4ED8; color:#FFFFFF; }
-            QTabBar::tab:hover:!selected { background:#1E293B; color:#E2E8F0; }
-        """)
-        self._center_tabs.addTab(self._visualizer, "3D 预览（基体/路径/喷嘴）")
-
-        self._profile_panel = ProfileResultPanel()
-        self._center_tabs.addTab(self._profile_panel, "MATLAB 形貌分析")
-        self._center_tabs.setCurrentIndex(0)
-
-        self._main_splitter = QSplitter(Qt.Horizontal)
-        self._main_splitter.addWidget(self._center_tabs)
-
-        right_panel = QWidget()
-        right_panel.setObjectName("AuxPanel")
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(8, 8, 8, 8)
-        right_layout.setSpacing(8)
-
-        self._lb_selector_title = QLabel("原始点云 / 缺陷选区")
-        self._lb_selector_title.setStyleSheet(
-            "color:#94A3B8; font-size:11px; padding:2px 4px; font-weight:bold;"
-        )
-        right_layout.addWidget(self._lb_selector_title)
-        right_layout.addWidget(self._selector, 5)
-
-        # ---- 路径规划 + 形貌预测辅助截面 ----
-        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-        from matplotlib.figure import Figure
-
-        fig_bottom = Figure(figsize=(4.5, 5.5), dpi=100)
-        fig_bottom.set_facecolor("#0F172A")
-        self._canvas_bottom = FigureCanvas(fig_bottom)
-
-        gs = fig_bottom.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.45)
-        self._ax_path = fig_bottom.add_subplot(gs[0])
-        self._ax_path.set_facecolor("#0F172A")
-        self._ax_path.set_title("截面路径规划", color="#94A3B8", fontsize=10)
-        self._ax_path.tick_params(colors="#64748B", labelsize=8)
-        for spine in self._ax_path.spines.values():
-            spine.set_color("#334155")
-        self._ax_path.grid(True, color="#1E293B", alpha=0.5)
-
-        self._ax_morph = fig_bottom.add_subplot(gs[1])
-        self._ax_morph.set_facecolor("#0F172A")
-        self._ax_morph.set_title("形貌预测结果", color="#94A3B8", fontsize=10)
-        self._ax_morph.tick_params(colors="#64748B", labelsize=8)
-        for spine in self._ax_morph.spines.values():
-            spine.set_color("#334155")
-        self._ax_morph.grid(True, color="#1E293B", alpha=0.5)
-
-        self._lb_bottom_status = QLabel("请先完成路径规划...")
-        self._lb_bottom_status.setStyleSheet("color:#64748B; font-size:11px; padding:4px;")
-        self._lb_bottom_status.setAlignment(Qt.AlignCenter)
-
-        bottom_panel = QWidget()
-        bottom_panel.setObjectName("AuxPanel")
-        bl = QVBoxLayout(bottom_panel); bl.setContentsMargins(8, 8, 8, 8); bl.setSpacing(6)
-        bl.addWidget(self._lb_bottom_status)
-        bl.addWidget(self._canvas_bottom)
-        right_layout.addWidget(bottom_panel, 4)
-
-        self._main_splitter.addWidget(right_panel)
-        self._main_splitter.setSizes([760, 430])
-        path_layout.addWidget(self._main_splitter)
-
-        self._workspace_stack.addWidget(path_workspace)
-        layout.addWidget(self._workspace_stack, 1)
-
-        # ---- 实时统计面板 + 逐层播放器 ----
-        from repair_app.ui.realtime_stats import RealtimeStatsPanel
-        from repair_app.ui.layer_player import LayerPlayer
-        from repair_app.ui.progress_subscriber import ProgressSubscriber
-        self._realtime_stats = RealtimeStatsPanel()
-        layout.addWidget(self._realtime_stats)
-        self._layer_player = LayerPlayer()
-        self._layer_player.layer_changed.connect(self._on_layer_changed)
-        layout.addWidget(self._layer_player)
-
-        # ---- 实时进度订阅器（ZMQ SUB，监听 MATLAB 逐步发布的进度） ----
-        self._progress_subscriber = ProgressSubscriber(self)
-        self._progress_subscriber.stats_updated.connect(self._realtime_stats.update_stats)
-        self._progress_subscriber.layer_completed.connect(self._on_layer_completed)
-        self._progress_subscriber.mesh_updated.connect(self._on_mesh_updated)
-        self._progress_subscriber.progress_received.connect(self._on_progress_received)
-
-        self._top_splitter = self._main_splitter  # 兼容旧引用
-        self._bottom_splitter = self._main_splitter
-        self._tabs = self._main_splitter  # 兼容旧引用
-        return self._center_widget
+        return PanelBuilder.build_center(self)
 
     # ====== Right Column ======
     def _right_column(self) -> QWidget:
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(260); scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        p = QFrame(); scroll.setWidget(p)
-        p.setObjectName("Inspector")
-        l = QVBoxLayout(p); l.setContentsMargins(12, 12, 12, 12); l.setSpacing(10)
-
-        ig = QGroupBox("点云信息"); il = QVBoxLayout(ig)
-        self._lb_pts = QLabel("点数: —"); il.addWidget(self._lb_pts)
-        self._lb_sel = QLabel("已选: 0"); il.addWidget(self._lb_sel)
-        l.addWidget(ig)
-
-        fg = QGroupBox("可行性报告"); fl = QVBoxLayout(fg)
-        self._lb_feas_status = QLabel("状态: 尚未检查"); fl.addWidget(self._lb_feas_status)
-        self._lb_feas_score = QLabel("评分: —"); fl.addWidget(self._lb_feas_score)
-        self._feas_text = QTextEdit(); self._feas_text.setReadOnly(True)
-        self._feas_text.setMinimumHeight(80); self._feas_text.setMaximumHeight(250)
-        self._feas_text.setPlaceholderText("点击'可行性检查'后显示...")
-        fl.addWidget(self._feas_text)
-        l.addWidget(fg)
-
-        pg = QGroupBox("进度"); pl = QVBoxLayout(pg)
-        self._prog = QProgressBar(); self._prog.setRange(0, 100); self._prog.setValue(0)
-        pl.addWidget(self._prog)
-        self._lb_prog = QLabel("就绪"); pl.addWidget(self._lb_prog)
-        l.addWidget(pg)
-
-        rg = QGroupBox("结果摘要"); rl = QVBoxLayout(rg); rl.setSpacing(5)
-        self._lb_vol  = self._kv("填充点数", "— pts")
-        self._lb_mass = self._kv("材料用量", "— g")
-        self._lb_time = self._kv("预计耗时", "— s")
-        self._lb_lay  = self._kv("修复层数", "—")
-        self._lb_unif = self._kv("均匀性",   "—")
-        self._lb_feas = self._kv("可行性",   "—")
-        rl.addWidget(self._lb_vol); rl.addWidget(self._lb_mass)
-        rl.addWidget(self._lb_time); rl.addWidget(self._lb_lay)
-        rl.addWidget(self._lb_unif); rl.addWidget(self._lb_feas)
-        l.addWidget(rg)
-        l.addStretch()
-        return scroll
+        return PanelBuilder.build_right_column(self)
 
     def _setup_statusbar(self) -> None:
         self._sb = QStatusBar()
@@ -1064,6 +415,12 @@ class MainWindow(QMainWindow):
         act_validator.setToolTip("实时校验当前工艺参数是否在合法范围内")
         act_validator.setShortcut("Ctrl+Shift+V")
         act_validator.triggered.connect(self._on_param_validator)
+
+        adv_menu.addSeparator()
+
+        act_license = adv_menu.addAction("🔑 License 激活...")
+        act_license.setToolTip("查看本机机器码，导入 license.key 文件激活软件")
+        act_license.triggered.connect(self._on_license_activation)
 
         # ---- 编辑菜单（Undo/Redo，参考 SolidWorks / NX） ----
         edit_menu = menubar.addMenu("编辑(&E)")
@@ -1262,7 +619,7 @@ class MainWindow(QMainWindow):
             and self._zmq_client is not None
         )
 
-    def _build_repair_request(self, sel_mask: np.ndarray):
+    def _build_repair_request(self, sel_mask: np.ndarray, request_id: str = None):
         params = self._collect_params()
         request_xyz = self._session.point_cloud.xyz[sel_mask]
         request_normals = self._session.point_cloud.normals[sel_mask] if self._session.point_cloud.normals is not None else self._est_normals(request_xyz)
@@ -1271,6 +628,7 @@ class MainWindow(QMainWindow):
             request_xyz,
             request_normals,
             scan_id=f"SCAN-{self._session.latest_seed:04d}",
+            request_id=request_id,
             depth_compensation=params.get("depth_compensation", 1.0),
             smooth_threshold=0.5,
             max_layers=params.get("max_layers", 5),
@@ -1313,8 +671,45 @@ class MainWindow(QMainWindow):
             self._refresh_morph_status()
             self._sb.showMessage("形貌预测 — 基于路径规划输出执行沉积预测")
 
+    # ── WorkflowController 信号处理 ──────────────────────────────────
+
+    @Slot(int, str)
+    def _on_step_state_changed(self, step_index: int, state_name: str) -> None:
+        """WorkflowController 步骤状态变更回调。"""
+        if hasattr(self, '_update_step_buttons'):
+            self._update_step_buttons()
+
+    @Slot()
+    def _on_workflow_ready(self) -> None:
+        """WorkflowController 工作流就绪回调（前 4 步全部完成）。"""
+        pass  # 预留：可在此触发自动导出等后续操作
+
     def _update_step_buttons(self) -> None:
-        """根据当前步骤和输出状态更新按钮样式。"""
+        """根据当前步骤和输出状态更新按钮样式（委托 WorkflowController）。"""
+        p = ThemeManager.get_palette()
+        _wfc = getattr(self, '_workflow_controller', None)
+        if _wfc is not None and hasattr(self, '_mode_stack'):
+            current = self._mode_stack.currentIndex()
+            _wfc.update_all_steps(
+                session=self._session,
+                repair_mode=self._session.repair_mode,
+                current_page=current,
+                step1_btn=self._step1_btn,
+                step2_btn=self._step2_btn,
+                step3_lb=self._step3_lb,
+                step4_btn=self._step4_btn,
+                arrow_lb=self._arrow_lb,
+                mode_additive=MODE_ADDITIVE,
+                mode_repairing=MODE_REPAIRING,
+                lb_mode_state=getattr(self, '_lb_mode_state', None),
+            )
+            if hasattr(self, '_lb_workflow_state'):
+                _wfc.update_workflow_state_text(
+                    self._session, self._lb_workflow_state
+                )
+            return
+
+        # 回退到旧逻辑（测试环境兼容）
         current = self._mode_stack.currentIndex()
         morph_done = self._session.morphology.repair_xyz is not None
         mode_name = "增材模式" if self._session.repair_mode == MODE_ADDITIVE else "修复模式"
@@ -1324,7 +719,7 @@ class MainWindow(QMainWindow):
                 self._step1_btn.setStyleSheet(_STEP_DONE)
                 self._step1_btn.setText("✓ 01  数据与路径\n路径已生成，可进入预测")
             else:
-                self._step1_btn.setStyleSheet(_STEP_ACTIVE.format(c="#172554", h="#1D4ED8", b="#3B82F6"))
+                self._step1_btn.setStyleSheet(_STEP_ACTIVE.format(c=p.accent_bg, h=p.accent_hover, b=p.accent_light))
                 self._step1_btn.setText("01  数据与路径\n加载点云、选区、生成路径")
 
             if self._session.output.path_output_ready:
@@ -1336,7 +731,6 @@ class MainWindow(QMainWindow):
                 self._step2_btn.setText("02  形貌预测\n等待路径规划输出")
                 self._arrow_lb.setStyleSheet(_ARROW)
         elif current == PAGE_MORPH:
-            # 在形貌预测步骤
             self._step1_btn.setStyleSheet(_STEP_DONE)
             self._step1_btn.setText("✓ 01  数据与路径\n路径已生成")
             if morph_done:
@@ -1347,7 +741,6 @@ class MainWindow(QMainWindow):
                 self._step2_btn.setText("02  形貌预测\n沉积模拟中")
             self._arrow_lb.setStyleSheet(_ARROW_READY)
         else:
-            # 在输出交付步骤
             self._step1_btn.setStyleSheet(_STEP_DONE)
             self._step1_btn.setText("✓ 01  数据与路径\n路径已生成")
             self._style_workflow_label(self._step2_btn, "done" if morph_done else "active")
@@ -1372,7 +765,7 @@ class MainWindow(QMainWindow):
                 self._step4_btn.setText("04  输出交付\n等待路径规划完成")
             elif current == PAGE_OUTPUT:
                 self._step4_btn.setEnabled(True)
-                self._step4_btn.setStyleSheet(_STEP_ACTIVE.format(c="#172554", h="#1D4ED8", b="#3B82F6"))
+                self._step4_btn.setStyleSheet(_STEP_ACTIVE.format(c=p.accent_bg, h=p.accent_hover, b=p.accent_light))
                 self._step4_btn.setText("04  输出交付\n导出 G-code 与报告")
             elif morph_done:
                 self._step4_btn.setEnabled(True)
@@ -1380,7 +773,7 @@ class MainWindow(QMainWindow):
                 self._step4_btn.setText("✓ 04  输出交付\n可导出 G-code 与报告")
             else:
                 self._step4_btn.setEnabled(True)
-                self._step4_btn.setStyleSheet(_STEP_ACTIVE.format(c="#172554", h="#1D4ED8", b="#3B82F6"))
+                self._step4_btn.setStyleSheet(_STEP_ACTIVE.format(c=p.accent_bg, h=p.accent_hover, b=p.accent_light))
                 self._step4_btn.setText("04  输出交付\n可导出 G-code 与报告")
 
         if hasattr(self, "_lb_mode_state"):
@@ -1399,10 +792,11 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _style_workflow_label(label: QLabel, state: str) -> None:
+        p = ThemeManager.get_palette()
         colors = {
-            "done": ("#052E2B", "#10B981", "#A7F3D0"),
-            "active": ("#172554", "#3B82F6", "#EFF6FF"),
-            "locked": ("#111827", "#273449", "#64748B"),
+            "done": (p.success_bg, p.success, p.success),
+            "active": (p.accent_bg, p.accent_light, p.text_primary),
+            "locked": (p.bg_elevated, p.border_strong, p.text_disabled),
         }
         bg, border, fg = colors.get(state, colors["locked"])
         label.setStyleSheet(
@@ -1413,6 +807,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_morph_status(self) -> None:
         """更新形貌预测面板的输入状态显示。"""
+        p = ThemeManager.get_palette()
         pl_file = os.path.exists(_POINTLIST_FILE)
         vl_file = os.path.exists(_VELOCITYLIST_FILE)
 
@@ -1420,7 +815,7 @@ class MainWindow(QMainWindow):
             n_wp = len(self._session.waypoint.mock)
             source = "文件" if (pl_file or vl_file) else "内存"
             self._lb_pl_status.setText(f"✅ 航点数据就绪 ({n_wp:,} 个)")
-            self._lb_pl_status.setStyleSheet("color:#10B981; font-size:13px;")
+            self._lb_pl_status.setStyleSheet(f"color:{p.success}; font-size:13px;")
             self._lb_input_source.setText(f"来源: {source}")
             if pl_file:
                 self._lb_input_source.setText(f"来源: 内存 (MATLAB Pipeline)")
@@ -1428,7 +823,7 @@ class MainWindow(QMainWindow):
                 self._lb_input_source.setText("来源: 内存（未保存到文件）")
         else:
             self._lb_pl_status.setText("⏳ 请先完成路径规划")
-            self._lb_pl_status.setStyleSheet("color:#F59E0B; font-size:13px;")
+            self._lb_pl_status.setStyleSheet(f"color:{p.warning}; font-size:13px;")
             self._lb_input_source.setText("来源: —")
 
         ready = self._session.waypoint.mock is not None and len(self._session.waypoint.mock) > 0
@@ -1439,7 +834,8 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         self._session.is_busy = busy
-        self._update_step_buttons()
+        if hasattr(self, '_update_step_buttons') and hasattr(self, '_mode_stack'):
+            self._update_step_buttons()
         # 联动状态栏 BusyIndicator
         if hasattr(self, "_busy_label"):
             if busy:
@@ -1548,8 +944,8 @@ class MainWindow(QMainWindow):
 
         # Pipeline: 本地引擎路径推进（ZMQ 路径由 _on_compute_stage 管理）
         if metrics is None:
-            self._pipeline.set_done(1)      # 路径规划完成
-            self._pipeline.set_running(2)   # 形貌预测执行中
+            _wfc_call(self,"set_step_done", 1)      # 路径规划完成
+            _wfc_call(self,"set_step_running", 2)   # 形貌预测执行中
             # PR1-7: 本地引擎自动串联形貌预测
             QTimer.singleShot(100, self._on_fix)
 
@@ -1664,8 +1060,8 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
 
         # Pipeline: 形貌预测完成 → 结果生成执行中
-        self._pipeline.set_done(2)      # 形貌预测完成
-        self._pipeline.set_running(3)   # 结果生成执行中
+        _wfc_call(self,"set_step_done", 2)      # 形貌预测完成
+        _wfc_call(self,"set_step_running", 3)   # 结果生成执行中
 
         # PR1-7: 形貌预测完成后自动生成 PDF 报告
         self._lb_prog.setText("✅ 形貌预测完成，正在自动生成报告...")
@@ -1805,6 +1201,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_feasibility_check(self) -> None:
+        p = ThemeManager.get_palette()
         sel_points = self._selector.get_selected_points()
         if len(sel_points) < 3:
             self._sb.showMessage("请至少选取 3 个点再执行可行性检查", 5000)
@@ -1819,7 +1216,7 @@ class MainWindow(QMainWindow):
         )
         self._session.feas_result = result
         _WL = _Coord.WarningLevel
-        color = {_WL.OK: "#10B981", _WL.WARNING: "#F59E0B", _WL.BLOCKED: "#EF4444"}
+        color = {_WL.OK: p.success, _WL.WARNING: p.warning, _WL.BLOCKED: p.error}
         level_names = {_WL.OK: "✅ 可行", _WL.WARNING: "⚠️ 有条件可行", _WL.BLOCKED: "❌ 不可行"}
         self._lb_feas_status.setText(f"状态: {level_names.get(result.overall_level, '未知')}")
         self._lb_feas_score.setText(f"评分: {result.score:.1%}")
@@ -1833,10 +1230,10 @@ class MainWindow(QMainWindow):
             lines.append("")
         self._feas_text.setPlainText("\n".join(lines))
         self._lb_feas_status.setStyleSheet(
-            f"color:{color.get(result.overall_level, '#64748B')}; font-weight:bold; font-size:14px;"
+            f"color:{color.get(result.overall_level, p.text_disabled)}; font-weight:bold; font-size:14px;"
         )
         self._lb_feas_score.setStyleSheet(
-            f"color:{color.get(result.overall_level, '#64748B')}; font-size:16px; font-weight:bold;"
+            f"color:{color.get(result.overall_level, p.text_disabled)}; font-size:16px; font-weight:bold;"
         )
         self._sb.showMessage(f"可行性检查完成: {result.summary}")
 
@@ -1867,7 +1264,7 @@ class MainWindow(QMainWindow):
                 info(f"点云已加载: {os.path.basename(fp)} ({len(self._session.point_cloud.xyz):,} 点)")
                 self._sb.showMessage(f"已加载: {os.path.basename(fp)} ({len(self._session.point_cloud.xyz):,} 点)")
                 # Pipeline: 导入点云完成
-                self._pipeline.set_done(0)
+                _wfc_call(self,"set_step_done", 0)
             except Exception as e:
                 _show_error(self, "加载失败", e)
         else:
@@ -1888,7 +1285,7 @@ class MainWindow(QMainWindow):
         info(f"演示数据已加载 ({len(self._session.point_cloud.xyz):,} 点)")
         self._sb.showMessage(f"演示数据已加载 ({len(self._session.point_cloud.xyz):,} 点)")
         # Pipeline: 导入点云完成
-        self._pipeline.set_done(0)
+        _wfc_call(self,"set_step_done", 0)
 
     def _reset_output(self) -> None:
         self._session.morphology.repair_xyz = None
@@ -1911,30 +1308,33 @@ class MainWindow(QMainWindow):
 
     def _update_section_views(self, sel_mask: np.ndarray) -> None:
         """更新右侧辅助截面面板。"""
+        p = ThemeManager.get_palette()
         if self._session.waypoint.mock is None or len(self._session.waypoint.mock) == 0:
             return
         self._lb_bottom_status.setText("辅助截面视图已更新")
         self._lb_bottom_status.setStyleSheet(
-            "color:#10B981; font-size:12px; padding:4px; font-weight:bold;"
+            f"color:{p.success}; font-size:12px; padding:4px; font-weight:bold;"
         )
         self._update_path_section(sel_mask)
         self._update_morph_section(sel_mask)
 
     def _style_aux_axis(self, ax, title: str) -> None:
+        p = ThemeManager.get_palette()
         ax.clear()
-        ax.set_facecolor("#0F172A")
-        ax.set_title(title, color="#94A3B8", fontsize=10)
-        ax.tick_params(colors="#64748B", labelsize=8)
+        ax.set_facecolor(p.bg_panel)
+        ax.set_title(title, color=p.text_muted, fontsize=10)
+        ax.tick_params(colors=p.text_disabled, labelsize=8)
         for spine in ax.spines.values():
-            spine.set_color("#334155")
-        ax.grid(True, color="#1E293B", alpha=0.5)
+            spine.set_color(p.border_strong)
+        ax.grid(True, color=p.border_default, alpha=0.5)
 
     def _finish_aux_axis(self, ax) -> None:
+        p = ThemeManager.get_palette()
         handles, labels = ax.get_legend_handles_labels()
         if handles:
             ax.legend(
                 handles, labels, fontsize=7, loc="upper right",
-                facecolor="#1E293B", edgecolor="#334155", labelcolor="#94A3B8",
+                facecolor=p.border_default, edgecolor=p.border_strong, labelcolor=p.text_muted,
             )
         self._canvas_bottom.draw_idle()
 
@@ -1942,6 +1342,7 @@ class MainWindow(QMainWindow):
         self, sel_mask: np.ndarray, waypoints: np.ndarray | None = None
     ) -> None:
         """更新右侧路径截面图。"""
+        p = ThemeManager.get_palette()
         wp = waypoints if waypoints is not None else self._session.waypoint.mock
         self._style_aux_axis(self._ax_path, "截面路径规划")
 
@@ -1951,9 +1352,9 @@ class MainWindow(QMainWindow):
             z_range = (np.min(defect_pts[:, 2]), np.max(defect_pts[:, 2]))
             self._ax_path.fill_between([x_range[0]-1, x_range[1]+1],
                                        z_range[0]-1, z_range[0]-1,
-                                       color="#475569", alpha=0.3, label="缺陷区域")
+                                       color=p.text_disabled, alpha=0.3, label="缺陷区域")
             self._ax_path.plot([x_range[0], x_range[1]], [z_range[0], z_range[0]],
-                              color="#EF4444", linewidth=2, label="缺陷底面")
+                              color=p.error, linewidth=2, label="缺陷底面")
 
             layer_height = self._pp_fields.get("layer_height", self._sp_pp_layers)
             if hasattr(layer_height, 'value'):
@@ -1964,20 +1365,21 @@ class MainWindow(QMainWindow):
             for i in range(n_layers):
                 z = z_range[0] + 0.1 + i * lh
                 self._ax_path.plot([x_range[0], x_range[1]], [z, z],
-                                  color="#3B82F6", alpha=0.4, linewidth=1,
+                                  color=p.accent_light, alpha=0.4, linewidth=1,
                                   linestyle="--")
 
             if wp is not None and len(wp) > 0:
                 self._ax_path.scatter(wp[:, 0], wp[:, 2], c=wp[:, 1], cmap="viridis",
                                      s=2, alpha=0.7, label="航点")
-            self._ax_path.set_xlabel("X (mm)", color="#64748B", fontsize=8)
-            self._ax_path.set_ylabel("Z (mm)", color="#64748B", fontsize=8)
+            self._ax_path.set_xlabel("X (mm)", color=p.text_disabled, fontsize=8)
+            self._ax_path.set_ylabel("Z (mm)", color=p.text_disabled, fontsize=8)
         self._finish_aux_axis(self._ax_path)
 
     def _update_morph_section(
         self, sel_mask: np.ndarray, repair_pts: np.ndarray | None = None
     ) -> None:
         """更新右侧形貌截面图。"""
+        p = ThemeManager.get_palette()
         if repair_pts is None and self._session.morphology.repair_xyz is not None:
             repair_pts = (
                 self._session.morphology.repair_xyz[len(self._session.point_cloud.xyz):]
@@ -1992,11 +1394,11 @@ class MainWindow(QMainWindow):
             z_max = np.max(defect_pts[:, 2])
 
             self._ax_morph.plot([x_range_d[0]-1, x_range_d[1]+1],
-                               [z_max, z_max], color="#64748B", linewidth=1.5,
+                               [z_max, z_max], color=p.text_disabled, linewidth=1.5,
                                label="基体表面")
             self._ax_morph.fill_between([x_range_d[0], x_range_d[1]],
                                         z_max-1.5, z_max,
-                                        color="#EF4444", alpha=0.2, label="原始缺陷")
+                                        color=p.error, alpha=0.2, label="原始缺陷")
 
             if repair_pts is not None and len(repair_pts) > 0:
                 xs = repair_pts[:, 0]
@@ -2016,18 +1418,18 @@ class MainWindow(QMainWindow):
                     px = np.array(profile_x)
                     pz = np.array(profile_z)
                     self._ax_morph.fill_between(px, z_max, pz, where=pz >= z_max,
-                                                color="#10B981", alpha=0.28)
-                    self._ax_morph.plot(px, pz, color="#10B981", linewidth=1.8,
+                                                color=p.success, alpha=0.28)
+                    self._ax_morph.plot(px, pz, color=p.success, linewidth=1.8,
                                         label="预测轮廓")
             else:
                 self._ax_morph.text(
                     0.5, 0.5, "等待形貌预测",
                     transform=self._ax_morph.transAxes,
-                    ha="center", va="center", color="#64748B", fontsize=9,
+                    ha="center", va="center", color=p.text_disabled, fontsize=9,
                 )
 
-            self._ax_morph.set_xlabel("X (mm)", color="#64748B", fontsize=8)
-            self._ax_morph.set_ylabel("Z (mm)", color="#64748B", fontsize=8)
+            self._ax_morph.set_xlabel("X (mm)", color=p.text_disabled, fontsize=8)
+            self._ax_morph.set_ylabel("Z (mm)", color=p.text_disabled, fontsize=8)
         self._finish_aux_axis(self._ax_morph)
 
     def _collect_params(self) -> dict:
@@ -2077,7 +1479,8 @@ class MainWindow(QMainWindow):
             self._on_generate_path()
 
     def _on_start_calculation(self) -> None:
-        """一键执行完整计算流程，用户无需打开 MATLAB、无需运行 main.m、无需复制中间文件。"""
+        """一键执行完整计算流程（通过 ComputeController 编排）。"""
+        # 1. UI 层校验（Toast 反馈）
         if self._session.is_busy:
             return
         if not self._license.is_valid:
@@ -2095,100 +1498,120 @@ class MainWindow(QMainWindow):
             sel_mask = np.ones(len(self._session.point_cloud.xyz), dtype=bool)
         self._session.selection.mask = sel_mask
 
-        # 构造 protobuf 请求
-        try:
-            request = self._build_repair_request(sel_mask)
-            request_bytes = request.SerializeToString()
-        except Exception as e:
-            _show_error(self, "请求构建失败", e)
+        # 2. 防重复计算守卫
+        if getattr(self, '_compute_controller', None) is not None and self._compute_controller.is_busy():
+            Toast.warning(self, "上一次计算仍在进行中，请等待完成")
             return
-        # 确定项目根目录（matlab_bridge_server.m 所在位置）
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-        # Pipeline: 重置 → 导入点云 完成 → 路径规划执行中
-        self._pipeline.reset()
-        self._pipeline.set_done(0)
+        # 3. Pipeline 重置
+        if hasattr(self, '_pipeline'):
+            _wfc_call(self,"reset")
+            _wfc_call(self,"set_step_done", 0)
 
-        # 通过生命周期管理器确保 MATLAB + Bridge 就绪
-        # MF-2: 使用 LoadingDialog 提供 Progress / Cancel / Timeout
-        self._sb.showMessage("正在启动 MATLAB + Bridge（预计 60-120 秒，请耐心等待）...")
-        self._prog.setValue(2)
-        self._lb_prog.setText("正在启动 MATLAB + Bridge...（预计 1-2 分钟）")
-        QApplication.processEvents()  # 强制刷新 UI，让用户看到进度反馈
-        try:
-            from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
-            from repair_app.ui.dialogs import LoadingDialog
-            manager = MatlabLifecycleManager.get_instance(project_root)
-            # MF-2: 用模态 LoadingDialog 包裹 ensure_ready，支持取消和超时
-            loading = LoadingDialog(
-                self,
-                timeout_sec=int(schema_loader.get_network_value("matlab_loading_timeout_sec")),
-            )
-            loading.start(manager)
-            loading.exec()
-            if not loading.result_ok:
-                self._prog.setValue(0)
-                self._lb_prog.setText("MATLAB 启动失败")
-                if loading.cancelled:
-                    self._sb.showMessage("MATLAB 启动已取消")
+        # 4. MATLAB 启动（通过 LoadingDialog 显示进度）
+        # 仅在完整 UI 环境中执行（有 _prog 表示 UI 已初始化）
+        if hasattr(self, '_prog') and self._prog is not None:
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            self._sb.showMessage("正在启动 MATLAB + Bridge（预计 60-120 秒，请耐心等待）...")
+            self._prog.setValue(2)
+            self._lb_prog.setText("正在启动 MATLAB + Bridge...（预计 1-2 分钟）")
+            QApplication.processEvents()
+            try:
+                from repair_app.ui.dialogs import LoadingDialog
+                from repair_app.bridge.services.matlab_service import MatlabService
+
+                self._matlab_service = MatlabService()
+                loading = LoadingDialog(
+                    self,
+                    timeout_sec=int(schema_loader.get_network_value("matlab_loading_timeout_sec")),
+                )
+                loading.start(lambda: self._matlab_service.ensure_ready(project_root))
+                loading.exec()
+                if not loading.result_ok:
+                    self._prog.setValue(0)
+                    self._lb_prog.setText("MATLAB 启动失败")
+                    if loading.cancelled:
+                        self._sb.showMessage("MATLAB 启动已取消")
+                        return
+                    from repair_app.ui.dialogs import ErrorDialog
+                    ErrorDialog.show(
+                        self,
+                        title="MATLAB 不可用",
+                        what="软件无法启动 MATLAB 计算服务。",
+                        why=f"可能原因：{loading.result_msg}",
+                        how="1. 确认 MATLAB 已安装且可正常启动\n"
+                            "2. 让管理员设置环境变量 CSAM_MATLAB_EXE 指向 matlab.exe 路径\n"
+                            "3. 确认 MATLAB 许可证有效\n"
+                            "4. 如果反复超时，联系管理员检查 MATLAB 启动速度",
+                    )
                     return
+            except Exception as exc:
+                log_error(f"MATLAB 启动异常: {exc}")
+                self._prog.setValue(0)
+                self._lb_prog.setText("MATLAB 启动异常")
                 from repair_app.ui.dialogs import ErrorDialog
                 ErrorDialog.show(
                     self,
-                    title="MATLAB 不可用",
-                    what="软件无法启动 MATLAB 计算服务。",
-                    why=f"可能原因：{loading.result_msg}",
-                    how="1. 确认 MATLAB 已安装且可正常启动\n"
-                        "2. 让管理员设置环境变量 CSAM_MATLAB_EXE 指向 matlab.exe 路径\n"
-                        "3. 确认 MATLAB 许可证有效\n"
-                        "4. 如果反复超时，联系管理员检查 MATLAB 启动速度",
+                    title="MATLAB 启动异常",
+                    what="MATLAB 启动过程中发生错误。",
+                    why=f"错误详情：{exc}",
+                    how="请让管理员检查 MATLAB 环境后重试。",
+                    exc=exc,
                 )
                 return
-        except Exception as exc:
-            log_error(f"MATLAB 启动异常: {exc}")
-            self._prog.setValue(0)
-            self._lb_prog.setText("MATLAB 启动异常")
-            from repair_app.ui.dialogs import ErrorDialog
-            ErrorDialog.show(
-                self,
-                title="MATLAB 启动异常",
-                what="MATLAB 启动过程中发生错误。",
-                why=f"错误详情：{exc}",
-                how="请让管理员检查 MATLAB 环境后重试。",
-                exc=exc,
+
+        # 5. 委托 ComputeController 发起计算
+        if hasattr(self, '_sb') and self._sb is not None:
+            self._sb.showMessage("一键计算：MATLAB 已就绪，正在执行...")
+        if hasattr(self, '_prog') and self._prog is not None:
+            self._prog.setValue(5)
+            self._lb_prog.setText("正在执行计算...")
+        if hasattr(self, '_set_busy') and hasattr(self, '_btn_start_repair'):
+            self._set_busy(True)
+
+        if hasattr(self, '_visualizer'):
+            self._visualizer.set_data(
+                substrate=self._session.point_cloud.xyz, defect_mask=sel_mask,
+                repair=None, waypoints=None, layers=None,
             )
-            return
 
-        self._sb.showMessage("一键计算：MATLAB 已就绪，正在执行...")
-        self._prog.setValue(5)
-        self._lb_prog.setText("正在执行计算...")
-        self._set_busy(True)
+        # 启动实时进度订阅
+        if hasattr(self, '_start_progress_subscriber'):
+            self._start_progress_subscriber()
 
-        # 标记 MATLAB 为 BUSY 状态（暂停崩溃检测，避免误判）
-        try:
-            from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
-            MatlabLifecycleManager.get_instance(project_root).mark_busy()
-        except Exception as e:
-            log_error(f"标记 MATLAB BUSY 状态失败: {e}")
+        # 构建请求（ComputeController 优先，回退到旧方法）
+        _ctrl = getattr(self, '_compute_controller', None)
+        if _ctrl is not None:
+            request_bytes = _ctrl.build_request(
+                self._session, sel_mask,
+                repair_mode=self._session.repair_mode,
+                mode_repairing=MODE_REPAIRING,
+            )
+            if request_bytes is None:
+                self._set_busy(False)
+                return
 
-        self._visualizer.set_data(
-            substrate=self._session.point_cloud.xyz, defect_mask=sel_mask,
-            repair=None, waypoints=None, layers=None,
-        )
+            _ctrl.execute_computation(
+                request_bytes=request_bytes,
+                matlab_service=self._matlab_service,
+            )
+        else:
+            # 测试环境兼容：无 ComputeController 时回退到旧路径
+            import uuid as _uuid
+            _op_id = str(_uuid.uuid4())
+            request = self._build_repair_request(sel_mask, request_id=_op_id)
+            request_bytes = request.SerializeToString()
+            if hasattr(self, '_on_operation_id_received'):
+                self._on_operation_id_received(_op_id)
+            if hasattr(self, '_start_computation_legacy'):
+                self._start_computation_legacy(request_bytes)
 
-        # 启动实时进度订阅（监听 MATLAB 逐步发布的进度）
-        self._start_progress_subscriber()
-
-        # 防御性检查：确保前一个计算线程已完成
-        if self._compute_thread is not None and self._compute_thread.isRunning():
-            Toast.warning(self, "上一次计算仍在进行中，请等待完成")
-            self._set_busy(False)
-            return
-
+    def _start_computation_legacy(self, request_bytes: bytes) -> None:
+        """旧版 Worker 创建逻辑（测试环境兼容，ComputeController 不可用时回退）。"""
         from repair_app.ui.workers import ComputePipelineWorker
         self._compute_thread = QThread(self)
         self._compute_worker = ComputePipelineWorker(
-            project_root=project_root,
+            matlab_service=self._matlab_service,
             request_bytes=request_bytes,
         )
         self._compute_worker.moveToThread(self._compute_thread)
@@ -2196,6 +1619,7 @@ class MainWindow(QMainWindow):
         self._compute_worker.stage.connect(self._on_compute_stage)
         self._compute_worker.result.connect(self._on_compute_result)
         self._compute_worker.failed.connect(self._on_compute_failed)
+        self._compute_worker.operation_id.connect(self._on_operation_id_received)
         self._compute_worker.result.connect(self._compute_thread.quit)
         self._compute_worker.failed.connect(self._compute_thread.quit)
         self._compute_thread.finished.connect(self._compute_worker.deleteLater)
@@ -2212,15 +1636,15 @@ class MainWindow(QMainWindow):
         from repair_app.ui.pipeline_indicator import PipelineStage
         if "启动" in stage:
             self._prog.setValue(10)
-            self._pipeline.set_running(1)   # 路径规划执行中
+            _wfc_call(self,"set_step_running", 1)   # 路径规划执行中
         elif "执行" in stage:
             self._prog.setValue(30)
-            self._pipeline.set_done(1)      # 路径规划完成
-            self._pipeline.set_running(2)   # 形貌预测执行中
+            _wfc_call(self,"set_step_done", 1)      # 路径规划完成
+            _wfc_call(self,"set_step_running", 2)   # 形貌预测执行中
         elif "解析" in stage:
             self._prog.setValue(80)
-            self._pipeline.set_done(2)      # 形貌预测完成
-            self._pipeline.set_running(3)   # 结果生成执行中
+            _wfc_call(self,"set_step_done", 2)      # 形貌预测完成
+            _wfc_call(self,"set_step_running", 3)   # 结果生成执行中
 
     @Slot(dict)
     def _on_compute_result(self, result: dict) -> None:
@@ -2235,8 +1659,8 @@ class MainWindow(QMainWindow):
             self._prog.setValue(85)
             self._lb_prog.setText("正在更新 GUI...")
             # Pipeline: 结果生成完成 → 导出执行中
-            self._pipeline.set_done(3)
-            self._pipeline.set_running(4)
+            _wfc_call(self,"set_step_done", 3)
+            _wfc_call(self,"set_step_running", 4)
 
             sel_mask = self._session.selection.mask
             metrics = {
@@ -2301,25 +1725,14 @@ class MainWindow(QMainWindow):
                  f"质量={metrics['estimated_mass_g']:.3f}g, "
                  f"均匀性={metrics['uniformity_score']:.2f}")
             # Pipeline: 导出完成
-            self._pipeline.set_done(4)
+            _wfc_call(self,"set_step_done", 4)
             self._set_busy(False)
-            # 标记 MATLAB 为空闲状态（恢复崩溃检测）
-            try:
-                from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
-                MatlabLifecycleManager.get_instance().mark_idle()
-            except Exception as e:
-                log_error(f"标记 MATLAB 空闲状态失败: {e}")
         except Exception as exc:
             self._set_busy(False)
             log_error(f"一键计算结果处理失败: {exc}")
             # 停止实时进度订阅 + 恢复 MATLAB 崩溃检测（与 _on_compute_failed 对齐）
             self._stop_progress_subscriber()
-            try:
-                from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
-                MatlabLifecycleManager.get_instance().mark_idle()
-            except Exception as e:
-                log_error(f"标记 MATLAB 空闲状态失败: {e}")
-            self._pipeline.mark_running_as_failed()
+            _wfc_call(self,"mark_running_as_failed")
             _show_error(self, "计算失败", exc)
 
     @Slot(str, str, str)
@@ -2333,13 +1746,7 @@ class MainWindow(QMainWindow):
         # 停止实时进度订阅
         self._stop_progress_subscriber()
         # Pipeline: 标记当前执行中的阶段为失败
-        self._pipeline.mark_running_as_failed()
-        # 标记 MATLAB 为空闲状态（恢复崩溃检测）
-        try:
-            from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
-            MatlabLifecycleManager.get_instance().mark_idle()
-        except Exception as e:
-            log_error(f"标记 MATLAB 空闲状态失败: {e}")
+        _wfc_call(self,"mark_running_as_failed")
         # 显示结构化错误对话框（用户友好 + 可展开详情）
         # friendly 已包含完整 What/Why/How（来自 _pack_error）
         from repair_app.ui.dialogs import ErrorDialog
@@ -2357,6 +1764,45 @@ class MainWindow(QMainWindow):
         self._stop_progress_subscriber()
 
     # ========== 实时可视化：ProgressSubscriber 信号处理 ==========
+
+    @Slot(str)
+    def _on_operation_id_received(self, operation_id: str) -> None:
+        """Worker 发出 operation_id 后，配置 ProgressSubscriber 过滤旧消息。"""
+        if self._progress_subscriber is not None:
+            self._progress_subscriber.set_operation_id(operation_id)
+            info(f"ProgressSubscriber 操作 ID 已设置: {operation_id}")
+
+    @Slot()
+    def _on_matlab_startup_started(self) -> None:
+        """MATLAB 启动开始（ComputeController 信号）。"""
+        self._sb.showMessage("正在启动 MATLAB + Bridge（预计 60-120 秒，请耐心等待）...")
+        self._prog.setValue(2)
+        self._lb_prog.setText("正在启动 MATLAB + Bridge...（预计 1-2 分钟）")
+        QApplication.processEvents()
+
+    @Slot()
+    def _on_matlab_startup_done(self) -> None:
+        """MATLAB 启动成功（ComputeController 信号）。"""
+        self._sb.showMessage("一键计算：MATLAB 已就绪，正在执行...")
+        self._prog.setValue(5)
+        self._lb_prog.setText("正在执行计算...")
+
+    @Slot(str, str)
+    def _on_matlab_startup_failed(self, title: str, message: str) -> None:
+        """MATLAB 启动失败（ComputeController 信号）。"""
+        self._prog.setValue(0)
+        self._lb_prog.setText("MATLAB 启动失败")
+        from repair_app.ui.dialogs import ErrorDialog
+        ErrorDialog.show(
+            self,
+            title=title,
+            what=message,
+            why="可能原因：MATLAB 未安装、许可证无效或启动超时",
+            how="1. 确认 MATLAB 已安装且可正常启动\n"
+                "2. 让管理员设置环境变量 CSAM_MATLAB_EXE 指向 matlab.exe 路径\n"
+                "3. 确认 MATLAB 许可证有效\n"
+                "4. 如果反复超时，联系管理员检查 MATLAB 启动速度",
+        )
 
     def _start_progress_subscriber(self) -> None:
         """启动实时进度订阅（计算开始时调用）。"""
@@ -2511,13 +1957,13 @@ class MainWindow(QMainWindow):
             info(f"报告已自动保存: {fp}")
             self._sb.showMessage(f"修复完成 · 报告已保存: {fp}", 5000)
             # Pipeline: 结果生成完成 → 导出就绪
-            self._pipeline.set_done(3)
-            self._pipeline.set_running(4)
+            _wfc_call(self,"set_step_done", 3)
+            _wfc_call(self,"set_step_running", 4)
             self._lb_prog.setText("✅ 修复完成，可导出 G-code / 报告")
             Toast.success(self, "修复完成：路径规划 → 形貌预测 → 报告均已生成，可导出交付")
         else:
             warning("PDF 报告自动生成失败")
-            self._pipeline.mark_running_as_failed()
+            _wfc_call(self,"mark_running_as_failed")
             self._lb_prog.setText("⚠ 报告自动生成失败")
             Toast.error(self, "报告自动生成失败，请查看日志")
 
@@ -2543,9 +1989,9 @@ class MainWindow(QMainWindow):
         self._session.selection.mask = sel_mask
 
         # Pipeline: 本地引擎路径，重置 → 导入点云完成 → 路径规划执行中
-        self._pipeline.reset()
-        self._pipeline.set_done(0)
-        self._pipeline.set_running(1)
+        _wfc_call(self,"reset")
+        _wfc_call(self,"set_step_done", 0)
+        _wfc_call(self,"set_step_running", 1)
 
         self._sb.showMessage("路径规划中...")
         self._prog.setValue(10)
@@ -2634,8 +2080,8 @@ class MainWindow(QMainWindow):
         params = self._collect_params()
         info("形貌预测开始")
         # Pipeline: 路径规划完成 → 形貌预测执行中
-        self._pipeline.set_done(1)
-        self._pipeline.set_running(2)
+        _wfc_call(self,"set_step_done", 1)
+        _wfc_call(self,"set_step_running", 2)
         self._sb.showMessage("形貌预测中...")
         self._prog.setValue(20)
         self._lb_prog.setText("模拟沉积中...")
@@ -2668,13 +2114,14 @@ class MainWindow(QMainWindow):
 
     @Slot(object, int, int)
     def _on_path_partial(self, waypoints: np.ndarray, layer_idx: int, total_layers: int) -> None:
+        p = ThemeManager.get_palette()
         self._session.waypoint.mock = waypoints
         self._prog.setValue(10 + int(60 * layer_idx / max(total_layers, 1)))
         self._lb_prog.setText(f"路径规划中... 第 {layer_idx}/{total_layers} 层")
         self._sb.showMessage(f"路径规划中 – 已生成 {len(waypoints):,} 个航点")
         self._lb_bottom_status.setText(f"路径截面同步中：第 {layer_idx}/{total_layers} 层")
         self._lb_bottom_status.setStyleSheet(
-            "color:#F59E0B; font-size:12px; padding:4px; font-weight:bold;"
+            f"color:{p.warning}; font-size:12px; padding:4px; font-weight:bold;"
         )
         self._visualizer.set_partial_waypoints(waypoints)
         sel_mask = self._session.selection.mask if self._session.selection.mask is not None else self._selector.get_selection_mask()
@@ -2782,7 +2229,7 @@ class MainWindow(QMainWindow):
     def _on_zmq_path_error(self, message: str) -> None:
         self._set_busy(False)
         log_error(f"ZMQ 路径规划失败: {message}")
-        self._pipeline.mark_running_as_failed()
+        _wfc_call(self,"mark_running_as_failed")
         from repair_app.ui.dialogs import ErrorDialog
         ErrorDialog.show(
             self, title="远程服务路径规划失败",
@@ -2793,13 +2240,14 @@ class MainWindow(QMainWindow):
 
     @Slot(object, int, int)
     def _on_morph_partial(self, repair_pts: np.ndarray, layer_idx: int, total_layers: int) -> None:
+        p = ThemeManager.get_palette()
         self._session.morphology.repair_xyz = np.vstack([self._session.point_cloud.xyz, repair_pts])
         self._prog.setValue(20 + int(70 * layer_idx / max(total_layers, 1)))
         self._lb_prog.setText(f"模拟沉积中... 第 {layer_idx}/{total_layers} 层")
         self._sb.showMessage(f"形貌预测中 – 当前 {len(repair_pts):,} 个沉积点")
         self._lb_bottom_status.setText(f"形貌截面同步中：第 {layer_idx}/{total_layers} 层")
         self._lb_bottom_status.setStyleSheet(
-            "color:#F59E0B; font-size:12px; padding:4px; font-weight:bold;"
+            f"color:{p.warning}; font-size:12px; padding:4px; font-weight:bold;"
         )
         self._visualizer.set_partial_repair(repair_pts)
         sel_mask = self._session.selection.mask if self._session.selection.mask is not None else self._selector.get_selection_mask()
@@ -3183,6 +2631,12 @@ class MainWindow(QMainWindow):
         dlg = ParameterValidatorDialog(self, current_params=current_params)
         dlg.exec()
 
+    def _on_license_activation(self) -> None:
+        """UI 接线：License 激活对话框。"""
+        from repair_app.ui.dialogs import LicenseActivationDialog
+        dlg = LicenseActivationDialog(self)
+        dlg.exec()
+
     @Slot()
     def _on_save_project(self) -> None:
         """保存当前会话为 .csam 工程文件。"""
@@ -3358,55 +2812,42 @@ class MainWindow(QMainWindow):
                     log_error(f"恢复参数 {key} 失败: {e}")
 
     def closeEvent(self, event) -> None:
-        # 退出前做一次强制自动保存
-        try:
-            self._do_autosave()
-        except Exception as e:
-            log_error(f"退出前自动保存失败: {e}")
-        # 停止自动保存定时器
-        try:
-            self._autosave_timer.stop()
-        except Exception as e:
-            log_error(f"停止自动保存定时器失败: {e}")
-        for thread in (self._path_thread, self._morph_thread, self._compute_thread):
-            if thread is not None and thread.isRunning():
-                thread.requestInterruption()
-                thread.quit()
-                # 给予充分时间优雅退出（5 秒），仅在极端情况下 terminate
-                if not thread.wait(_THREAD_WAIT_MS):
-                    warning(f"线程 {thread.objectName() or thread.__class__.__name__} 未在 5 秒内退出，强制终止")
-                    thread.terminate()
-                    thread.wait(_THREAD_TERMINATE_WAIT_MS)
-        # 停止实时进度订阅器
-        self._stop_progress_subscriber()
-        # 关闭一键计算启动的 MATLAB 子进程
-        if self._compute_worker is not None and hasattr(self._compute_worker, "stop_launcher"):
-            self._compute_worker.stop_launcher()
-        # 关闭生命周期管理器（停止看门狗 + 关闭 MATLAB）
-        try:
-            from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
-            manager = MatlabLifecycleManager.get_instance()
-            manager.stop()
-        except Exception as exc:
-            log_error(f"生命周期管理器关闭异常: {exc}")
-        if self._zmq_client is not None and hasattr(self._zmq_client, "close"):
-            self._zmq_client.close()
-        # 清理可视化组件的 matplotlib 资源（防止 Figure 内存泄漏）
-        if self._visualizer is not None and hasattr(self._visualizer, "cleanup"):
-            self._visualizer.cleanup()
+        from repair_app.ui.application_shutdown_controller import ApplicationShutdownController
+        controller = ApplicationShutdownController(
+            autosave_fn=self._do_autosave,
+            autosave_timer=self._autosave_timer,
+            worker_threads=[
+                getattr(self, '_path_thread', None),
+                getattr(self, '_morph_thread', None),
+                getattr(self, '_compute_thread', None),
+            ],
+            progress_subscriber=getattr(self, '_progress_subscriber', None),
+            zmq_client=getattr(self, '_zmq_client', None),
+            visualizer=getattr(self, '_visualizer', None),
+        )
+        controller.shutdown()
         super().closeEvent(event)
 
     @staticmethod
     def _kv(k, v):
-        l = QLabel(f"{k}: {v}")
-        l.setStyleSheet("color:#CBD5E1; font-size:13px; padding:3px 0;")
-        return l
+        return PanelBuilder.kv(k, v)
 
     @staticmethod
     def _sep():
-        f = QFrame(); f.setFrameShape(QFrame.HLine); f.setFrameShadow(QFrame.Sunken)
-        f.setStyleSheet("color:#E2E8F0;")
-        return f
+        return PanelBuilder.sep()
+
+
+# ── WorkflowController 辅助函数（模块级，安全用于任何对象） ──────────
+
+def _wfc(obj):
+    """获取 WorkflowController 实例（None 安全）。"""
+    return getattr(obj, '_workflow_controller', None)
+
+def _wfc_call(obj, method_name: str, *args, **kwargs) -> None:
+    """安全调用 WorkflowController 方法（不存在时静默忽略）。"""
+    _wf = _wfc(obj)
+    if _wf is not None:
+        getattr(_wf, method_name)(*args, **kwargs)
 
 
 if __name__ == "__main__":
