@@ -106,7 +106,10 @@ function result = run_profile_prediction(stl_path, excel_path, params, pointlist
         'obstacle_resolution_mm', 2.0, ...
         'base_plane', 5.0, ...
         'max_layers', 5.0, ...
-        'num_layers', 3.0);
+        'num_layers', 3.0, ...
+        'request_id', '', ...
+        'preview_fps', 8.0, ...
+        'preview_max_triangles', 1500.0);
     params = complete_struct(params, defaults);
 
     % ---- 初始化输出结构体 ----
@@ -128,6 +131,7 @@ function result = run_profile_prediction(stl_path, excel_path, params, pointlist
     result.waypoint_count = 0;
 
     % ---- 1. 读取 STL ----
+    assert_not_cancelled(params.request_id, 'before STL loading');
     if ~exist(stl_path, 'file')
         result.warnings = {'STL file not found'};
         result.compute_time_s = toc(t0);
@@ -137,10 +141,12 @@ function result = run_profile_prediction(stl_path, excel_path, params, pointlist
     substrate_triangles = triangles;
 
     % ---- 2. 三角形细分与短边优化 ----
+    assert_not_cancelled(params.request_id, 'before mesh preprocessing');
     triangles = recursiveSubdivide(triangles, params.subdivide_max_edge);
     triangles = improveShortEdges(triangles, [], params.improve_short_edge);
 
     % ---- 3. 粒子拟合（CFD 数据） ----
+    assert_not_cancelled(params.request_id, 'before particle fitting');
     if isempty(excel_path)
         % 自动查找 CFD Excel 文件（profile_prediction 目录已在 matlab_bridge_server.m 中 addpath）
         candidate = fullfile(pwd, 'profile_prediction', 'substrate-surface.xlsx');
@@ -181,6 +187,7 @@ function result = run_profile_prediction(stl_path, excel_path, params, pointlist
     end
 
     % ---- 4. 路径规划（若未提供预计算航点，则内部调用 run_path_planning） ----
+    assert_not_cancelled(params.request_id, 'before path planning');
     if ~isempty(pointlist_in)
         % 使用预计算的航点（来自 MATLABPipeline，避免重复计算）
         pointlist = pointlist_in;
@@ -212,6 +219,7 @@ function result = run_profile_prediction(stl_path, excel_path, params, pointlist
     end
 
     % ---- 5. 喷斑插值 ----
+    assert_not_cancelled(params.request_id, 'before spot interpolation');
     ReferencePoint = zeros(1, 6);
     if ~isempty(rays_origins)
         spotsList = spotInterp(ReferencePoint, pointlist, velocitylist, params.spot_step_size_mm);
@@ -220,11 +228,22 @@ function result = run_profile_prediction(stl_path, excel_path, params, pointlist
         warnings_list{end+1} = 'No rays data, skipping deposition loop';
     end
 
+    if ~isempty(spotsList)
+        spot_layer_indices = derive_layer_indices_from_z(spotsList, params.base_plane);
+    else
+        spot_layer_indices = zeros(0, 1);
+    end
+
     % ---- 6. 逐点形貌预测 ----
     steps = size(spotsList, 1);
     prog_start_time = tic;
+    last_publish_s = -inf;
+    preview_interval_s = 1.0 / max(double(params.preview_fps), 1.0);
+    total_progress_layers = max([spot_layer_indices; 1]);
     if steps > 0
         for i = 1:steps
+            assert_not_cancelled(params.request_id, ...
+                sprintf('before morphology step %d/%d', i, steps));
             [moveRays_origins, moveRays_directions, nozzleOrientation, Coef_THK] = ...
                 rayMove(spotsList(i, :), rays_origins, rays_directions);
 
@@ -247,32 +266,31 @@ function result = run_profile_prediction(stl_path, excel_path, params, pointlist
 
             triangles = [oldTriangles; newTriangles];
 
-            % ---- 实时进度发布（py 调用失败不影响算法） ----
-            try
-                elapsed_val = toc(prog_start_time);
-                prog_val = i / steps;
-                % 推断当前层号
-                if i <= length(layer_indices)
-                    cur_layer = layer_indices(i);
+            % ---- 限帧完整快照：预览可覆盖，层末高精度帧可靠 ----
+            elapsed_val = toc(prog_start_time);
+            cur_layer = spot_layer_indices(i);
+            is_layer_end = i == steps || spot_layer_indices(i + 1) ~= cur_layer;
+            should_publish_preview = (elapsed_val - last_publish_s) >= preview_interval_s;
+            if is_layer_end || should_publish_preview
+                if is_layer_end
+                    mesh_to_publish = triangles;
+                    frame_kind = int32(2);  % MESH_FULL_RESOLUTION_SNAPSHOT
+                    event_type = int32(2);  % PROGRESS_TOPO_LAYER_READY
+                    reliable_frame = true;
                 else
-                    cur_layer = i;
+                    mesh_to_publish = select_preview_mesh( ...
+                        triangles, params.preview_max_triangles);
+                    frame_kind = int32(1);  % MESH_PREVIEW_SNAPSHOT
+                    event_type = int32(1);  % PROGRESS_TOPO_SNAPSHOT
+                    reliable_frame = false;
                 end
-                % 调用 Python 发布进度
-                py.repair_app.bridge.progress_publisher.publish_progress( ...
-                    'request_id', params.request_id, ...
-                    'stage', int32(3), ...
-                    'layer_index', int32(cur_layer), ...
-                    'total_layers', int32(max(layer_indices)), ...
-                    'progress', double(prog_val), ...
-                    'message', sprintf('Layer %d/%d deposition step %d/%d', cur_layer, max(layer_indices), i, steps), ...
-                    'waypoints', pointlist, ...
-                    'layer_max_height', double(max(triangles(:, 3)) - min(substrate_triangles(:, 3))), ...
-                    'layer_avg_height', double(mean(triangles(:, 3) - min(substrate_triangles(:, 3)))), ...
-                    'layer_dep_eff', double(i / steps), ...
-                    'mesh_triangles', triangles, ...
-                    'elapsed_s', double(elapsed_val));
-            catch
-                % py 不可用时静默跳过，不影响算法
+                publish_topography_snapshot( ...
+                    params.request_id, event_type, frame_kind, ...
+                    cur_layer, total_progress_layers, ...
+                    0.35 + 0.65 * i / steps, i, steps, ...
+                    mesh_to_publish, triangles, substrate_triangles, ...
+                    elapsed_val, reliable_frame);
+                last_publish_s = elapsed_val;
             end
         end
     end
@@ -334,6 +352,84 @@ function s = complete_struct(s, defaults)
     for i = 1:length(fns)
         if ~isfield(s, fns{i}) || isempty(s.(fns{i}))
             s.(fns{i}) = defaults.(fns{i});
+        end
+    end
+end
+
+function cancelled = is_cancel_requested(request_id)
+    cancelled = false;
+    if isempty(request_id)
+        return;
+    end
+    try
+        cancelled = logical(py.repair_app.bridge.operation_control.is_cancel_requested( ...
+            char(request_id)));
+    catch me
+        warning('CSAM:CancelCheckUnavailable', ...
+            'Cancellation check unavailable: %s', me.message);
+    end
+end
+
+function assert_not_cancelled(request_id, checkpoint)
+    if is_cancel_requested(request_id)
+        error('CSAM:Cancelled', 'Profile prediction cancelled %s', checkpoint);
+    end
+end
+
+function preview = select_preview_mesh(triangles, max_triangles)
+% 使用稳定步长抽样，避免每帧运行昂贵的通用 mesh decimation。
+    n = size(triangles, 1);
+    limit = max(100, round(double(max_triangles)));
+    if n <= limit
+        preview = triangles;
+        return;
+    end
+    stride = ceil(n / limit);
+    preview = triangles(1:stride:end, :);
+end
+
+function publish_topography_snapshot(request_id, event_type, frame_kind, ...
+                                     layer_idx, total_layers, progress_value, ...
+                                     step_idx, total_steps, mesh_payload, ...
+                                     full_mesh, substrate_mesh, elapsed_s, reliable)
+    persistent warned_publish_failure;
+    if isempty(warned_publish_failure)
+        warned_publish_failure = false;
+    end
+    if isempty(request_id)
+        return;
+    end
+
+    z_values = [full_mesh(:, 3); full_mesh(:, 6); full_mesh(:, 9)];
+    substrate_z = [substrate_mesh(:, 3); substrate_mesh(:, 6); substrate_mesh(:, 9)];
+    z_base = max(substrate_z);
+    deposited_height = max(z_values - z_base, 0.0);
+    max_height = max(deposited_height);
+    avg_height = mean(deposited_height);
+
+    try
+        py.repair_app.bridge.progress_publisher.publish_progress(pyargs( ...
+            'request_id', char(request_id), ...
+            'stage', int32(3), ...
+            'event_type', event_type, ...
+            'mesh_frame_kind', frame_kind, ...
+            'layer_index', int32(layer_idx), ...
+            'total_layers', int32(total_layers), ...
+            'progress', double(progress_value), ...
+            'message', sprintf('Morphology layer %d/%d step %d/%d', ...
+                               layer_idx, total_layers, step_idx, total_steps), ...
+            'layer_max_height', double(max_height), ...
+            'layer_avg_height', double(avg_height), ...
+            'layer_dep_eff', double(step_idx / max(total_steps, 1)), ...
+            'mesh_triangles', mesh_payload, ...
+            'elapsed_s', double(elapsed_s), ...
+            'reliable', logical(reliable)));
+        warned_publish_failure = false;
+    catch me
+        if ~warned_publish_failure
+            warning('CSAM:ProgressPublishFailed', ...
+                'Failed to publish morphology snapshot: %s', me.message);
+            warned_publish_failure = true;
         end
     end
 end

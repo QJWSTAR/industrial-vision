@@ -187,8 +187,13 @@ class MainWindow(QMainWindow):
 
         self._calibration = CalibrationWizard()
 
+        # Fail before constructing partial panels if the schema/UI contract is
+        # inconsistent. Group names are UI metadata; MATLAB request fields stay
+        # flat in RepairRequest.
+        schema_loader.validate_required_ui_groups()
         self._setup_ui()
         self._setup_statusbar()
+        self._setup_compute_controller()
         self._update_connection_status()
         self._update_step_buttons()
         QTimer.singleShot(300, self._load_demo)
@@ -241,6 +246,59 @@ class MainWindow(QMainWindow):
         body.setStretchFactor(2, 3)
         body.setChildrenCollapsible(False)
         root.addWidget(body, 1)
+
+    def _setup_compute_controller(self) -> None:
+        """Application composition root for compute and realtime services."""
+        from repair_app.ui.compute_controller import ComputeController
+
+        project_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        self._compute_controller = ComputeController(
+            parent=self,
+            project_root=project_root,
+            session=self._session,
+            license_manager=self._license,
+            params_collector=self._collect_params,
+            selector=self._selector,
+        )
+        self._progress_subscriber = self._compute_controller.progress_subscriber
+
+        self._progress_subscriber.stats_updated.connect(
+            self._realtime_stats.update_stats
+        )
+        self._progress_subscriber.layer_completed.connect(
+            self._on_layer_completed
+        )
+        self._progress_subscriber.mesh_updated.connect(self._on_mesh_updated)
+        self._progress_subscriber.progress_received.connect(
+            self._on_progress_received
+        )
+        self._progress_subscriber.path_layer_ready.connect(
+            self._on_path_layer_ready
+        )
+
+        self._compute_controller.stage_changed.connect(self._on_compute_stage)
+        self._compute_controller.result_ready.connect(self._on_compute_result)
+        self._compute_controller.computation_failed.connect(
+            self._on_compute_failed
+        )
+        self._compute_controller.computation_cancelled.connect(
+            self._on_compute_cancelled
+        )
+        self._compute_controller.operation_id_ready.connect(
+            self._on_operation_id_received
+        )
+        self._compute_controller.matlab_startup_started.connect(
+            self._on_matlab_startup_started
+        )
+        self._compute_controller.matlab_startup_done.connect(
+            self._on_matlab_startup_done
+        )
+        self._compute_controller.matlab_startup_failed.connect(
+            self._on_matlab_startup_failed
+        )
+        self._compute_controller.start_progress_subscription()
 
     def _app_header(self) -> QWidget:
         return PanelBuilder.build_app_header(self)
@@ -834,6 +892,9 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         self._session.is_busy = busy
+        cancel_button = getattr(self, "_btn_cancel_repair", None)
+        if cancel_button is not None:
+            cancel_button.setEnabled(bool(busy))
         if hasattr(self, '_update_step_buttons') and hasattr(self, '_mode_stack'):
             self._update_step_buttons()
         # 联动状态栏 BusyIndicator
@@ -1606,6 +1667,29 @@ class MainWindow(QMainWindow):
             if hasattr(self, '_start_computation_legacy'):
                 self._start_computation_legacy(request_bytes)
 
+    @Slot()
+    def _on_cancel_computation(self) -> None:
+        """Request cancellation and wait for a confirmed terminal state."""
+        controller = getattr(self, "_compute_controller", None)
+        if controller is not None and controller.is_busy():
+            self._lb_prog.setText("正在取消计算...")
+            self._sb.showMessage("已发送取消请求，等待 MATLAB 到达安全检查点...")
+            if hasattr(self, "_btn_cancel_repair"):
+                self._btn_cancel_repair.setEnabled(False)
+            controller.cancel_computation()
+            return
+
+        requested = False
+        for thread in (
+            getattr(self, "_path_thread", None),
+            getattr(self, "_morph_thread", None),
+        ):
+            if thread is not None and thread.isRunning():
+                thread.requestInterruption()
+                requested = True
+        if requested:
+            self._sb.showMessage("已请求停止本地预览计算")
+
     def _start_computation_legacy(self, request_bytes: bytes) -> None:
         """旧版 Worker 创建逻辑（测试环境兼容，ComputeController 不可用时回退）。"""
         from repair_app.ui.workers import ComputePipelineWorker
@@ -1755,6 +1839,16 @@ class MainWindow(QMainWindow):
             log_text=detail,
         )
 
+    @Slot(str)
+    def _on_compute_cancelled(self, message: str) -> None:
+        """A cooperative stop or owned-worker termination was confirmed."""
+        self._set_busy(False)
+        self._prog.setValue(0)
+        self._lb_prog.setText("计算已取消")
+        self._sb.showMessage(message or "计算已取消", 5000)
+        _wfc_call(self, "mark_running_as_failed")
+        Toast.warning(self, message or "计算已取消")
+
     @Slot()
     def _on_compute_thread_finished(self) -> None:
         """计算线程结束清理。"""
@@ -1815,15 +1909,20 @@ class MainWindow(QMainWindow):
         # 清空层缓存
         self._session.layer.by_layer = {}
         try:
-            if self._progress_subscriber is not None and not self._progress_subscriber.is_running:
-                self._progress_subscriber.start()
+            controller = getattr(self, "_compute_controller", None)
+            if controller is not None:
+                controller.start_progress_subscription()
+            elif self._progress_subscriber is not None and not self._progress_subscriber.is_running:
+                self._progress_subscriber.start(_PROGRESS_ADDRESS)
                 info(f"实时进度订阅器已启动（ZMQ SUB {_PROGRESS_ADDRESS}）")
         except Exception as exc:
             log_error(f"启动实时进度订阅器失败: {exc}")
 
     def _stop_progress_subscriber(self) -> None:
-        """停止实时进度订阅（计算结束/失败时调用）。"""
+        """Legacy stop hook; application-scoped subscriptions stay connected."""
         try:
+            if getattr(self, "_compute_controller", None) is not None:
+                return
             if self._progress_subscriber is not None and self._progress_subscriber.is_running:
                 self._progress_subscriber.stop()
                 info("实时进度订阅器已停止")
@@ -1843,22 +1942,40 @@ class MainWindow(QMainWindow):
             if total_layers > 0:
                 self._layer_player.set_total_layers(total_layers)
 
-            # 缓存该层数据（用于逐层查看时回放）
-            self._session.layer.by_layer[layer_idx] = {
-                "waypoints": waypoints,
-                "mesh_bytes": mesh_bytes,
+            # Merge path and mesh channels instead of letting a morphology
+            # snapshot overwrite a previously received path layer.
+            cached = self._session.layer.by_layer.setdefault(layer_idx, {})
+            if waypoints is not None and len(waypoints) > 0:
+                cached["waypoints"] = waypoints
+            if mesh_bytes:
+                cached["mesh_bytes"] = mesh_bytes
+            cached.update({
                 "progress": float(parsed.get("progress", 0.0)),
                 "message": str(parsed.get("message", "")),
                 "stage_name": str(parsed.get("stage_name", "")),
-            }
+            })
 
-            # 实时刷新 3D 预览：航点 + mesh
+            # Mesh rendering is driven by the subscriber's coalesced
+            # mesh_updated signal. This slot only renders low-rate path data.
             if waypoints is not None and len(waypoints) > 0:
                 self._visualizer.set_partial_waypoints(waypoints)
-            if mesh_bytes:
-                self._visualizer.set_partial_mesh(mesh_bytes)
         except Exception as exc:
             log_error(f"处理实时进度消息异常: {exc}")
+
+    @Slot(int, object)
+    def _on_path_layer_ready(self, layer_idx: int, parsed: dict) -> None:
+        """Accumulate every path layer while coalescing only the repaint."""
+        self._on_progress_received(parsed)
+        try:
+            layers = []
+            for key in sorted(self._session.layer.by_layer):
+                waypoints = self._session.layer.by_layer[key].get("waypoints")
+                if waypoints is not None and len(waypoints) > 0:
+                    layers.append(np.asarray(waypoints))
+            if layers:
+                self._visualizer.set_partial_waypoints(np.vstack(layers))
+        except Exception as exc:
+            log_error(f"累积路径层显示失败: {exc}")
 
     @Slot(int)
     def _on_layer_completed(self, layer_idx: int) -> None:
@@ -1868,7 +1985,8 @@ class MainWindow(QMainWindow):
             # 确保 LayerPlayer 的总层数已更新
             self._layer_player.set_total_layers(total)
             # 自动跳到最新完成的层（仅当未在手动播放时跟随）
-            self._layer_player.set_current_layer(layer_idx)
+            display_layer = max(0, layer_idx - 1)
+            self._layer_player.set_current_layer(display_layer)
         except Exception as e:
             log_error(f"更新逐层播放器状态失败: {e}")
 
@@ -1885,7 +2003,10 @@ class MainWindow(QMainWindow):
     def _on_layer_changed(self, layer_idx: int) -> None:
         """LayerPlayer 切换层号：从缓存回放该层的航点/mesh。"""
         try:
-            cached = self._session.layer.by_layer.get(layer_idx)
+            cached = (
+                self._session.layer.by_layer.get(layer_idx + 1)
+                or self._session.layer.by_layer.get(layer_idx)
+            )
             if not cached:
                 return
             waypoints = cached.get("waypoints")
@@ -2709,7 +2830,15 @@ class MainWindow(QMainWindow):
         """
         try:
             from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
-            manager = MatlabLifecycleManager.get_instance()
+            project_root = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+            try:
+                manager = MatlabLifecycleManager.get_instance(project_root)
+            except TypeError:
+                # Compatibility with simple test doubles exposing the previous
+                # zero-argument accessor.
+                manager = MatlabLifecycleManager.get_instance()
             # P3-3: MATLAB 崩溃 → ErrorDialog + 状态栏提示
             manager.matlab_crashed.connect(self._on_matlab_crashed)
             # P3-3: MATLAB 重启成功 → 状态栏提示
@@ -2728,18 +2857,18 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             log_error(f"启动 ZMQ 心跳失败: {exc}")
 
-    @Slot()
-    def _on_matlab_crashed(self) -> None:
+    @Slot(str)
+    def _on_matlab_crashed(self, reason: str = "") -> None:
         """P3-3: MATLAB 崩溃回调。"""
         from repair_app.utils.error_manager import ErrorCode, ErrorManager
-        log_error("MATLAB 进程崩溃")
+        log_error(f"MATLAB 进程崩溃: {reason}")
         self._sb.showMessage("MATLAB 进程崩溃，正在尝试自动恢复...", 5000)
         Toast.error(self, "MATLAB 进程崩溃，系统正在尝试自动恢复")
 
-    @Slot()
-    def _on_matlab_restarted(self) -> None:
+    @Slot(int)
+    def _on_matlab_restarted(self, restart_count: int = 0) -> None:
         """P3-3: MATLAB 重启成功回调。"""
-        info("MATLAB 已自动重启")
+        info(f"MATLAB 已自动重启（第 {restart_count} 次）")
         self._sb.showMessage("MATLAB 已自动恢复", 3000)
         Toast.success(self, "MATLAB 已自动恢复，可继续操作")
 
@@ -2819,8 +2948,8 @@ class MainWindow(QMainWindow):
             worker_threads=[
                 getattr(self, '_path_thread', None),
                 getattr(self, '_morph_thread', None),
-                getattr(self, '_compute_thread', None),
             ],
+            compute_controller=getattr(self, '_compute_controller', None),
             progress_subscriber=getattr(self, '_progress_subscriber', None),
             zmq_client=getattr(self, '_zmq_client', None),
             visualizer=getattr(self, '_visualizer', None),

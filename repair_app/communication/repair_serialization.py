@@ -24,6 +24,9 @@ from repair_app.communication.repair_protocol_pb2 import (  # type: ignore[impor
     CalibrationData,
     GCodeOutput,
     ProgressUpdate,
+    ProgressEnvelope,
+    ProgressEventType,
+    MeshFrameKind,
 )
 
 # Protocol version for ZMQ communication with MATLAB server.
@@ -355,6 +358,181 @@ def parse_progress_update(msg: ProgressUpdate) -> Dict[str, Any]:
     }
 
 
+def build_progress_envelope(
+    operation_id: str,
+    event_type: "ProgressEventType.ValueType",
+    sequence_number: int,
+    *,
+    layer_index: int = 0,
+    total_layers: int = 0,
+    progress: float = 0.0,
+    message: str = "",
+    elapsed_s: float = 0.0,
+    waypoints: Optional[np.ndarray] = None,
+    segment_index: int = 0,
+    mesh_data: bytes = b"",
+    mesh_format: str = "stl_binary",
+    mesh_frame_kind: "MeshFrameKind.ValueType" = MeshFrameKind.MESH_FRAME_UNSPECIFIED,
+    triangle_count: int = 0,
+    layer_max_height_mm: float = 0.0,
+    layer_avg_height_mm: float = 0.0,
+    layer_dep_efficiency: float = 0.0,
+    error_code: str = "",
+    error_message: str = "",
+    retryable: bool = False,
+) -> ProgressEnvelope:
+    """Build the v3 realtime event envelope.
+
+    Preview mesh messages are complete, independently decodable snapshots.
+    Path-layer payloads are incremental and must be accumulated by layer index.
+    """
+    msg = ProgressEnvelope()
+    msg.schema_version = 3
+    msg.operation_id = str(operation_id)
+    msg.sequence_number = max(0, int(sequence_number))
+    msg.timestamp_ms = int(time.time() * 1000)
+    msg.event_type = int(event_type)
+    msg.layer_index = int(layer_index)
+    msg.total_layers = int(total_layers)
+    msg.progress = float(np.clip(progress, 0.0, 1.0))
+    msg.message = str(message)
+    msg.elapsed_s = float(elapsed_s)
+
+    if error_code or error_message:
+        msg.error.code = str(error_code)
+        msg.error.message = str(error_message)
+        msg.error.retryable = bool(retryable)
+
+    if mesh_data:
+        snapshot = msg.mesh_snapshot
+        snapshot.mesh_data = bytes(mesh_data)
+        snapshot.mesh_format = str(mesh_format or "stl_binary")
+        snapshot.frame_kind = int(mesh_frame_kind)
+        snapshot.triangle_count = max(0, int(triangle_count))
+        snapshot.layer_max_height_mm = float(layer_max_height_mm)
+        snapshot.layer_avg_height_mm = float(layer_avg_height_mm)
+        snapshot.layer_dep_efficiency = float(layer_dep_efficiency)
+    elif waypoints is not None:
+        target = (
+            msg.path_segment.waypoints
+            if event_type == ProgressEventType.PROGRESS_PATH_SEGMENT_READY
+            else msg.path_layer.waypoints
+        )
+        if event_type == ProgressEventType.PROGRESS_PATH_SEGMENT_READY:
+            msg.path_segment.segment_index = int(segment_index)
+        wp_arr = np.asarray(waypoints, dtype=np.float32)
+        if wp_arr.ndim == 1 and wp_arr.size:
+            wp_arr = wp_arr.reshape(1, -1)
+        for row in wp_arr:
+            wp = target.add()
+            wp.x = float(row[0])
+            wp.y = float(row[1])
+            wp.z = float(row[2])
+            wp.nx = float(row[3]) if len(row) >= 4 else 0.0
+            wp.ny = float(row[4]) if len(row) >= 5 else 0.0
+            wp.nz = float(row[5]) if len(row) >= 6 else 1.0
+            wp.feed_rate = float(row[6]) if len(row) >= 7 else 0.0
+            wp.layer_index = int(layer_index)
+    else:
+        msg.status.message = str(message)
+        msg.status.elapsed_s = float(elapsed_s)
+
+    return msg
+
+
+def parse_progress_envelope(msg: ProgressEnvelope) -> Dict[str, Any]:
+    """Convert a v3 realtime envelope into the UI's stable dictionary shape."""
+    payload_name = msg.WhichOneof("payload") or ""
+    mesh_data = b""
+    mesh_format = ""
+    mesh_frame_kind = MeshFrameKind.MESH_FRAME_UNSPECIFIED
+    triangle_count = 0
+    message = msg.message
+    elapsed_s = msg.elapsed_s
+    waypoints = np.empty((0, 7), dtype=np.float32)
+    waypoint_layers = np.empty((0,), dtype=np.int32)
+
+    if payload_name == "mesh_snapshot":
+        mesh_data = msg.mesh_snapshot.mesh_data
+        mesh_format = msg.mesh_snapshot.mesh_format
+        mesh_frame_kind = msg.mesh_snapshot.frame_kind
+        triangle_count = msg.mesh_snapshot.triangle_count
+    elif payload_name in {"path_layer", "path_segment"}:
+        payload = msg.path_layer if payload_name == "path_layer" else msg.path_segment
+        n_wp = len(payload.waypoints)
+        waypoints = np.empty((n_wp, 7), dtype=np.float32)
+        waypoint_layers = np.full((n_wp,), msg.layer_index, dtype=np.int32)
+        for i, wp in enumerate(payload.waypoints):
+            waypoints[i] = [
+                wp.x, wp.y, wp.z, wp.nx, wp.ny, wp.nz, wp.feed_rate,
+            ]
+    elif payload_name == "status":
+        message = msg.status.message or message
+        elapsed_s = msg.status.elapsed_s or elapsed_s
+
+    return {
+        "schema_version": int(msg.schema_version),
+        "request_id": msg.operation_id,
+        "operation_id": msg.operation_id,
+        "sequence_number": int(msg.sequence_number),
+        "timestamp_ms": int(msg.timestamp_ms),
+        "event_type": int(msg.event_type),
+        "event_name": ProgressEventType.Name(msg.event_type),
+        "stage": int(msg.event_type),
+        "stage_name": ProgressEventType.Name(msg.event_type),
+        "layer_index": int(msg.layer_index),
+        "total_layers": int(msg.total_layers),
+        "progress": float(msg.progress),
+        "message": message,
+        "elapsed_s": float(elapsed_s),
+        "waypoints": waypoints,
+        "waypoint_layers": waypoint_layers,
+        "partial_mesh_data": mesh_data,
+        "partial_mesh_format": mesh_format,
+        "mesh_frame_kind": int(mesh_frame_kind),
+        "mesh_triangle_count": int(triangle_count),
+        "layer_profiles": [],
+        "error_code": msg.error.code,
+        "error_message": msg.error.message,
+        "retryable": bool(msg.error.retryable),
+        "is_heartbeat": msg.event_type == ProgressEventType.PROGRESS_HEARTBEAT,
+        "is_terminal": msg.event_type in {
+            ProgressEventType.PROGRESS_COMPLETED,
+            ProgressEventType.PROGRESS_FAILED,
+            ProgressEventType.PROGRESS_CANCELLED,
+        },
+        "payload_name": payload_name,
+    }
+
+
+def parse_progress_message(data: bytes) -> Dict[str, Any]:
+    """Decode v3 envelopes with a v2 ``ProgressUpdate`` fallback."""
+    envelope = ProgressEnvelope()
+    try:
+        envelope.ParseFromString(data)
+        if envelope.schema_version >= 3 and envelope.operation_id:
+            return parse_progress_envelope(envelope)
+    except Exception:
+        pass
+
+    legacy = ProgressUpdate()
+    legacy.ParseFromString(data)
+    if not legacy.request_id:
+        raise ValueError("progress message has no operation/request id")
+    parsed = parse_progress_update(legacy)
+    parsed.update({
+        "schema_version": 2,
+        "operation_id": legacy.request_id,
+        "sequence_number": 0,
+        "event_type": 0,
+        "event_name": "LEGACY_PROGRESS",
+        "is_heartbeat": False,
+        "is_terminal": legacy.stage == ProgressUpdate.COMPLETE,
+        "payload_name": "legacy",
+    })
+    return parsed
+
+
 # ================================================================
 # v2.1: MaterialParams 加载器
 # ================================================================
@@ -562,6 +740,7 @@ def parse_health_check_response(msg_or_data) -> Dict[str, Any]:
         "status": HealthCheckResponse.Status.Name(msg.status),
         "status_code": msg.status,
         "service_version": msg.service_version,
+        "protocol_version": getattr(msg, "protocol_version", ""),
         "memory_usage_mb": msg.memory_usage_mb,
         "uptime_s": msg.uptime_s,
         "pending_requests": msg.pending_requests,

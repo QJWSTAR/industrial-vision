@@ -89,6 +89,9 @@ class AlgorithmValidator:
 
     def __init__(self) -> None:
         self._matlab_version: str = ""
+        self._project_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
 
     def validate(
         self,
@@ -241,16 +244,16 @@ class AlgorithmValidator:
             from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
             m = MatlabLifecycleManager.get_instance()
             v = m.matlab_version
-            if v:
+            if isinstance(v, str) and v:
                 self._matlab_version = v
                 return v
         except Exception as exc:
             warning(f"通过 MatlabLifecycleManager 获取版本失败: {exc}")
         try:
             from repair_app.bridge.launcher import MatlabBridgeLauncher
-            launcher = MatlabBridgeLauncher()
+            launcher = MatlabBridgeLauncher(str(self._project_root))
             _path, version = launcher._find_matlab_executable_with_version()
-            if version:
+            if isinstance(version, str) and version:
                 self._matlab_version = version
                 return version
         except Exception as exc:

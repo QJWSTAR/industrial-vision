@@ -40,46 +40,51 @@ class HeartbeatMonitor(QThread):
         self._miss_count = 0
         self._last_status: Optional[EngineStatus] = None
         self._stop_event = threading.Event()
+        self._running = False
 
     def run(self) -> None:
         self._stop_event.clear()
+        self._running = True
         interval_ms = self._config.heartbeat_interval_ms
         threshold = self._config.heartbeat_miss_threshold
 
-        while not self._stop_event.is_set():
-            if self.isInterruptionRequested():
-                break
-
-            result: list[tuple[bool, str]] = []
-            start = time.time()
-
-            try:
-                self._ping_fn(lambda ok, msg: result.append((ok, msg)))
-            except Exception:
-                result.append((False, "心跳调用异常"))
-
-            # 等待回调（最多 1.5x 超时）
-            deadline = time.time() + self._config.health_check_timeout_ms / 1000.0 * 1.5
-            while not result and time.time() < deadline:
+        try:
+            while not self._stop_event.is_set():
                 if self.isInterruptionRequested():
-                    return
-                self.msleep(50)
+                    break
 
-            latency = time.time() - start
+                result: list[tuple[bool, str]] = []
+                start = time.time()
 
-            if result and result[0][0]:
-                self._on_pong(latency, result[0][1])
-            else:
-                self._on_miss(result[0][1] if result else "心跳超时")
+                try:
+                    self._ping_fn(lambda ok, msg: result.append((ok, msg)))
+                except Exception:
+                    result.append((False, "心跳调用异常"))
 
-            # sleep 可被中断
-            slept = 0
-            while slept < interval_ms and not self._stop_event.is_set():
-                if self.isInterruptionRequested():
-                    return
-                step = min(100, interval_ms - slept)
-                self.msleep(step)
-                slept += step
+                # 等待回调（最多 1.5x 超时）
+                deadline = time.time() + self._config.health_check_timeout_ms / 1000.0 * 1.5
+                while not result and time.time() < deadline:
+                    if self.isInterruptionRequested():
+                        return
+                    self.msleep(50)
+
+                latency = time.time() - start
+
+                if result and result[0][0]:
+                    self._on_pong(latency, result[0][1])
+                else:
+                    self._on_miss(result[0][1] if result else "心跳超时")
+
+                # sleep 可被中断
+                slept = 0
+                while slept < interval_ms and not self._stop_event.is_set():
+                    if self.isInterruptionRequested():
+                        return
+                    step = min(100, interval_ms - slept)
+                    self.msleep(step)
+                    slept += step
+        finally:
+            self._running = False
 
     def _on_pong(self, latency: float, message: str) -> None:
         self._miss_count = 0
@@ -99,6 +104,7 @@ class HeartbeatMonitor(QThread):
     def stop(self, wait_ms: int = 3000) -> None:
         """请求停止并等待线程退出。"""
         self._stop_event.set()
+        self._running = False
         self.requestInterruption()
         self.quit()
         if not self.wait(wait_ms):

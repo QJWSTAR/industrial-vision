@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import logging
 import os
+from enum import Enum
+import threading
+import time
 import uuid
 from typing import Callable, Optional
 
 import numpy as np
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 from repair_app.service.coordination_service import CoordinationService as _Coord
 from repair_app.ui.workers import ComputePipelineWorker
@@ -31,6 +34,40 @@ from repair_app.config import schema_loader
 logger = logging.getLogger("csam.ui.compute")
 
 _PROGRESS_ADDRESS = schema_loader.get_network_value("zmq_progress_address")
+_CONTROL_ADDRESS = schema_loader.get_network_value("zmq_control_address")
+
+
+class OperationState(str, Enum):
+    IDLE = "IDLE"
+    STARTING = "STARTING"
+    RUNNING = "RUNNING"
+    CANCELLING = "CANCELLING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+_ALLOWED_TRANSITIONS = {
+    OperationState.IDLE: {OperationState.STARTING},
+    OperationState.STARTING: {
+        OperationState.RUNNING,
+        OperationState.CANCELLING,
+        OperationState.FAILED,
+    },
+    OperationState.RUNNING: {
+        OperationState.CANCELLING,
+        OperationState.COMPLETED,
+        OperationState.FAILED,
+    },
+    OperationState.CANCELLING: {
+        OperationState.CANCELLED,
+        OperationState.COMPLETED,
+        OperationState.FAILED,
+    },
+    OperationState.COMPLETED: {OperationState.STARTING, OperationState.IDLE},
+    OperationState.FAILED: {OperationState.STARTING, OperationState.IDLE},
+    OperationState.CANCELLED: {OperationState.STARTING, OperationState.IDLE},
+}
 
 
 class ComputeController(QObject):
@@ -55,6 +92,10 @@ class ComputeController(QObject):
     matlab_startup_done = Signal()
     matlab_startup_failed = Signal(str, str)  # (title, message)
     operation_id_ready = Signal(str)
+    state_changed = Signal(str)
+    computation_cancelled = Signal(str)
+    _cancel_response_received = Signal(int, str)
+    _forced_recovery_finished = Signal(bool, str)
 
     def __init__(
         self,
@@ -83,9 +124,34 @@ class ComputeController(QObject):
         self._matlab_service: Optional[MatlabService] = None
         self._compute_thread: Optional[QThread] = None
         self._compute_worker: Optional[ComputePipelineWorker] = None
-        self._progress_subscriber: Optional[ProgressSubscriber] = None
+        self._progress_subscriber = ProgressSubscriber(self)
         self._operation_id: str = ""
         self._busy: bool = False
+        self._state = OperationState.IDLE
+        self._state_lock = threading.RLock()
+        self._failure_emitted = False
+        self._cancel_acknowledged = False
+        self._forced_recovery_target = OperationState.FAILED
+        self._last_heartbeat_monotonic = 0.0
+        self._heartbeat_timeout_s = max(
+            5.0,
+            float(schema_loader.get_network_value("bridge_heartbeat_interval_ms"))
+            * float(schema_loader.get_network_value("bridge_heartbeat_miss_threshold"))
+            / 1000.0,
+        )
+        self._cancel_completion_timeout_ms = int(
+            schema_loader.get_network_value("cancel_completion_timeout_ms")
+        )
+        self._liveness_timer = QTimer(self)
+        self._liveness_timer.setInterval(1000)
+        self._liveness_timer.timeout.connect(self._check_liveness)
+        self._cancel_completion_timer = QTimer(self)
+        self._cancel_completion_timer.setSingleShot(True)
+        self._cancel_completion_timer.timeout.connect(self._on_cancel_completion_timeout)
+        self._progress_subscriber.heartbeat_received.connect(self._on_heartbeat)
+        self._progress_subscriber.terminal_received.connect(self._on_progress_terminal)
+        self._cancel_response_received.connect(self._on_cancel_response)
+        self._forced_recovery_finished.connect(self._on_forced_recovery_finished)
 
     # ---- 属性 ----
 
@@ -93,6 +159,71 @@ class ComputeController(QObject):
     def progress_subscriber(self) -> Optional[ProgressSubscriber]:
         """进度订阅器实例，供 MainWindow 连接 UI 信号。"""
         return self._progress_subscriber
+
+    @property
+    def state(self) -> OperationState:
+        with self._state_lock:
+            return self._state
+
+    @property
+    def operation_id(self) -> str:
+        with self._state_lock:
+            return self._operation_id
+
+    def start_progress_subscription(self) -> None:
+        """Start the application-scoped subscriber once."""
+        if not self._progress_subscriber.is_running:
+            self._progress_subscriber.start(self._zmq_address)
+
+    def _transition(self, new_state: OperationState) -> bool:
+        with self._state_lock:
+            if new_state == self._state:
+                return False
+            allowed = _ALLOWED_TRANSITIONS.get(self._state, set())
+            if new_state not in allowed:
+                logger.warning(
+                    "拒绝非法计算状态转换: %s -> %s",
+                    self._state.value,
+                    new_state.value,
+                )
+                return False
+            self._state = new_state
+            self._busy = new_state in {
+                OperationState.STARTING,
+                OperationState.RUNNING,
+                OperationState.CANCELLING,
+            }
+        self.state_changed.emit(new_state.value)
+        if new_state in {
+            OperationState.COMPLETED,
+            OperationState.FAILED,
+            OperationState.CANCELLED,
+        }:
+            self._liveness_timer.stop()
+            self._cancel_completion_timer.stop()
+            self._progress_subscriber.finish_operation(self._operation_id)
+        return True
+
+    def _begin_operation(self) -> None:
+        with self._state_lock:
+            if self._state in {
+                OperationState.COMPLETED,
+                OperationState.FAILED,
+                OperationState.CANCELLED,
+            }:
+                self._state = OperationState.IDLE
+        self._failure_emitted = False
+        self._cancel_acknowledged = False
+        self._transition(OperationState.STARTING)
+        self.start_progress_subscription()
+        self._progress_subscriber.set_operation_id(self._operation_id)
+        self._last_heartbeat_monotonic = time.monotonic()
+
+    def _emit_failure_once(self, code: str, friendly: str, detail: str) -> None:
+        if self._failure_emitted:
+            return
+        self._failure_emitted = True
+        self.computation_failed.emit(code, friendly, detail)
 
     # ---- 公共 API ----
 
@@ -163,6 +294,7 @@ class ComputeController(QObject):
         # 5. 生成操作 ID
         self._operation_id = str(uuid.uuid4())
         self.operation_id_ready.emit(self._operation_id)
+        self._begin_operation()
 
         # 6. 构建修复请求
         try:
@@ -176,7 +308,8 @@ class ComputeController(QObject):
                 )
         except Exception as exc:
             logger.error("ComputeController: 请求构建失败: %s", exc)
-            self.computation_failed.emit(
+            self._transition(OperationState.FAILED)
+            self._emit_failure_once(
                 ErrorCode.UNKNOWN.value,
                 f"请求构建失败：{exc}",
                 f"ComputeController._build_repair_request: {exc}",
@@ -185,21 +318,20 @@ class ComputeController(QObject):
 
         # 7. MATLAB 启动开始
         self.matlab_startup_started.emit()
-        self._busy = True
 
         # 8. 确保 MATLAB 就绪
         try:
             self._matlab_service = MatlabService()
             ready = self._matlab_service.ensure_ready(self._project_root)
             if not ready:
-                self._busy = False
+                self._transition(OperationState.FAILED)
                 self.matlab_startup_failed.emit(
                     "MATLAB 不可用",
                     "软件无法启动 MATLAB 计算服务。",
                 )
                 return False
         except Exception as exc:
-            self._busy = False
+            self._transition(OperationState.FAILED)
             logger.error("ComputeController: MATLAB 启动异常: %s", exc)
             self.matlab_startup_failed.emit(
                 "MATLAB 启动异常",
@@ -209,11 +341,10 @@ class ComputeController(QObject):
 
         self.matlab_startup_done.emit()
 
-        # 9. 启动进度订阅器
-        self._start_progress_subscriber()
-
-        # 10. 创建 Worker 和线程
+        # 9. 创建 Worker 和线程
         self._start_worker(request_bytes)
+        self._transition(OperationState.RUNNING)
+        self._liveness_timer.start()
 
         return True
 
@@ -249,7 +380,7 @@ class ComputeController(QObject):
             return self._build_repair_request_internal(sel_mask, self._operation_id)
         except Exception as exc:
             logger.error("ComputeController: 请求构建失败: %s", exc)
-            self.computation_failed.emit(
+            self._emit_failure_once(
                 ErrorCode.UNKNOWN.value,
                 f"请求构建失败：{exc}",
                 f"ComputeController.build_request: {exc}",
@@ -279,34 +410,232 @@ class ComputeController(QObject):
         if matlab_service is not None:
             self._matlab_service = matlab_service
 
-        self._busy = True
-        self._start_progress_subscriber()
+        self._begin_operation()
         self._start_worker(request_bytes)
+        self._transition(OperationState.RUNNING)
+        self._liveness_timer.start()
         return True
 
     def cancel_computation(self) -> None:
-        """取消正在进行的计算。"""
-        if not self._busy:
+        """Request cooperative cancellation without claiming early success."""
+        if self.state not in {OperationState.STARTING, OperationState.RUNNING}:
             return
-        logger.info("ComputeController: 取消计算")
-        self._stop_progress_subscriber()
-        if self._compute_thread is not None and self._compute_thread.isRunning():
-            self._compute_thread.requestInterruption()
-            self._compute_thread.quit()
-            self._compute_thread.wait(5000)
-        self._cleanup_worker()
-        self._busy = False
+        logger.info(
+            "ComputeController: 请求取消 operation_id=%s", self._operation_id
+        )
+        if not self._transition(OperationState.CANCELLING):
+            return
+        self._cancel_completion_timer.start(self._cancel_completion_timeout_ms)
+
+        operation_id = self._operation_id
+
+        def _send_cancel() -> None:
+            try:
+                from repair_app.bridge.operation_control import request_cancel
+                from repair_app.communication.repair_protocol_pb2 import (
+                    ControlStatus,
+                )
+
+                cancel_request_id = str(uuid.uuid4())
+                response = None
+                for attempt in range(3):
+                    response = request_cancel(
+                        operation_id,
+                        address=str(_CONTROL_ADDRESS),
+                        request_id=cancel_request_id,
+                    )
+                    if (
+                        response.status
+                        != ControlStatus.CONTROL_OPERATION_NOT_FOUND
+                        or attempt == 2
+                    ):
+                        break
+                    time.sleep(0.2)
+                self._cancel_response_received.emit(
+                    int(response.status), str(response.message)
+                )
+            except Exception as exc:
+                self._cancel_response_received.emit(-1, str(exc))
+
+        threading.Thread(
+            target=_send_cancel,
+            name="csam-cancel-request",
+            daemon=True,
+        ).start()
 
     def cleanup(self) -> None:
-        """清理资源（停止进度订阅器、清理 Worker）。"""
+        """Application shutdown cleanup."""
         logger.info("ComputeController: 清理资源")
-        self._stop_progress_subscriber()
+        self._liveness_timer.stop()
+        self._cancel_completion_timer.stop()
+        if self._busy:
+            self.cancel_computation()
+        if self._matlab_service is not None:
+            try:
+                self._matlab_service.abort_active_request()
+            except Exception:
+                pass
         if self._compute_thread is not None and self._compute_thread.isRunning():
             self._compute_thread.requestInterruption()
             self._compute_thread.quit()
             self._compute_thread.wait(5000)
         self._cleanup_worker()
+        self._progress_subscriber.stop()
         self._busy = False
+        with self._state_lock:
+            self._state = OperationState.IDLE
+
+    @Slot(str)
+    def _on_heartbeat(self, operation_id: str) -> None:
+        if operation_id == self._operation_id and self.state in {
+            OperationState.RUNNING,
+            OperationState.CANCELLING,
+        }:
+            self._last_heartbeat_monotonic = time.monotonic()
+
+    @Slot()
+    def _check_liveness(self) -> None:
+        if self.state not in {OperationState.RUNNING, OperationState.CANCELLING}:
+            return
+        silence_s = time.monotonic() - self._last_heartbeat_monotonic
+        if silence_s <= self._heartbeat_timeout_s:
+            return
+        self._liveness_timer.stop()
+        reason = (
+            f"MATLAB Worker heartbeat lost for {silence_s:.1f}s "
+            f"(limit {self._heartbeat_timeout_s:.1f}s)"
+        )
+        logger.error(reason)
+        self._emit_failure_once(
+            ErrorCode.NETWORK.value,
+            "MATLAB 实时通信中断，正在恢复 Worker",
+            reason,
+        )
+        self._begin_forced_recovery(reason, OperationState.FAILED)
+
+    @Slot(dict)
+    def _on_progress_terminal(self, event: dict) -> None:
+        operation_id = str(
+            event.get("operation_id") or event.get("request_id") or ""
+        )
+        if operation_id != self._operation_id:
+            return
+        event_name = str(event.get("event_name", ""))
+        if event_name == "PROGRESS_CANCELLED":
+            if self.state in {OperationState.RUNNING, OperationState.CANCELLING}:
+                self._transition(OperationState.CANCELLED)
+                self.computation_cancelled.emit("计算已取消")
+        elif event_name == "PROGRESS_FAILED":
+            if self.state in {
+                OperationState.STARTING,
+                OperationState.RUNNING,
+                OperationState.CANCELLING,
+            }:
+                self._transition(OperationState.FAILED)
+                self._emit_failure_once(
+                    str(event.get("error_code") or ErrorCode.UNKNOWN.value),
+                    str(event.get("error_message") or "MATLAB 计算失败"),
+                    str(event.get("message") or event),
+                )
+        elif event_name == "PROGRESS_COMPLETED":
+            # The reliable REP result still carries the authoritative output.
+            # If cancellation raced with completion, record that computation
+            # won the race but wait for _on_worker_result to deliver data.
+            if self.state == OperationState.CANCELLING:
+                self._transition(OperationState.COMPLETED)
+
+    @Slot(int, str)
+    def _on_cancel_response(self, status: int, message: str) -> None:
+        if self.state != OperationState.CANCELLING:
+            return
+        from repair_app.communication.repair_protocol_pb2 import ControlStatus
+
+        if status in {
+            ControlStatus.CONTROL_ACCEPTED,
+            ControlStatus.CONTROL_DUPLICATE,
+        }:
+            self._cancel_acknowledged = True
+            logger.info("取消请求已确认: %s", message)
+            return
+        if status == ControlStatus.CONTROL_ALREADY_COMPLETED:
+            self._cancel_completion_timer.stop()
+            self._transition(OperationState.COMPLETED)
+            return
+
+        reason = f"取消请求未确认: {message}"
+        logger.error(reason)
+        self._begin_forced_recovery(reason, OperationState.CANCELLED)
+
+    @Slot()
+    def _on_cancel_completion_timeout(self) -> None:
+        if self.state != OperationState.CANCELLING:
+            return
+        reason = (
+            "MATLAB 已确认取消请求，但未在 "
+            f"{self._cancel_completion_timeout_ms}ms 内完成清理"
+            if self._cancel_acknowledged
+            else "MATLAB 未确认取消请求"
+        )
+        self._begin_forced_recovery(reason, OperationState.CANCELLED)
+
+    def _begin_forced_recovery(
+        self,
+        reason: str,
+        target_state: OperationState,
+    ) -> None:
+        self._forced_recovery_target = target_state
+        self._cancel_completion_timer.stop()
+
+        def _recover() -> None:
+            try:
+                from repair_app.bridge.lifecycle_manager import (
+                    MatlabLifecycleManager,
+                )
+
+                manager = MatlabLifecycleManager.get_instance()
+                ok = manager.terminate_owned_worker(reason)
+                detail = (
+                    "owned MATLAB worker terminated"
+                    if ok
+                    else "MATLAB session is reused or no owned worker exists"
+                )
+                self._forced_recovery_finished.emit(ok, detail)
+            except Exception as exc:
+                self._forced_recovery_finished.emit(False, str(exc))
+
+        threading.Thread(
+            target=_recover,
+            name="csam-matlab-recovery",
+            daemon=True,
+        ).start()
+
+    @Slot(bool, str)
+    def _on_forced_recovery_finished(self, confirmed: bool, detail: str) -> None:
+        if self._matlab_service is not None:
+            try:
+                self._matlab_service.abort_active_request()
+            except Exception:
+                pass
+
+        if confirmed and self._forced_recovery_target == OperationState.CANCELLED:
+            if self.state == OperationState.CANCELLING:
+                self._transition(OperationState.CANCELLED)
+                self.computation_cancelled.emit(
+                    "协作式取消超时，已终止并隔离当前 MATLAB Worker"
+                )
+            return
+
+        if self.state in {
+            OperationState.STARTING,
+            OperationState.RUNNING,
+            OperationState.CANCELLING,
+        }:
+            self._transition(OperationState.FAILED)
+        self._emit_failure_once(
+            ErrorCode.NETWORK.value,
+            "MATLAB Worker 恢复失败，任务状态已重置",
+            detail,
+        )
 
     # ---- 内部：请求构建 ----
 
@@ -420,15 +749,49 @@ class ComputeController(QObject):
 
     def _on_worker_result(self, result: dict) -> None:
         """Worker 计算成功 → 转发给 MainWindow。"""
-        self._busy = False
-        self._stop_progress_subscriber()
+        status_name = str(result.get("status_name", ""))
+        if (
+            status_name == "ERR_CANCELLED"
+            or self.state == OperationState.CANCELLED
+        ):
+            if self.state == OperationState.CANCELLING:
+                self._transition(OperationState.CANCELLED)
+                self.computation_cancelled.emit("计算已取消")
+            return
+        if status_name and status_name != "SUCCESS":
+            if self.state in {
+                OperationState.STARTING,
+                OperationState.RUNNING,
+                OperationState.CANCELLING,
+            }:
+                self._transition(OperationState.FAILED)
+            self._emit_failure_once(
+                status_name,
+                str(result.get("error_message") or "MATLAB 计算失败"),
+                str(result),
+            )
+            return
+        if self.state == OperationState.CANCELLING:
+            # The final result won a race with cancellation.
+            self._transition(OperationState.COMPLETED)
+        elif self.state == OperationState.RUNNING:
+            self._transition(OperationState.COMPLETED)
+        elif self.state not in {OperationState.COMPLETED}:
+            logger.info("忽略终止状态后的计算结果: state=%s", self.state.value)
+            return
         self.result_ready.emit(result)
 
     def _on_worker_failed(self, error_code: str, friendly: str, detail: str) -> None:
         """Worker 计算失败 → 转发给 MainWindow。"""
-        self._busy = False
-        self._stop_progress_subscriber()
-        self.computation_failed.emit(error_code, friendly, detail)
+        if self.state == OperationState.CANCELLED:
+            return
+        if self.state in {
+            OperationState.STARTING,
+            OperationState.RUNNING,
+            OperationState.CANCELLING,
+        }:
+            self._transition(OperationState.FAILED)
+        self._emit_failure_once(error_code, friendly, detail)
 
     def _on_worker_operation_id(self, operation_id: str) -> None:
         """Worker 发出 operation_id → 配置 ProgressSubscriber 过滤。"""
@@ -442,17 +805,14 @@ class ComputeController(QObject):
     def _on_thread_finished(self) -> None:
         """计算线程结束 → 清理引用。"""
         self._cleanup_worker()
-        self._stop_progress_subscriber()
 
     # ---- 内部：进度订阅器管理 ----
 
     def _start_progress_subscriber(self) -> None:
-        """启动实时进度订阅器。"""
+        """Compatibility wrapper: start the long-lived subscriber once."""
         try:
-            if self._progress_subscriber is None:
-                self._progress_subscriber = ProgressSubscriber(self)
             if not self._progress_subscriber.is_running:
-                self._progress_subscriber.start(self._zmq_address)
+                self.start_progress_subscription()
                 logger.info(
                     "ComputeController: 进度订阅器已启动 (ZMQ SUB %s)",
                     self._zmq_address,
@@ -461,10 +821,4 @@ class ComputeController(QObject):
             logger.error("ComputeController: 启动进度订阅器失败: %s", exc)
 
     def _stop_progress_subscriber(self) -> None:
-        """停止实时进度订阅器。"""
-        try:
-            if self._progress_subscriber is not None and self._progress_subscriber.is_running:
-                self._progress_subscriber.stop()
-                logger.info("ComputeController: 进度订阅器已停止")
-        except Exception as exc:
-            logger.error("ComputeController: 停止进度订阅器失败: %s", exc)
+        """Compatibility no-op; the subscriber stops only at app shutdown."""

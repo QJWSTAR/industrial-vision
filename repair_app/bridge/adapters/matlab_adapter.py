@@ -61,6 +61,22 @@ class MatlabAdapter(BridgeServer):
             self._algorithm_fn = algorithm_fn
         else:
             self._algorithm_fn = self._select_algorithm()
+        # Application-scoped realtime services bind once for the MATLAB worker
+        # lifetime. Computations never create their own PUB/REP sockets.
+        from repair_app.bridge.operation_control import CancellationControlServer
+        from repair_app.bridge.progress_publisher import ProgressPublisher
+
+        self._progress_publisher = ProgressPublisher.get_instance()
+        self._control_server = CancellationControlServer.get_instance()
+        self._realtime_ready = bool(
+            self._progress_publisher.start() and self._control_server.start()
+        )
+        if not self._realtime_ready:
+            logger.error(
+                "实时通信服务启动失败: progress=%s control=%s",
+                self._progress_publisher.address,
+                self._control_server.address,
+            )
 
     def shutdown(self) -> None:
         """关闭适配器，释放 MATLAB 引擎引用。
@@ -68,6 +84,11 @@ class MatlabAdapter(BridgeServer):
         在 BridgeServer._cleanup 之后调用，确保单例状态清空，
         下次启动不会残留旧连接。
         """
+        try:
+            self._control_server.stop()
+            self._progress_publisher.stop()
+        except Exception as exc:
+            logger.warning("实时通信服务关闭异常: %s", exc)
         try:
             from .matlab_engine_proxy import MatlabEngineProxy
             MatlabEngineProxy.reset_singleton()
@@ -83,14 +104,26 @@ class MatlabAdapter(BridgeServer):
         """
         started = time.time()
         request_id = request.request_id
+        terminal_status = "failed"
+        terminal_message = "MATLAB computation failed"
 
-        # 启动 ProgressPublisher（实时进度推送，供 GUI 订阅）
-        try:
-            from repair_app.bridge.progress_publisher import ProgressPublisher
-            pub = ProgressPublisher.get_instance()
-            pub.start()
-        except Exception as exc:
-            logger.debug("ProgressPublisher 启动失败（不影响计算）: %s", exc)
+        if not self._realtime_ready:
+            return self._build_error_result(
+                request_id,
+                RepairStatusCode.ERR_ALGORITHM_FAIL,
+                "实时通信服务不可用",
+                "进度或取消控制端口无法绑定。请关闭重复的 Bridge 实例，"
+                "或配置 CSAM_ZMQ_PROGRESS_ADDRESS/CSAM_ZMQ_CONTROL_ADDRESS。",
+            )
+
+        from repair_app.bridge.operation_control import (
+            begin_operation,
+            finish_operation,
+            is_cancel_requested,
+        )
+
+        begin_operation(request_id)
+        self._progress_publisher.begin_operation(request_id)
 
         try:
             xyz, _normals, meta = Serializer.parse_point_cloud(request)
@@ -116,6 +149,8 @@ class MatlabAdapter(BridgeServer):
                 if warnings_list:
                     reason += " | Warnings: " + "; ".join(str(w) for w in warnings_list[:5])
 
+                terminal_status = "completed"
+                terminal_message = "MATLAB pipeline completed"
                 return Serializer.build_repair_result(
                     waypoints,
                     request_id=request_id,
@@ -170,6 +205,8 @@ class MatlabAdapter(BridgeServer):
             particle_dist = self._build_particle_distribution(meta)
             mesh_data, mesh_format = self._build_mesh_from_cloud(xyz)
 
+            terminal_status = "completed"
+            terminal_message = "Python test pipeline completed"
             return Serializer.build_repair_result(
                 waypoints,
                 request_id=request_id,
@@ -190,16 +227,60 @@ class MatlabAdapter(BridgeServer):
 
         except MatlabAlgorithmError as exc:
             logger.exception("MATLAB 算法失败: %s", exc)
+            if is_cancel_requested(request_id):
+                terminal_status = "cancelled"
+                terminal_message = "computation cancelled"
+                return self._build_error_result(
+                    request_id,
+                    RepairStatusCode.ERR_CANCELLED,
+                    "计算已取消",
+                    "MATLAB 在协作式取消检查点停止。",
+                )
+            terminal_message = str(exc)
             return self._build_error_result(
                 request_id, RepairStatusCode.ERR_ALGORITHM_FAIL,
                 str(exc), str(exc),
             )
         except Exception as exc:
             logger.exception("未预期错误")
+            if is_cancel_requested(request_id):
+                terminal_status = "cancelled"
+                terminal_message = "computation cancelled"
+                return self._build_error_result(
+                    request_id,
+                    RepairStatusCode.ERR_CANCELLED,
+                    "计算已取消",
+                    "MATLAB 在协作式取消检查点停止。",
+                )
+            terminal_message = str(exc)
             return self._build_error_result(
                 request_id, RepairStatusCode.ERR_UNKNOWN,
                 str(exc), str(exc),
             )
+        finally:
+            from repair_app.communication.repair_protocol_pb2 import ProgressEventType
+
+            # A successful result wins a cancellation race.  Otherwise the
+            # Bridge could publish CANCELLED from ``finally`` while returning
+            # SUCCESS on the reliable REP channel, leaving the controller and
+            # UI in contradictory terminal states.
+            if terminal_status != "completed" and is_cancel_requested(request_id):
+                terminal_status = "cancelled"
+                terminal_message = "computation cancelled"
+            event_type = {
+                "completed": ProgressEventType.PROGRESS_COMPLETED,
+                "cancelled": ProgressEventType.PROGRESS_CANCELLED,
+            }.get(terminal_status, ProgressEventType.PROGRESS_FAILED)
+            self._progress_publisher.publish_terminal(
+                request_id,
+                event_type,
+                message=terminal_message,
+                error_code="" if terminal_status == "completed" else terminal_status,
+                retryable=terminal_status == "failed",
+                elapsed_s=time.time() - started,
+            )
+            finish_operation(request_id, terminal_status)
+            self._progress_publisher.finish_operation(request_id)
 
     def _invoke_pipeline_with_fallback(
         self, xyz: np.ndarray, meta: dict[str, Any]

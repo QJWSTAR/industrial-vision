@@ -172,9 +172,12 @@ class BridgeServer:
             return Serializer.serialize_result(error_result)
 
     def _build_health_response(self) -> bytes:
+        from .protocol import PROTOCOL_VERSION
+
         resp = HealthCheckResponse()
         resp.status = HealthCheckResponse.OK
         resp.service_version = self.SERVICE_VERSION
+        resp.protocol_version = PROTOCOL_VERSION
         resp.memory_usage_mb = 0.0
         resp.uptime_s = int(time.time() - self._stats.started_at)
         resp.pending_requests = 0

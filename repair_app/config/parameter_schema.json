@@ -334,9 +334,31 @@
     },
     "zmq_progress_address": {
       "value": "tcp://127.0.0.1:5556",
+      "env_var": "CSAM_ZMQ_PROGRESS_ADDRESS",
       "label_zh": "ZMQ 进度地址",
       "tooltip": "ZMQ PUB 进度推送地址（REP 在 5555，PUB 在 5556）。",
       "description": "Bridge PUB 端口默认 5556。"
+    },
+    "zmq_control_address": {
+      "value": "tcp://127.0.0.1:5557",
+      "env_var": "CSAM_ZMQ_CONTROL_ADDRESS",
+      "label_zh": "ZMQ 取消控制地址",
+      "tooltip": "独立的可靠取消请求/应答通道。",
+      "description": "Bridge 控制 REP 端口默认 5557。"
+    },
+    "cancel_ack_timeout_ms": {
+      "value": 2000, "env_var": "CSAM_CANCEL_ACK_TIMEOUT_MS",
+      "min": 250, "max": 30000,
+      "unit": "ms", "label_zh": "取消确认超时",
+      "tooltip": "等待 Bridge 确认取消请求的时间。",
+      "description": "超时后进入取消恢复流程，不能直接声明取消成功。"
+    },
+    "cancel_completion_timeout_ms": {
+      "value": 15000, "env_var": "CSAM_CANCEL_COMPLETION_TIMEOUT_MS",
+      "min": 1000, "max": 120000,
+      "unit": "ms", "label_zh": "取消完成超时",
+      "tooltip": "收到取消确认后等待 MATLAB 清理完成的时间。",
+      "description": "超时后仅允许终止当前应用拥有的 MATLAB Worker。"
     },
     "bridge_timeout_ms": {
       "value": 30000, "env_var": "CSAM_BRIDGE_TIMEOUT_MS",

@@ -1,6 +1,7 @@
 function [pointlist, velocitylist, zonelist] = generate_path(additive_layerlist, repairing_layerlist,...
     buffer_additive, buffer_repairing, scanning_angle, scanning_step,...
-    edge_step_size, tilt_angle, x_min, x_max, y_min, y_max, linkPath_freeDistance, resolution)
+    edge_step_size, tilt_angle, x_min, x_max, y_min, y_max, linkPath_freeDistance, resolution, ...
+    progress_callback, cancel_callback)
 % Generate the additive and repairing paths based on the polygon cell in layerlist
 
 % Input
@@ -25,6 +26,13 @@ function [pointlist, velocitylist, zonelist] = generate_path(additive_layerlist,
 % velocitylist: name of speeddata in ABB moving instructions, N*1 string
 % zonelist: name of zonedata in ABB moving instructions, N*1 string
 
+if nargin < 15
+    progress_callback = [];
+end
+if nargin < 16
+    cancel_callback = [];
+end
+
 % initialize
 pointlist = [];
 velocitylist = strings(0,0);
@@ -35,6 +43,12 @@ demarcation = size(vertcat(repairing_layerlist{:}), 1); % index for dividing add
 
 warning('off','MATLAB:polyshape:repairedBySimplify');
 for i = 1:size(layerlist,1)
+    if ~isempty(cancel_callback) && feval(cancel_callback)
+        warning('on','MATLAB:polyshape:repairedBySimplify');
+        error('CSAM:Cancelled', 'Path planning cancelled before layer %d', i);
+    end
+    layer_start_index = size(pointlist, 1) + 1;
+
     % generate polygons
     polygon_in = polyshape(layerlist{i,4},'Simplify',true);
     polygon_out = regions(sortregions(polygon_in, "centroid", "ascend", "ReferencePoint", [0,0])); % Divide into different regions, N*1 polyshape
@@ -42,6 +56,10 @@ for i = 1:size(layerlist,1)
     % Loop of regions
     regionCounter = 0; % region counter
     for j = (mod(i, 2) == 1)*(1:length(polygon_out)) + (mod(i, 2) == 0)*(length(polygon_out):-1:1)
+        if ~isempty(cancel_callback) && feval(cancel_callback)
+            warning('on','MATLAB:polyshape:repairedBySimplify');
+            error('CSAM:Cancelled', 'Path planning cancelled in layer %d', i);
+        end
         regionCounter = regionCounter + 1;
         if i <= demarcation % repairing
             [infill_points, infill_velocity, infill_zone] = generate_infill(polygon_out(j), buffer_repairing, scanning_angle, scanning_step, i, layerlist{i,3});
@@ -58,6 +76,12 @@ for i = 1:size(layerlist,1)
         pointlist = [pointlist; link_points; infill_points; edge_points];
         velocitylist = [velocitylist; link_velocity; infill_velocity; edge_velocity];
         zonelist = [zonelist; link_zone; infill_zone; edge_zone];
+    end
+
+    if ~isempty(progress_callback)
+        layer_points = pointlist(layer_start_index:end, :);
+        layer_velocity = velocitylist(layer_start_index:end, :);
+        feval(progress_callback, i, size(layerlist, 1), layer_points, layer_velocity);
     end
 end
 warning('on','MATLAB:polyshape:repairedBySimplify');
