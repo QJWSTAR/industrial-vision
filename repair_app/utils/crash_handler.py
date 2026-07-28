@@ -70,10 +70,6 @@ def install_crash_handler(
             if sys.stderr is not None:
                 print(f"[CrashHandler] Failed to write crash log: {crash_file}", file=sys.stderr)
 
-        # Print to stderr（console=False 模式下 stderr 可能为 None）
-        if sys.stderr is not None:
-            print(tb_text, file=sys.stderr)
-
         # Invoke callback
         if on_crash:
             try:
@@ -82,7 +78,10 @@ def install_crash_handler(
                 if sys.stderr is not None:
                     print(f"[CrashHandler] on_crash callback failed: {cb_err}", file=sys.stderr)
 
-        # Call original excepthook
-        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        # Do not call sys.__excepthook__ here.  The traceback has already
+        # been persisted, and the application-level ErrorManager owns user
+        # notification.  Chaining the default hook would print the same
+        # exception a second time and can fail in Windows GUI builds where
+        # sys.stderr is None.
 
     sys.excepthook = _handler

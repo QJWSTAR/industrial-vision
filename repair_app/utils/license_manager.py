@@ -10,7 +10,7 @@ import hashlib
 import hmac
 import uuid
 import platform
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 try:
@@ -147,9 +147,9 @@ class LicenseData:
         if not self.expires_at:
             return False
         try:
-            exp = datetime.fromisoformat(self.expires_at)
-            return datetime.now() > exp
-        except ValueError:
+            exp = _parse_iso_datetime(self.expires_at)
+            return _now_for(exp) > exp
+        except (TypeError, ValueError):
             return True
 
     @property
@@ -157,14 +157,33 @@ class LicenseData:
         if not self.expires_at:
             return -1  # -1 表示永久授权（无到期日）
         try:
-            exp = datetime.fromisoformat(self.expires_at)
-            return max(0, (exp - datetime.now()).days)
-        except ValueError:
+            exp = _parse_iso_datetime(self.expires_at)
+            return max(0, (exp - _now_for(exp)).days)
+        except (TypeError, ValueError):
             return 0
 
     @property
     def expiring_soon(self) -> bool:
         return 0 < self.days_remaining <= 7
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    """Parse ISO-8601 timestamps on every supported Python version.
+
+    Python 3.10 does not consistently accept the common trailing ``Z`` form,
+    so normalize it to an explicit UTC offset first.
+    """
+    normalized = value.strip()
+    if normalized.endswith(("Z", "z")):
+        normalized = normalized[:-1] + "+00:00"
+    return datetime.fromisoformat(normalized)
+
+
+def _now_for(value: datetime) -> datetime:
+    """Return a comparable current time for naive or timezone-aware values."""
+    if value.tzinfo is None:
+        return datetime.now()
+    return datetime.now(timezone.utc).astimezone(value.tzinfo)
 
 
 class LicenseStatus:
@@ -441,7 +460,8 @@ def generate_keypair(output_dir: Optional[str] = None) -> tuple[str, str]:
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         ))
-    os.chmod(priv_path, 0o600)
+    if os.name == "posix":
+        os.chmod(priv_path, 0o600)
 
     with open(pub_path, "wb") as f:
         f.write(private_key.public_key().public_bytes(
@@ -451,7 +471,10 @@ def generate_keypair(output_dir: Optional[str] = None) -> tuple[str, str]:
 
     print(f"密钥对已生成:")
     print(f"  公钥: {pub_path}")
-    print(f"  私钥: {priv_path} (权限 0600)")
+    if os.name == "posix":
+        print(f"  私钥: {priv_path} (权限 0600)")
+    else:
+        print(f"  私钥: {priv_path} (请使用 Windows ACL 限制访问)")
     return pub_path, priv_path
 
 

@@ -16,9 +16,19 @@ function [all_triangles, addtive_triangles_cluster, repairing_triangles_cluster,
 % y_max: the maximum coordinates along Y axis of the triangles, 1*1 double
 
 %% Model Data Processing
+if ~isnumeric(triangles) || ndims(triangles) ~= 2 || size(triangles, 2) ~= 12
+    error('CSAM:InvalidTriangles', 'triangles must be an N-by-12 numeric matrix.');
+end
+if isempty(triangles)
+    error('CSAM:EmptySTL', 'The STL model contains no triangles.');
+end
+if any(~isfinite(triangles), 'all')
+    error('CSAM:InvalidTriangles', 'Triangle coordinates and normals must be finite.');
+end
+
 % zoom model
 if model_scale~=1
-    triangles=triangles*model_scale;
+    triangles(:, 1:9) = triangles(:, 1:9) * model_scale;
 end
 
 % Caculate min_z and max_z for each mesh
@@ -26,8 +36,13 @@ triangles = [triangles(:,1:12),min(triangles(:,[3 6 9]),[],2), max(triangles(:,[
 % Remove the triangles parallel to the slicing plane
 triangle_parallel_index = triangles(:,14)-triangles(:,13) <= tol;
 triangles(triangle_parallel_index,:) = [];
+if isempty(triangles)
+    error('CSAM:NoSliceableTriangles', ...
+        'The model contains no triangles that intersect the slicing direction.');
+end
 % Caculate angle for each mesh(not the normal)
-all_triangles = [triangles,atand(sqrt(triangles(:,10).^2+triangles(:,11).^2)./triangles(:,12))];
+all_triangles = [triangles, atan2d( ...
+    sqrt(triangles(:,10).^2 + triangles(:,11).^2), triangles(:,12))];
 % Caculate model x_min x_max y_min y_max for whole model
 x_min=min(min(triangles(:,1:3:9)));
 x_max=max(max(triangles(:,1:3:9)));
@@ -50,62 +65,71 @@ repairing_triangles = all_triangles(repairing_indices, :);
 
 %% Classify the triangles into different clusters based on the connectivity of edges
 % repairing_triangles_cluster
-% create the map of vertices of all triangles
-repairing_triangles_map = containers.Map();
-for triIdx = 1:size(repairing_triangles, 1)
-    vertices = reshape(repairing_triangles(triIdx, 1:9), 3, 3)';
-    for lex = 1:3
-        repairingVertex = vertices(lex,:);
-        repairingVertexKey = generateVertexKey(repairingVertex);
-        if isKey(repairing_triangles_map, repairingVertexKey)
-            repairingVertexData = repairing_triangles_map(repairingVertexKey);
-            repairingVertexData.triIDX = [repairingVertexData.triIDX, triIdx];
-            repairing_triangles_map(repairingVertexKey) = repairingVertexData;
-        else
-            repairingVertexData = struct();
-            repairingVertexData.vertex = repairingVertex;
-            repairingVertexData.triIDX = triIdx;
-            repairing_triangles_map(repairingVertexKey) = repairingVertexData;
+if isempty(repairing_triangles)
+    repairing_triangles_cluster = {};
+else
+    % create the map of vertices of all triangles
+    repairing_triangles_map = containers.Map();
+    for triIdx = 1:size(repairing_triangles, 1)
+        vertices = reshape(repairing_triangles(triIdx, 1:9), 3, 3)';
+        for lex = 1:3
+            repairingVertex = vertices(lex,:);
+            repairingVertexKey = generateVertexKey(repairingVertex);
+            if isKey(repairing_triangles_map, repairingVertexKey)
+                repairingVertexData = repairing_triangles_map(repairingVertexKey);
+                repairingVertexData.triIDX = [repairingVertexData.triIDX, triIdx];
+                repairing_triangles_map(repairingVertexKey) = repairingVertexData;
+            else
+                repairingVertexData = struct();
+                repairingVertexData.vertex = repairingVertex;
+                repairingVertexData.triIDX = triIdx;
+                repairing_triangles_map(repairingVertexKey) = repairingVertexData;
+            end
         end
     end
-end
 
-% extract edges
-edges = repairing_triangles(:, [1:3,4:6,4:6,7:9,7:9,1:3])';
-edges = reshape(edges,6,[])';
+    % extract edges
+    edges = repairing_triangles(:, [1:3,4:6,4:6,7:9,7:9,1:3])';
+    edges = reshape(edges,6,[])';
 
-% extract the edge nodes then sort
-start_nodes = edges(:,1:3);
-end_nodes = edges(:,4:6);
-nodes = [start_nodes; end_nodes];
-nodes = uniquetol(nodes,1e-8,'ByRows',true);
-nodes = sortrows(nodes,[1 2]);
+    % extract the edge nodes then sort
+    start_nodes = edges(:,1:3);
+    end_nodes = edges(:,4:6);
+    nodes = [start_nodes; end_nodes];
+    nodes = uniquetol(nodes,1e-8,'ByRows',true);
+    nodes = sortrows(nodes,[1 2]);
 
-% extract the indices of 2 nodes of each edge
-[~, n1] = ismembertol(start_nodes, nodes, 1e-8, 'ByRows',true);
-[~, n2] = ismembertol(end_nodes, nodes, 1e-8, 'ByRows',true);
-conn = [n1, n2];
+    % extract the indices of 2 nodes of each edge
+    [~, n1] = ismembertol(start_nodes, nodes, 1e-8, 'ByRows',true);
+    [~, n2] = ismembertol(end_nodes, nodes, 1e-8, 'ByRows',true);
+    conn = [n1, n2];
 
-% create the undirected connected graph then calculate every connected component
-G = graph(conn(:,1),conn(:,2));
-bins = conncomp(G,'OutputForm','cell');
+    % create the undirected connected graph then calculate every connected component
+    G = graph(conn(:,1),conn(:,2));
+    bins = conncomp(G,'OutputForm','cell');
 
-% calculate the indices of conncected triangles
-repairing_triangles_IDXcluster = cell(size(bins));
-for i = 1:length(bins)
-    for j = 1:length(bins{i})
-        vertexKey = generateVertexKey(nodes(bins{i}(j), :));
-        repairing_triangles_IDXcluster{i} = [repairing_triangles_IDXcluster{i}, repairing_triangles_map(vertexKey).triIDX];
-        repairing_triangles_IDXcluster{i} = unique(repairing_triangles_IDXcluster{i});
+    % calculate the indices of connected triangles
+    repairing_triangles_IDXcluster = cell(size(bins));
+    for i = 1:numel(bins)
+        for j = 1:numel(bins{i})
+            vertexKey = generateVertexKey(nodes(bins{i}(j), :));
+            repairing_triangles_IDXcluster{i} = [repairing_triangles_IDXcluster{i}, ...
+                repairing_triangles_map(vertexKey).triIDX];
+            repairing_triangles_IDXcluster{i} = unique(repairing_triangles_IDXcluster{i});
+        end
+    end
+    repairing_triangles_cluster = cell(size(repairing_triangles_IDXcluster));
+    for i = 1:numel(repairing_triangles_IDXcluster)
+        repairing_triangles_cluster{i} = ...
+            repairing_triangles(repairing_triangles_IDXcluster{i}, :);
     end
 end
-repairing_triangles_cluster = cell(size(repairing_triangles_IDXcluster));
-for i = 1:length(cell(size(repairing_triangles_IDXcluster)))
-    repairing_triangles_cluster{i} = repairing_triangles(repairing_triangles_IDXcluster{i}, :);
-end
 
-% repairing_triangles_cluster
-addtive_triangles_cluster{1} = addtive_triangles;
+if isempty(addtive_triangles)
+    addtive_triangles_cluster = {};
+else
+    addtive_triangles_cluster = {addtive_triangles};
+end
 end
 
 %% Auxiliary Function

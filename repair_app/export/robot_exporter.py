@@ -56,8 +56,24 @@ class RobotExporter:
             normals: (N, 3) 各点法向量（用于工具姿态计算），None 则使用默认
             output_path: 输出文件路径
         """
+        waypoints = np.asarray(waypoints)
+        if waypoints.ndim != 2 or waypoints.shape[1] < 3:
+            raise ValueError(f"waypoints must have shape (N, 3+), got {waypoints.shape}")
+        if len(waypoints) == 0:
+            raise ValueError("waypoints must not be empty")
+        if not np.all(np.isfinite(waypoints[:, :3])):
+            raise ValueError("waypoints contain NaN or Inf")
+        if normals is not None:
+            normals = np.asarray(normals, dtype=np.float64)
+            if normals.shape != (len(waypoints), 3):
+                raise ValueError(
+                    f"normals must have shape ({len(waypoints)}, 3), got {normals.shape}"
+                )
+            if not np.all(np.isfinite(normals)):
+                raise ValueError("normals contain NaN or Inf")
+
         # 转换为米
-        wp = waypoints.astype(np.float64) / 1000.0
+        wp = waypoints[:, :3].astype(np.float64) / 1000.0
 
         if self.robot_type == RobotType.KUKA:
             return self._export_kuka(wp, normals, output_path)
@@ -156,7 +172,7 @@ class RobotExporter:
 
 def _normal_to_euler_kuka(normal: np.ndarray) -> tuple[float, float, float]:
     """法向量 → KUKA ABC 欧拉角（简化版）。"""
-    n = normal / max(np.linalg.norm(normal), 1e-6)
+    n = _normalized_normal(normal)
     # Z 轴对齐法向量
     a = float(np.degrees(np.arctan2(n[1], n[0])))
     b = float(np.degrees(np.arccos(np.clip(n[2], -1, 1))))
@@ -166,15 +182,29 @@ def _normal_to_euler_kuka(normal: np.ndarray) -> tuple[float, float, float]:
 
 def _normal_to_quaternion_abb(normal: np.ndarray) -> tuple[float, float, float, float]:
     """法向量 → ABB 四元数（简化版）。"""
-    n = normal / max(np.linalg.norm(normal), 1e-6)
+    n = _normalized_normal(normal)
     # 从 Z 轴旋转到法向
     z = np.array([0.0, 0.0, 1.0])
     v = np.cross(z, n)
     s = np.linalg.norm(v)
     c = np.dot(z, n)
     if s < 1e-6:
+        if c < 0:
+            # Antiparallel Z axes: choose a deterministic 180° rotation
+            # about X instead of incorrectly returning the identity.
+            return (0.0, 1.0, 0.0, 0.0)
         return (1.0, 0.0, 0.0, 0.0)
     v /= s
     half = np.arctan2(s, c) / 2.0
     sin_half = np.sin(half)
     return (np.cos(half), v[0] * sin_half, v[1] * sin_half, v[2] * sin_half)
+
+
+def _normalized_normal(normal: np.ndarray) -> np.ndarray:
+    value = np.asarray(normal, dtype=np.float64)
+    if value.shape != (3,) or not np.all(np.isfinite(value)):
+        raise ValueError("normal must be a finite vector with shape (3,)")
+    length = float(np.linalg.norm(value))
+    if length <= 1e-9:
+        return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    return value / length

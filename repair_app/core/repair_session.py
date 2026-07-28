@@ -64,8 +64,64 @@ class LayerDataCache:
 @dataclass
 class MorphologyData:
     """形貌预测数据。"""
-    repair_xyz: Optional[np.ndarray] = None  # (K, 3) 修复点云（含基材 + 修复点）
+    # Composite visualization cloud kept for backward compatibility.
+    repair_xyz: Optional[np.ndarray] = None  # (N+K, 3) 基材 + 修复点
+    # Canonical deposited points. Consumers must not infer these by comparing
+    # array lengths because a morphology result may legitimately contain fewer
+    # points than the substrate.
+    repair_only_xyz: Optional[np.ndarray] = None  # (K, 3) 仅修复/沉积点
     is_mock: bool = False                    # True=本地启发式 mock，False=MATLAB 真实结果
+
+    def set_repair_points(
+        self,
+        substrate_xyz: Optional[np.ndarray],
+        repair_only_xyz: np.ndarray,
+    ) -> None:
+        """Store explicit repair points and derive the visualization cloud."""
+        repair = np.asarray(repair_only_xyz)
+        if repair.ndim != 2 or repair.shape[1] != 3:
+            raise ValueError(
+                f"repair_only_xyz must have shape (K, 3), got {repair.shape}"
+            )
+        self.repair_only_xyz = repair
+        if substrate_xyz is None:
+            self.repair_xyz = repair
+            return
+        substrate = np.asarray(substrate_xyz)
+        if substrate.ndim != 2 or substrate.shape[1] != 3:
+            raise ValueError(
+                f"substrate_xyz must have shape (N, 3), got {substrate.shape}"
+            )
+        self.repair_xyz = np.vstack([substrate, repair])
+
+    def get_repair_points(
+        self,
+        substrate_xyz: Optional[np.ndarray] = None,
+    ) -> Optional[np.ndarray]:
+        """Return repair-only points, with one centralized legacy fallback."""
+        if self.repair_only_xyz is not None:
+            return self.repair_only_xyz
+        # Compatibility for older project snapshots/tests that populate only
+        # repair_xyz. New producers must use set_repair_points().
+        if self.repair_xyz is None:
+            return None
+        if substrate_xyz is not None:
+            substrate = np.asarray(substrate_xyz)
+            composite = np.asarray(self.repair_xyz)
+            if (
+                substrate.ndim == 2
+                and composite.ndim == 2
+                and substrate.shape[1:] == composite.shape[1:]
+                and len(composite) >= len(substrate)
+                and np.array_equal(composite[:len(substrate)], substrate)
+            ):
+                return composite[len(substrate):]
+        return self.repair_xyz
+
+    def clear(self) -> None:
+        self.repair_xyz = None
+        self.repair_only_xyz = None
+        self.is_mock = False
 
 
 @dataclass
@@ -181,7 +237,8 @@ class RepairSession:
         return self.waypoint.mock is not None and len(self.waypoint.mock) > 0
 
     def has_morphology(self) -> bool:
-        return self.morphology.repair_xyz is not None and len(self.morphology.repair_xyz) > 0
+        repair = self.morphology.get_repair_points(self.point_cloud.xyz)
+        return repair is not None and len(repair) > 0
 
     def summary(self) -> str:
         """返回数据状态摘要（用于日志）。"""

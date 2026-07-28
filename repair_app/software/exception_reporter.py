@@ -122,8 +122,9 @@ class ExceptionReporter:
         try:
             report_path.write_text("\n".join(lines), encoding="utf-8")
         except Exception:
-            # 写失败时退化为 stderr
-            print("\n".join(lines), file=sys.stderr)
+            # Windows GUI 打包（console=False）下 stderr 可能为 None。
+            if sys.stderr is not None:
+                print("\n".join(lines), file=sys.stderr)
 
         return report_path
 
@@ -148,7 +149,8 @@ class ExceptionReporter:
         try:
             report_path.write_text("\n".join(lines), encoding="utf-8")
         except Exception:
-            print("\n".join(lines), file=sys.stderr)
+            if sys.stderr is not None:
+                print("\n".join(lines), file=sys.stderr)
         return report_path
 
 

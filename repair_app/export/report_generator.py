@@ -212,47 +212,56 @@ class RepairReport:
     def _save_figure(self, fig) -> str:
         """保存图为临时 PNG。"""
         tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        fig.savefig(tmp.name, dpi=150, bbox_inches="tight", format="png")
-        plt.close(fig)
-        self._tmp_files.append(tmp.name)
-        return tmp.name
+        tmp_path = tmp.name
+        tmp.close()  # Windows cannot reopen a NamedTemporaryFile while held open.
+        try:
+            fig.savefig(tmp_path, dpi=150, bbox_inches="tight", format="png")
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        finally:
+            plt.close(fig)
+        self._tmp_files.append(tmp_path)
+        return tmp_path
 
     def generate(self, output_path: str) -> bool:
         """生成 PDF 报告。"""
         if not _REPORTLAB_AVAILABLE:
             logger.warning("reportlab not installed, cannot generate PDF report")
             logger.warning("Install: pip3 install reportlab")
+            self._cleanup_tmp_files()
             return False
 
-        _setup_fonts()
-        styles = _get_styles()
-        story = []
-
-        # 构建各章节
-        self._build_cover(story, styles)
-        self._build_scan_info(story, styles)
-        self._build_params(story, styles)
-        self._build_results(story, styles)
-        self._build_statistics(story, styles)   # P2-4: 统计信息
-        self._build_images(story, styles)
-        self._build_layer_analysis(story, styles)
-        self._build_quality(story, styles)       # P2-4: 质量评估
-        self._build_calibration(story, styles)
-
-        # 页脚
-        story.append(Spacer(1, 10 * mm))
-        story.append(Paragraph(
-            "本报告由冷喷涂缺陷修复软件自动生成 · 仅供内部参考",
-            styles["small"]
-        ))
-
-        # 构建 PDF
-        doc = SimpleDocTemplate(
-            output_path, pagesize=A4,
-            leftMargin=MARGIN, rightMargin=MARGIN,
-            topMargin=MARGIN, bottomMargin=MARGIN,
-        )
         try:
+            _setup_fonts()
+            styles = _get_styles()
+            story = []
+
+            # 构建各章节
+            self._build_cover(story, styles)
+            self._build_scan_info(story, styles)
+            self._build_params(story, styles)
+            self._build_results(story, styles)
+            self._build_statistics(story, styles)
+            self._build_images(story, styles)
+            self._build_layer_analysis(story, styles)
+            self._build_quality(story, styles)
+            self._build_calibration(story, styles)
+
+            story.append(Spacer(1, 10 * mm))
+            story.append(Paragraph(
+                "本报告由冷喷涂缺陷修复软件自动生成 · 仅供内部参考",
+                styles["small"]
+            ))
+
+            doc = SimpleDocTemplate(
+                output_path, pagesize=A4,
+                leftMargin=MARGIN, rightMargin=MARGIN,
+                topMargin=MARGIN, bottomMargin=MARGIN,
+            )
             doc.build(story)
         finally:
             self._cleanup_tmp_files()

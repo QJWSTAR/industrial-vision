@@ -49,7 +49,9 @@ class GCodeExporter(BaseExporter):
             "expected_layer_height": session.validation.expected_layer_height,
             "metadata": {
                 "model_version": os.path.basename(session.point_cloud.path) if session.point_cloud.path else "unknown",
-                "material": params.get("material", "未指定"),
+                "material": params.get(
+                    "material_name", params.get("material", "未指定")
+                ),
                 "parameters": params,
                 "license_id": session.license_id,
             },
@@ -106,6 +108,7 @@ class GCodeExporter(BaseExporter):
             exporter.export(
                 waypoints, output_path=output_path,
                 layer_indices=session.waypoint.layers,
+                validate=False,  # already validated above with full session context
             )
             session.output.last_gcode_path = output_path
             return ExportResult(
@@ -224,9 +227,8 @@ class PDFReportExporter(BaseExporter):
                 report.set_quality(session.report.quality)
 
             xyz = session.point_cloud.xyz
-            repair_xyz = session.morphology.repair_xyz
-            if xyz is not None and repair_xyz is not None:
-                repair_only = repair_xyz[len(xyz):] if len(repair_xyz) > len(xyz) else repair_xyz
+            repair_only = session.morphology.get_repair_points(xyz)
+            if xyz is not None and repair_only is not None:
                 report.add_comparison_figure(xyz, session.selection.mask, repair_only)
                 report.add_height_colormap(repair_only)
 
@@ -397,6 +399,9 @@ class JSONExporter(BaseExporter):
                 },
                 "morphology": {
                     "repair_xyz": self._ndarray_to_list(session.morphology.repair_xyz),
+                    "repair_only_xyz": self._ndarray_to_list(
+                        session.morphology.get_repair_points(session.point_cloud.xyz)
+                    ),
                     "is_mock": session.morphology.is_mock,
                 },
                 "metrics": {

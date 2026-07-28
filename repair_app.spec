@@ -18,6 +18,21 @@ except ImportError:
 IS_MACOS = sys.platform == 'darwin'
 IS_WINDOWS = sys.platform == 'win32'
 
+# Production builds must be tied to the deployment public key. The key may
+# live outside the repository; never generate or commit a production private
+# key just to satisfy PyInstaller.
+_public_key_env = os.environ.get('CSAM_PUBLIC_KEY_PATH', '').strip()
+PUBLIC_KEY_PATH = (
+    Path(_public_key_env).expanduser()
+    if _public_key_env
+    else PROJECT_DIR / 'config' / 'public_key.pem'
+)
+if not PUBLIC_KEY_PATH.is_file():
+    raise SystemExit(
+        "License public key not found. Set CSAM_PUBLIC_KEY_PATH to the "
+        "deployment public_key.pem, or place it at config/public_key.pem."
+    )
+
 # --- Icon 配置 ---
 ICON_PATH = None
 # 优先在项目根目录查找图标，回退到 docs/images/
@@ -40,7 +55,7 @@ datas = [
     # 标定配置
     (str(PROJECT_DIR / 'config' / 'calibration_db.json'), 'config'),
     # License 公钥（打包后许可证验证必需，从 _MEIPASS 只读加载）
-    (str(PROJECT_DIR / 'config' / 'public_key.pem'), 'config'),
+    (str(PUBLIC_KEY_PATH), 'config'),
     # 应用级配置（Developer Mode 开关等，从 _MEIPASS 只读加载）
     (str(PROJECT_DIR / 'config' / 'app_config.json'), 'config'),
     # MATLAB Bridge Server 脚本
@@ -126,6 +141,7 @@ a = Analysis(
         'repair_app.bridge.adapters.matlab_pipeline',
         'repair_app.bridge.launcher',
         'repair_app.bridge.lifecycle_manager',
+        'repair_app.bridge.operation_control',
         'repair_app.bridge.progress_publisher',
         'repair_app.bridge.services.matlab_service',
         # bridge.communication.* 子模块（PyInstaller 无法自动发现）

@@ -179,6 +179,13 @@ class ExporterRegistry:
         """注册导出器。可用作装饰器（需实例化后注册）。"""
         if not exporter.name:
             raise ValueError(f"导出器 {type(exporter).__name__} 缺少 name 属性")
+        previous = cls._exporters.get(exporter.name)
+        if previous is not None and type(previous) is not type(exporter):
+            warning(
+                f"[ExportRegistry] 名称 {exporter.name!r} 已由 "
+                f"{type(previous).__name__} 注册，将替换为 "
+                f"{type(exporter).__name__}"
+            )
         cls._exporters[exporter.name] = exporter
         if exporter.name not in cls._order:
             cls._order.append(exporter.name)

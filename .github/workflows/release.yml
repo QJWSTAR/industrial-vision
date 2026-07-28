@@ -45,9 +45,24 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest repair_app/tests/ -q --tb=short
+          python -m pytest repair_app/tests/ repair_app/bridge/tests/ -q --tb=short
+
+      - name: Materialize reviewed license public key
+        env:
+          CSAM_PUBLIC_KEY_B64: ${{ secrets.CSAM_PUBLIC_KEY_B64 }}
+          CSAM_PUBLIC_KEY_PATH: ${{ github.workspace }}/.release-secrets/public_key.pem
+        run: >-
+          python -c "import base64, os, pathlib;
+          encoded=os.environ.get('CSAM_PUBLIC_KEY_B64', '').strip();
+          assert encoded, 'Repository secret CSAM_PUBLIC_KEY_B64 is required for release builds';
+          target=pathlib.Path(os.environ['CSAM_PUBLIC_KEY_PATH']);
+          target.parent.mkdir(parents=True, exist_ok=True);
+          target.write_bytes(base64.b64decode(encoded, validate=True));
+          print('Release public key materialized at', target)"
 
       - name: Build with PyInstaller
+        env:
+          CSAM_PUBLIC_KEY_PATH: ${{ github.workspace }}/.release-secrets/public_key.pem
         run: |
           python -m PyInstaller --clean repair_app.spec
 

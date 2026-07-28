@@ -11,6 +11,7 @@ P3-4 增强：
 from __future__ import annotations
 import os
 import sys
+import logging
 import zipfile
 import datetime
 from pathlib import Path
@@ -27,7 +28,6 @@ try:
     _LOGURU_AVAILABLE = True
 except ImportError:
     _LOGURU_AVAILABLE = False
-    import logging
     logger = logging.getLogger("csam")
     logger.setLevel(logging.DEBUG)
 
@@ -60,7 +60,7 @@ JSON_FORMAT = (
 # ============================================================
 # P3-4: InterceptHandler — stdlib logging → loguru 路由
 # ============================================================
-class InterceptHandler:
+class InterceptHandler(logging.Handler):
     """将 stdlib logging 调用重定向到 loguru。
 
     解决 bridge/* 等模块直接使用 logging.getLogger("csam.bridge.*") 时，
@@ -70,6 +70,7 @@ class InterceptHandler:
     """
 
     def __init__(self):
+        super().__init__()
         self._level_map = {
             "DEBUG": "DEBUG",
             "INFO": "INFO",
@@ -78,8 +79,8 @@ class InterceptHandler:
             "CRITICAL": "CRITICAL",
         }
 
-    def __call__(self, record):
-        """作为 logging.Handler 的 emit 替代。"""
+    def emit(self, record):
+        """Forward a stdlib LogRecord to loguru."""
         # 获取对应的 loguru level
         level_name = record.levelname
         loguru_level = self._level_map.get(level_name, "INFO")
@@ -97,14 +98,16 @@ class InterceptHandler:
             loguru_level, record.getMessage()
         )
 
+    def __call__(self, record):
+        """Backward-compatible direct-call form used by older tests/tools."""
+        self.emit(record)
+
 
 def _install_intercept_handler():
     """安装 InterceptHandler 到 stdlib logging 根 logger。"""
     if not _LOGURU_AVAILABLE:
         return  # 退化模式不需要
-    import logging
-    handler = logging.StreamHandler()
-    handler.emit = InterceptHandler()  # type: ignore
+    handler = InterceptHandler()
     logging.basicConfig(handlers=[handler], level=0, force=True)
     logger.debug("InterceptHandler 已安装，stdlib logging 将路由到 loguru")
 
@@ -278,4 +281,3 @@ def export_logs(output_path: str | None = None) -> str:
 
     info(f"日志已导出: {output_path}")
     return output_path
-

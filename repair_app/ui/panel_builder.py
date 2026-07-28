@@ -483,7 +483,17 @@ class PanelBuilder:
                     f"QPushButton:hover{{background:{p.accent};}}"
                     f"QPushButton:disabled{{background:{p.border_strong};color:{p.text_disabled};}}"
                 )
-            btn.clicked.connect(lambda checked, name=exporter.name: parent._on_export(name))
+            export_callback = getattr(parent, "_on_export", None)
+            if callable(export_callback):
+                btn.clicked.connect(
+                    lambda checked, name=exporter.name, callback=export_callback:
+                    callback(name)
+                )
+            else:
+                btn.setEnabled(False)
+                btn.setToolTip(
+                    f"{exporter.tooltip}\n导出处理器未初始化，请重启软件"
+                )
             ol.addWidget(btn)
             parent._export_buttons[exporter.name] = btn
             # 向后兼容：保持 _btn_exp_gcode/_btn_exp_robot/_btn_exp_pdf 属性

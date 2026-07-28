@@ -201,25 +201,51 @@ def validate_toolpath(
                 sub_sample = sub[idx]
             else:
                 sub_sample = sub
-            # 计算每个航点到最近基板点的距离
-            from scipy.spatial import cKDTree
-            tree = cKDTree(sub_sample[:, :3])
-            dists, _ = tree.query(wp[:, :3], k=1)
-            collision_count = int(np.sum(dists < collision_threshold_mm))
-            if collision_count > 0:
+            # 计算每个航点到最近基板点的距离。SciPy 是正式依赖，
+            # 但损坏/裁剪过度的部署不应让整个导出流程直接崩溃。
+            try:
+                from scipy.spatial import cKDTree
+            except ImportError:
                 issues.append(ExportIssue(
                     ExportIssueLevel.WARNING,
-                    "COLLISION_RISK",
-                    f"存在 {collision_count} 个航点距基板表面小于 {collision_threshold_mm:.1f} mm，存在碰撞风险",
+                    "COLLISION_CHECK_SKIPPED",
+                    "SciPy 不可用，已跳过基板碰撞检查；请修复安装后重新校验",
                 ))
+            else:
+                tree = cKDTree(sub_sample[:, :3])
+                dists, _ = tree.query(wp[:, :3], k=1)
+                collision_count = int(np.sum(dists < collision_threshold_mm))
+                if collision_count > 0:
+                    issues.append(ExportIssue(
+                        ExportIssueLevel.WARNING,
+                        "COLLISION_RISK",
+                        f"存在 {collision_count} 个航点距基板表面小于 {collision_threshold_mm:.1f} mm，存在碰撞风险",
+                    ))
 
     # === P2-5: Boundary Check（边界检查） ===
     if build_volume is not None and len(wp) > 0:
-        x_min_b, y_min_b, z_min_b, x_max_b, y_max_b, z_max_b = build_volume
-        out_of_bounds = 0
-        out_of_bounds += int(np.sum((wp[:, 0] < x_min_b) | (wp[:, 0] > x_max_b)))
-        out_of_bounds += int(np.sum((wp[:, 1] < y_min_b) | (wp[:, 1] > y_max_b)))
-        out_of_bounds += int(np.sum((wp[:, 2] < z_min_b) | (wp[:, 2] > z_max_b)))
+        bounds = np.asarray(build_volume, dtype=float)
+        if bounds.shape != (6,) or not np.all(np.isfinite(bounds)):
+            issues.append(ExportIssue(
+                ExportIssueLevel.BLOCKED,
+                "INVALID_BUILD_VOLUME",
+                "构建体积必须包含 6 个有限值 (xmin, ymin, zmin, xmax, ymax, zmax)",
+            ))
+            return ExportValidationResult(False, issues)
+        x_min_b, y_min_b, z_min_b, x_max_b, y_max_b, z_max_b = bounds
+        lower = bounds[:3]
+        upper = bounds[3:]
+        if np.any(lower > upper):
+            issues.append(ExportIssue(
+                ExportIssueLevel.BLOCKED,
+                "INVALID_BUILD_VOLUME",
+                "构建体积下界不能高于上界",
+            ))
+            return ExportValidationResult(False, issues)
+        out_of_bounds = int(np.sum(np.any(
+            (wp[:, :3] < lower) | (wp[:, :3] > upper),
+            axis=1,
+        )))
         if out_of_bounds > 0:
             issues.append(ExportIssue(
                 ExportIssueLevel.BLOCKED,

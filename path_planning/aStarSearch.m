@@ -13,9 +13,16 @@ function [pathX, pathY] = aStarSearch(xGrid, yGrid, occupancyMap, StartNode, Ori
 %   pathX                the X coordinates of link path (real-world coordinates), 1*N matrix
 %   pathY                the Y coordinates of link path (real-world coordinates), 1*N matrix
 
-% Parameters check
-if size(occupancyMap, 1) ~= length(yGrid) || size(occupancyMap, 2) ~= length(xGrid)
-    error('The size of occupancyMap dose not match xGrid/yGrid');
+% Parameters check.  This implementation accepts coordinate vectors (as
+% produced by generate_path), not meshgrid matrices.
+if ~isvector(xGrid) || ~isvector(yGrid) || isempty(xGrid) || isempty(yGrid) || ...
+        any(~isfinite(xGrid(:))) || any(~isfinite(yGrid(:)))
+    error('CSAM:InvalidGrid', 'xGrid and yGrid must be non-empty finite vectors.');
+end
+xGrid = xGrid(:);
+yGrid = yGrid(:);
+if size(occupancyMap, 1) ~= numel(yGrid) || size(occupancyMap, 2) ~= numel(xGrid)
+    error('CSAM:GridSizeMismatch', 'The size of occupancyMap does not match xGrid/yGrid.');
 end
 
 % Default parameters processing
@@ -26,7 +33,13 @@ maxWeight = 2; %default maximum weight
 
 % Get the substrate grid map size
 [mapRows, mapCols] = size(occupancyMap);
-
+nodes = [StartNode(:).'; OriginalGoalNode(:).'; GoalNode(:).'];
+if ~isequal(size(nodes), [3, 2]) || any(~isfinite(nodes), 'all') || ...
+        any(nodes(:) ~= fix(nodes(:))) || ...
+        any(nodes(:, 1) < 1 | nodes(:, 1) > mapRows) || ...
+        any(nodes(:, 2) < 1 | nodes(:, 2) > mapCols)
+    error('CSAM:InvalidAStarNode', 'Start and goal nodes must be valid integer grid indices.');
+end
 % Initialize the node information matrix
 gScore = inf(mapRows, mapCols);    % the actual cost from the start node to this node
 fScore = inf(mapRows, mapCols);    % estimated total cost, f = g + h
@@ -123,10 +136,11 @@ while ~isempty(openSet)
             w = dynamicWeight(neighborRow, neighborCol, GoalNode, movementType, initialDist, maxWeight);% dynamic calculation of weights
             fScore(neighborRow, neighborCol) = tentativeGScore + w * heuristic([neighborRow, neighborCol], GoalNode, movementType);
             
-            % Add to the openSet
-            if ~isKey(openSet, neighborKey)
-                openSet(neighborKey) = [neighborRow, neighborCol, fScore(neighborRow, neighborCol)];
-            end
+            % Insert or decrease-key.  containers.Map stores the priority
+            % value, so an existing entry must also be updated.
+            openSet(neighborKey) = [
+                neighborRow, neighborCol, fScore(neighborRow, neighborCol)
+            ];
         end
     end
 end
@@ -139,14 +153,14 @@ if isempty(openSet) && exist('pathRows','var') == 0 && exist('pathCols','var') =
 end
 
 % Add the original goal node to the list
-if ~isequal(OriginalGoalNode, GoalNode)
+if ~isempty(pathRows) && ~isequal(OriginalGoalNode, GoalNode)
     pathRows = [pathRows; OriginalGoalNode(1)];
     pathCols = [pathCols; OriginalGoalNode(2)];
 end
 
 % Convert the grid index of the path back to real-world coordinates
-pathX = xGrid(pathCols);
-pathY = yGrid(pathRows);
+pathX = reshape(xGrid(pathCols), 1, []);
+pathY = reshape(yGrid(pathRows), 1, []);
 end
 
 %% Auxiliary Functions
@@ -155,6 +169,10 @@ function w = dynamicWeight(row, col, goalNode, movementType, initialDist, maxWei
 currentDist = heuristic([row, col], goalNode, movementType);
 
 % Dynamic weight formula
+if initialDist <= eps || ~isfinite(initialDist)
+    w = 1;
+    return;
+end
 w = 1 + (maxWeight - 1) * (1 - currentDist / initialDist);
 
 % Make sure the weights are within the range of [1, maxWeight]

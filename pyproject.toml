@@ -71,6 +71,7 @@ markers = [
     "stress: 压力测试 — 大数据量/极端参数",
     "mock: Mock 测试 — MATLAB Mock / License Mock",
     "slow: 慢测试 — 运行时间 >2s",
+    "real_qtimer: 使用真实 QTimer.singleShot 事件循环，不启用泄漏防护",
 ]
 
 [tool.coverage.run]

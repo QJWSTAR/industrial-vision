@@ -29,7 +29,16 @@ function layerlist = sliceLayers(triangles_cluster, layer_height, base_plane, st
 % layerlist: layerlist of triangles, 1*N cell, N*4 cell for each cell,...
 %            [application, slicing method, height, polygon], including empty matrix ([])
 
-% exclude the empty cell
+if ~isscalar(layer_height) || ~isfinite(layer_height) || layer_height <= 0
+    error('CSAM:InvalidLayerHeight', 'layer_height must be a positive finite scalar.');
+end
+
+% Exclude empty clusters, not just an empty outer cell array.
+if isempty(triangles_cluster)
+    layerlist = {};
+    return
+end
+triangles_cluster = triangles_cluster(~cellfun(@isempty, triangles_cluster));
 if isempty(triangles_cluster)
     layerlist = {};
     return
@@ -39,6 +48,10 @@ end
 layerlist = cell(1, length(triangles_cluster));
 for clusterSN = 1:length(triangles_cluster)
     triangles = triangles_cluster{clusterSN};
+    if size(triangles, 2) < 14 || any(~isfinite(triangles), 'all')
+        error('CSAM:InvalidTriangleCluster', ...
+            'Each triangle cluster must be a finite matrix with at least 14 columns.');
+    end
 
     % generate the slices
     min_z = min(triangles(:,13)) + 1e-4; % 1e-4 is set to maintain stability
@@ -71,7 +84,8 @@ for clusterSN = 1:length(triangles_cluster)
             node_high = triangles(i,14);
             z_high_index=find(z_slices<=node_high,1,'last');
             z_low_index=find(z_slices>=node_low,1);
-            if z_high_index >= z_low_index
+            if ~isempty(z_high_index) && ~isempty(z_low_index) && ...
+                    z_high_index >= z_low_index
                 for j = z_low_index:z_high_index
                     z_triangles_size(j) = z_triangles_size(j) + 1;
                     % z_triangles_size is a column vector, the length is the total number of layers.
@@ -91,6 +105,10 @@ for clusterSN = 1:length(triangles_cluster)
             triangle_checklist = z_triangles_list(k,1:z_triangles_size(k));
             % triangle_checklist is a row vector, its length equals to the number of traingles intersecting the current z_slices,
             % with each element representing the serial number of the intersecting traingles.
+            if isempty(triangle_checklist)
+                polygon_cell{k} = [];
+                continue;
+            end
             tri=triangles(triangle_checklist,:);
             % tri is all the traingles that intersects with the current z_slices.
 
@@ -105,9 +123,12 @@ for clusterSN = 1:length(triangles_cluster)
             t1 = (c-sum(P.*p1))./sum(P.*(p2-p1));
             t2 = (c-sum(P.*p2))./sum(P.*(p3-p2));
             t3 = (c-sum(P.*p3))./sum(P.*(p1-p3));
-            t1(isnan(t1)) = 0;
-            t2(isnan(t2)) = 0;
-            t3(isnan(t3)) = 0;
+            % A horizontal edge has a zero denominator.  Mark it outside
+            % the valid [0, 1) interval instead of treating its first
+            % vertex as a fabricated intersection.
+            t1(~isfinite(t1)) = Inf;
+            t2(~isfinite(t2)) = Inf;
+            t3(~isfinite(t3)) = Inf;
             intersect1 = p1+bsxfun(@times,p2-p1,t1);
             intersect2 = p2+bsxfun(@times,p3-p2,t2);
             intersect3 = p3+bsxfun(@times,p1-p3,t3);
@@ -141,17 +162,24 @@ for clusterSN = 1:length(triangles_cluster)
                 conn2 = [n2 n1];
                 check = ismember(conn2,conn1,'rows');
                 conn1(check == 1,:)=[];
+                if isempty(conn1)
+                    polygon_cell{k} = [];
+                    continue;
+                end
                 G = graph(conn1(:,1),conn1(:,2));
 
                 % create subgraph for connected components
                 bins = conncomp(G);
                 cluster_list =[];
-                for i = 1:max(bins)
-                    startNode = find(bins==i, 1, 'first');
+                for component_idx = 1:max(bins)
+                    startNode = find(bins==component_idx, 1, 'first');
                     path = dfsearch(G, startNode);
+                    if isempty(path)
+                        continue;
+                    end
                     path = [path; path(1)];
                     cluster_list_iter = [nodes(path,1) nodes(path,2)];
-                    if ~isempty(path)
+                    if size(cluster_list_iter, 1) >= 2
                         if cluster_list_iter(1,1)>cluster_list_iter(2,1) || cluster_list_iter(1,2)>cluster_list_iter(2,2)
                             cluster_list_iter = cluster_list_iter(end:-1:1,:);
                         end

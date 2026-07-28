@@ -6,7 +6,7 @@ defect_selector.py — 缺陷区域交互选取组件
 from __future__ import annotations
 import numpy as np
 from typing import Optional
-from repair_app.utils.logger_config import error as log_error
+from repair_app.utils.logger_config import error as log_error, debug as log_debug
 from repair_app.config import schema_loader as _schema
 from repair_app.ui.theme_manager import ThemeManager
 
@@ -208,9 +208,10 @@ class DefectSelector(QWidget):
             self._apply_rect_select()
             self._rubber_rect = None
 
-        elif self._mode == "lasso" and len(self._lasso_verts) >= 3:
-            self._push_history()
-            self._apply_lasso_select()
+        elif self._mode == "lasso":
+            if len(self._lasso_verts) >= 3:
+                self._push_history()
+                self._apply_lasso_select()
             self._lasso_verts = []
 
         self._drag_start = None
@@ -218,7 +219,9 @@ class DefectSelector(QWidget):
         return True
 
     # ========== 坐标转换 ==========
-    def _screen_to_data(self, sx: float, sy: float) -> tuple[float, float]:
+    def _screen_to_data(
+        self, sx: float, sy: float
+    ) -> tuple[Optional[float], Optional[float]]:
         """将 Qt 屏幕坐标转换为 matplotlib 数据坐标。"""
         try:
             # Qt 原点左上 → matplotlib 原点左下，需要 y 翻转
@@ -226,8 +229,9 @@ class DefectSelector(QWidget):
             # transData.inverted() 期望显示坐标（像素）
             data_coords = self._ax.transData.inverted().transform((sx, display_y))
             return float(data_coords[0]), float(data_coords[1])
-        except Exception:
-            return 0.0, 0.0
+        except Exception as exc:
+            log_debug(f"屏幕坐标转换失败: {exc}")
+            return None, None
 
     # ========== 导航/选取切换 ==========
     def _on_nav_toggled(self, checked: bool) -> None:

@@ -29,7 +29,14 @@ class ValidationService:
         """
         errors = []
         for name, (lo, hi) in PARAM_BOUNDS.items():
-            val = getattr(params, name, None)
+            if not hasattr(params, name):
+                message = (
+                    f"Validation schema references unknown ProcessParams field: {name}"
+                )
+                warning(message)
+                errors.append(message)
+                continue
+            val = getattr(params, name)
             if val is None:
                 continue
             if not (lo <= val <= hi):

@@ -37,8 +37,32 @@ class LODManager:
             normals: (N, 3) normals.
             max_levels: Maximum number of LOD levels (0 = full res only).
         """
+        xyz = np.asarray(xyz)
+        if xyz.ndim != 2 or xyz.shape[1] != 3:
+            raise ValueError("xyz must have shape (N, 3)")
+        if not np.all(np.isfinite(xyz)):
+            raise ValueError("xyz must contain only finite values")
+        if colors is not None:
+            colors = np.asarray(colors)
+            if colors.ndim not in (1, 2) or len(colors) != len(xyz):
+                raise ValueError("colors must have shape (N,) or (N, C)")
+            if not np.all(np.isfinite(colors)):
+                raise ValueError("colors must contain only finite values")
+        if normals is not None:
+            normals = np.asarray(normals)
+            if normals.shape != xyz.shape:
+                raise ValueError("normals must have shape (N, 3)")
+            if not np.all(np.isfinite(normals)):
+                raise ValueError("normals must contain only finite values")
+        try:
+            max_levels = int(max_levels)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_levels must be an integer") from exc
+
         self._levels: list[dict] = []
-        self._max_levels = max_levels
+        # Level zero is always the full-resolution source, including when
+        # callers request max_levels=0.
+        self._max_levels = max(1, max_levels)
         self._build_lods(xyz, colors, normals)
 
     def _build_lods(
@@ -75,7 +99,7 @@ class LODManager:
         Returns:
             (xyz, colors, normals) tuple. colors/normals may be None.
         """
-        idx = min(level, len(self._levels) - 1)
+        idx = max(0, min(int(level), len(self._levels) - 1))
         lvl = self._levels[idx]
         return lvl["xyz"], lvl["colors"], lvl["normals"]
 
@@ -89,7 +113,9 @@ class LODManager:
         Returns:
             (xyz, colors, normals) for the appropriate LOD level.
         """
-        level = min(int(distance / 10), len(self._levels) - 1)
+        if not np.isfinite(distance):
+            raise ValueError("distance must be finite")
+        level = max(0, min(int(distance / 10), len(self._levels) - 1))
         return self.get_level(level)
 
     @property
@@ -132,9 +158,14 @@ def _downsample(
 
     new_colors = None
     if colors is not None:
-        new_colors = np.zeros((n_voxels, colors.shape[1]), dtype=np.float32)
-        np.add.at(new_colors, inverse, colors)
-        new_colors /= counts
+        if colors.ndim == 1:
+            new_colors = np.zeros(n_voxels, dtype=np.float32)
+            np.add.at(new_colors, inverse, colors)
+            new_colors /= counts.ravel()
+        else:
+            new_colors = np.zeros((n_voxels, colors.shape[1]), dtype=np.float32)
+            np.add.at(new_colors, inverse, colors)
+            new_colors /= counts
 
     new_normals = None
     if normals is not None:

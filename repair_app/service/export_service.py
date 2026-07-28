@@ -154,9 +154,8 @@ class ExportService:
                 report.set_quality(session.report.quality)
 
             xyz = session.point_cloud.xyz
-            repair_xyz = session.morphology.repair_xyz
-            if xyz is not None and repair_xyz is not None:
-                repair_only = repair_xyz[len(xyz):] if len(repair_xyz) > len(xyz) else repair_xyz
+            repair_only = session.morphology.get_repair_points(xyz)
+            if xyz is not None and repair_only is not None:
                 report.add_comparison_figure(xyz, session.selection.mask, repair_only)
                 report.add_height_colormap(repair_only)
 

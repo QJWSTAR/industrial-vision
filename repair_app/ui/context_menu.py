@@ -190,10 +190,12 @@ class ContextMenuManager(QObject):
 
     def _on_export_gcode(self) -> None:
         mw = self._main_window
-        if hasattr(mw, "_on_export_gcode"):
-            mw._on_export_gcode()
+        callback = getattr(mw, "_on_export_gcode", None)
+        if callable(callback):
+            callback()
 
     def _on_export_robot(self) -> None:
         mw = self._main_window
-        if hasattr(mw, "_on_export_robot"):
-            mw._on_export_robot()
+        callback = getattr(mw, "_on_export_robot", None)
+        if callable(callback):
+            callback()

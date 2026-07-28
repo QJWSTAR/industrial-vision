@@ -167,6 +167,16 @@ class ProgressSubscriberWorker(QObject):
             logger.info("ProgressSubscriber 已连接: %s", self._address)
         except Exception as exc:
             logger.warning("ProgressSubscriber 连接失败: %s", exc)
+            try:
+                if sock is not None:
+                    sock.close(0)
+                if ctx is not None:
+                    ctx.destroy(linger=0)
+            except Exception as close_exc:
+                logger.warning(
+                    "ProgressSubscriber 连接失败后的清理异常: %s",
+                    close_exc,
+                )
             self.finished.emit()
             return
 
@@ -189,7 +199,7 @@ class ProgressSubscriberWorker(QObject):
                 if sock is not None:
                     sock.close(0)
                 if ctx is not None:
-                    ctx.term()
+                    ctx.destroy(linger=0)
             except Exception as exc:
                 logger.warning("ProgressSubscriber 关闭异常: %s", exc)
             self.finished.emit()
@@ -329,7 +339,17 @@ class ProgressSubscriber(QObject):
 
     @property
     def is_running(self) -> bool:
-        return self._thread is not None and self._thread.isRunning()
+        thread = self._thread
+        if thread is None:
+            return False
+        try:
+            return thread.isRunning()
+        except RuntimeError:
+            # Qt may already have deleted the C++ wrapper while its queued
+            # ``finished`` callback is still waiting in the UI event loop.
+            self._thread = None
+            self._worker = None
+            return False
 
     def set_operation_id(self, operation_id: str) -> None:
         operation_id = str(operation_id)
@@ -349,16 +369,33 @@ class ProgressSubscriber(QObject):
         """Start once; subsequent computations reuse the same socket/thread."""
         if self.is_running:
             return
+        # A prior startup attempt may have failed asynchronously.  Its thread
+        # has fully stopped by this point, so it is safe to retire the wrappers
+        # before creating the replacement.
+        if self._thread is not None:
+            self._thread.deleteLater()
+            self._thread = None
+            self._worker = None
         self._address = address
         self._thread = QThread(self)
         self._worker = ProgressSubscriberWorker(address, self._buffer)
         self._worker.set_operation_id(self._operation_id)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
-        self._thread.finished.connect(self._worker.deleteLater)
-        self._thread.finished.connect(self._thread.deleteLater)
+        # ``run()`` owns a blocking receive loop.  If socket setup fails, the
+        # worker returns before ``stop()`` is called; explicitly stop the
+        # QThread event loop so ``is_running`` cannot report a dead subscriber
+        # as healthy.
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._on_thread_finished)
         self._thread.start()
         self._flush_timer.start()
+
+    @Slot()
+    def _on_thread_finished(self) -> None:
+        """Stop UI polling; wrappers are retired by ``start`` or ``stop``."""
+        self._flush_timer.stop()
 
     def _flush_buffer(self) -> None:
         drained = self._buffer.drain()
@@ -389,12 +426,18 @@ class ProgressSubscriber(QObject):
         """Application shutdown only."""
         self._flush_timer.stop()
         thread = self._thread
-        if thread is not None and thread.isRunning():
-            thread.requestInterruption()
-            thread.quit()
-            if not thread.wait(2500):
-                logger.error("ProgressSubscriber 线程未在超时内退出")
-                return False
+        if thread is not None:
+            try:
+                is_running = thread.isRunning()
+            except RuntimeError:
+                is_running = False
+            if is_running:
+                thread.requestInterruption()
+                thread.quit()
+                if not thread.wait(2500):
+                    logger.error("ProgressSubscriber 线程未在超时内退出")
+                    return False
+            thread.deleteLater()
         self._thread = None
         self._worker = None
         return True

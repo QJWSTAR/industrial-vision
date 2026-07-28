@@ -769,7 +769,7 @@ class MainWindow(QMainWindow):
 
         # 回退到旧逻辑（测试环境兼容）
         current = self._mode_stack.currentIndex()
-        morph_done = self._session.morphology.repair_xyz is not None
+        morph_done = self._session.has_morphology()
         mode_name = "增材模式" if self._session.repair_mode == MODE_ADDITIVE else "修复模式"
 
         if current == PAGE_PATH:
@@ -1101,7 +1101,9 @@ class MainWindow(QMainWindow):
         return layers
 
     def _finish_morphology(self, repair_pts: np.ndarray, sel_mask: np.ndarray) -> None:
-        self._session.morphology.repair_xyz = np.vstack([self._session.point_cloud.xyz, repair_pts])
+        self._session.morphology.set_repair_points(
+            self._session.point_cloud.xyz, repair_pts
+        )
         layers = self._build_morph_layers(repair_pts)
         self._visualizer.set_data(
             substrate=self._session.point_cloud.xyz, defect_mask=sel_mask,
@@ -1204,8 +1206,11 @@ class MainWindow(QMainWindow):
             stats["最大段间距"] = f"{float(np.max(seg)):.3f} mm"
             stats["最小段间距"] = f"{float(np.min(seg)):.3f} mm"
             stats["路径标准差"] = f"{float(np.std(seg)):.3f} mm"
-        if self._session.morphology.repair_xyz is not None and len(self._session.morphology.repair_xyz) > 0:
-            rz = self._session.morphology.repair_xyz[:, 2]
+        repair_only = self._session.morphology.get_repair_points(
+            self._session.point_cloud.xyz
+        )
+        if repair_only is not None and len(repair_only) > 0:
+            rz = repair_only[:, 2]
             stats["沉积高度均值"] = f"{float(np.mean(rz)):.3f} mm"
             stats["沉积高度范围"] = f"{float(np.ptp(rz)):.3f} mm"
         stats["缺陷体积"] = f"{defect_metrics['volume_mm3']:.2f} mm³"
@@ -1223,9 +1228,12 @@ class MainWindow(QMainWindow):
         # 形貌预测来源标记
         quality["形貌预测来源"] = "mock（本地启发式）" if self._session.morphology.is_mock else "MATLAB 物理模型"
         # 覆盖率（修复点数 / 缺陷点数）
-        if self._session.morphology.repair_xyz is not None and self._session.point_cloud.xyz is not None and self._session.selection.mask is not None:
+        repair_only = self._session.morphology.get_repair_points(
+            self._session.point_cloud.xyz
+        )
+        if repair_only is not None and self._session.point_cloud.xyz is not None and self._session.selection.mask is not None:
             defect_pts = int(np.sum(self._session.selection.mask))
-            repair_pts = len(self._session.morphology.repair_xyz)
+            repair_pts = len(repair_only)
             if defect_pts > 0:
                 quality["覆盖率"] = f"{repair_pts / defect_pts:.1%}"
         # 均匀性评分（来自 MATLAB 远程结果，若有）
@@ -1349,7 +1357,7 @@ class MainWindow(QMainWindow):
         _wfc_call(self,"set_step_done", 0)
 
     def _reset_output(self) -> None:
-        self._session.morphology.repair_xyz = None
+        self._session.morphology.clear()
         self._session.waypoint.mock = None
         self._session.waypoint.full = None
         self._session.waypoint.layers = None  # P2-1: 重置层号
@@ -1441,11 +1449,9 @@ class MainWindow(QMainWindow):
     ) -> None:
         """更新右侧形貌截面图。"""
         p = ThemeManager.get_palette()
-        if repair_pts is None and self._session.morphology.repair_xyz is not None:
-            repair_pts = (
-                self._session.morphology.repair_xyz[len(self._session.point_cloud.xyz):]
-                if len(self._session.morphology.repair_xyz) > len(self._session.point_cloud.xyz)
-                else self._session.morphology.repair_xyz
+        if repair_pts is None:
+            repair_pts = self._session.morphology.get_repair_points(
+                self._session.point_cloud.xyz
             )
         self._style_aux_axis(self._ax_morph, "形貌预测结果")
 
@@ -1497,10 +1503,14 @@ class MainWindow(QMainWindow):
     
         mat_idx = self._cb_mat.currentIndex()
         mat_name = _MATERIALS[mat_idx][0]
+        mat_code = _MATERIALS[mat_idx][1]
         ss = {k: v.value() for k, v in self._cs_fields.items()}
         pp = {k: v.value() for k, v in self._pp_fields.items()}
         return {
-            "material": mat_name,
+            # MATLAB/Protobuf receives the stable schema key; the localized
+            # label remains available for reports and UI-only metadata.
+            "material": mat_code,
+            "material_name": mat_name,
             "depth_compensation": self._sp_depth.value(),
             "max_layers": self._sp_max_layers.value(),
             "particle_velocity_ms": ss["particle_velocity"],
@@ -2040,6 +2050,10 @@ class MainWindow(QMainWindow):
         )
         defect_metrics = self._compute_defect_metrics(sel_mask)
         path_metrics = self._compute_path_metrics()
+        repair_only = self._session.morphology.get_repair_points(
+            self._session.point_cloud.xyz
+        )
+        repair_count = 0 if repair_only is None else len(repair_only)
         scan_info = {
             "scan_id": f"SCAN-{self._session.latest_seed:04d}",
             "points": len(self._session.point_cloud.xyz) if self._session.point_cloud.xyz is not None else 0,
@@ -2048,7 +2062,7 @@ class MainWindow(QMainWindow):
             "material": self._cb_mat.currentText(),
         }
         results = {
-            "填充点数": f"{len(self._session.morphology.repair_xyz) if self._session.morphology.repair_xyz is not None else 0:,}",
+            "填充点数": f"{repair_count:,}",
             "修复层数": str(self._sp_max_layers.value()),
             "缺陷选区点数": f"{defect_metrics['point_count']:,}",
             "估算缺陷面积": f"{defect_metrics['area_mm2']:.2f} mm²",
@@ -2362,7 +2376,9 @@ class MainWindow(QMainWindow):
     @Slot(object, int, int)
     def _on_morph_partial(self, repair_pts: np.ndarray, layer_idx: int, total_layers: int) -> None:
         p = ThemeManager.get_palette()
-        self._session.morphology.repair_xyz = np.vstack([self._session.point_cloud.xyz, repair_pts])
+        self._session.morphology.set_repair_points(
+            self._session.point_cloud.xyz, repair_pts
+        )
         self._prog.setValue(20 + int(70 * layer_idx / max(total_layers, 1)))
         self._lb_prog.setText(f"模拟沉积中... 第 {layer_idx}/{total_layers} 层")
         self._sb.showMessage(f"形貌预测中 – 当前 {len(repair_pts):,} 个沉积点")
@@ -2521,6 +2537,10 @@ class MainWindow(QMainWindow):
                 self._session.selection.mask = sel_mask
             defect_metrics = self._compute_defect_metrics(sel_mask) if sel_mask is not None else {}
             path_metrics = self._compute_path_metrics()
+            repair_only = self._session.morphology.get_repair_points(
+                self._session.point_cloud.xyz
+            )
+            repair_count = 0 if repair_only is None else len(repair_only)
             self._session.report.scan_info = {
                 "scan_id": f"SCAN-{self._session.latest_seed:04d}",
                 "points": len(self._session.point_cloud.xyz) if self._session.point_cloud.xyz is not None else 0,
@@ -2529,7 +2549,7 @@ class MainWindow(QMainWindow):
                 "material": self._cb_mat.currentText() if hasattr(self, "_cb_mat") else "未指定",
             }
             self._session.report.results = {
-                "填充点数": f"{len(self._session.morphology.repair_xyz) if self._session.morphology.repair_xyz is not None else 0:,}",
+                "填充点数": f"{repair_count:,}",
                 "修复层数": str(self._sp_max_layers.value()) if hasattr(self, "_sp_max_layers") else "0",
                 "缺陷选区点数": f"{defect_metrics.get('point_count', 0):,}",
                 "估算缺陷面积": f"{defect_metrics.get('area_mm2', 0.0):.2f} mm²",

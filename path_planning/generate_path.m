@@ -34,37 +34,73 @@ if nargin < 16
 end
 
 % initialize
-pointlist = [];
-velocitylist = strings(0,0);
-zonelist = strings(0,0);
+pointlist = zeros(0, 6);
+velocitylist = strings(0, 1);
+zonelist = strings(0, 1);
 
-layerlist = [vertcat(repairing_layerlist{:}); vertcat(additive_layerlist{:})];
-demarcation = size(vertcat(repairing_layerlist{:}), 1); % index for dividing additive and repairing
+repairing_layers = flatten_layers(repairing_layerlist);
+additive_layers = flatten_layers(additive_layerlist);
+layerlist = [repairing_layers; additive_layers];
+demarcation = size(repairing_layers, 1); % index for dividing additive and repairing
 
+warning_state = warning('query','MATLAB:polyshape:repairedBySimplify');
 warning('off','MATLAB:polyshape:repairedBySimplify');
+warning_guard = onCleanup(@() warning(warning_state.state, ...
+    'MATLAB:polyshape:repairedBySimplify')); %#ok<NASGU>
 for i = 1:size(layerlist,1)
     if ~isempty(cancel_callback) && feval(cancel_callback)
-        warning('on','MATLAB:polyshape:repairedBySimplify');
         error('CSAM:Cancelled', 'Path planning cancelled before layer %d', i);
     end
     layer_start_index = size(pointlist, 1) + 1;
 
     % generate polygons
-    polygon_in = polyshape(layerlist{i,4},'Simplify',true);
+    polygon_vertices = layerlist{i,4};
+    if ~is_valid_polygon_vertices(polygon_vertices)
+        warning('CSAM:EmptyPathLayer', ...
+            'Skipping layer %d because its polygon is empty or degenerate.', i);
+        publish_empty_layer(progress_callback, i, size(layerlist, 1));
+        continue;
+    end
+    try
+        polygon_in = polyshape(polygon_vertices,'Simplify',true);
+    catch me
+        warning('CSAM:InvalidPathPolygon', ...
+            'Skipping invalid polygon in layer %d: %s', i, me.message);
+        publish_empty_layer(progress_callback, i, size(layerlist, 1));
+        continue;
+    end
+    if isempty(polygon_in.Vertices) || area(polygon_in) <= eps
+        warning('CSAM:EmptyPathLayer', ...
+            'Skipping layer %d because polygon simplification removed its area.', i);
+        publish_empty_layer(progress_callback, i, size(layerlist, 1));
+        continue;
+    end
     polygon_out = regions(sortregions(polygon_in, "centroid", "ascend", "ReferencePoint", [0,0])); % Divide into different regions, N*1 polyshape
+    if isempty(polygon_out)
+        publish_empty_layer(progress_callback, i, size(layerlist, 1));
+        continue;
+    end
     
     % Loop of regions
     regionCounter = 0; % region counter
-    for j = (mod(i, 2) == 1)*(1:length(polygon_out)) + (mod(i, 2) == 0)*(length(polygon_out):-1:1)
+    if mod(i, 2) == 1
+        region_order = 1:length(polygon_out);
+    else
+        region_order = length(polygon_out):-1:1;
+    end
+    for j = region_order
         if ~isempty(cancel_callback) && feval(cancel_callback)
-            warning('on','MATLAB:polyshape:repairedBySimplify');
             error('CSAM:Cancelled', 'Path planning cancelled in layer %d', i);
         end
         regionCounter = regionCounter + 1;
         if i <= demarcation % repairing
             [infill_points, infill_velocity, infill_zone] = generate_infill(polygon_out(j), buffer_repairing, scanning_angle, scanning_step, i, layerlist{i,3});
-            [edge_points, edge_velocity, edge_zone] = deal([]);
-            [link_points, link_velocity, link_zone] = deal([]);
+            edge_points = zeros(0, 6);
+            edge_velocity = strings(0, 1);
+            edge_zone = strings(0, 1);
+            link_points = zeros(0, 6);
+            link_velocity = strings(0, 1);
+            link_zone = strings(0, 1);
         else % additive
             [infill_points, infill_velocity, infill_zone] = generate_infill(polygon_out(j), buffer_additive, scanning_angle, scanning_step, i, layerlist{i,3});
             [edge_points, edge_velocity, edge_zone] = generate_edge(infill_points, polygon_out(j), buffer_additive, edge_step_size, layerlist{i,3}, tilt_angle);
@@ -84,10 +120,47 @@ for i = 1:size(layerlist,1)
         feval(progress_callback, i, size(layerlist, 1), layer_points, layer_velocity);
     end
 end
-warning('on','MATLAB:polyshape:repairedBySimplify');
 end
 
 %% Auxiliary Functions
+function layers = flatten_layers(layer_cells)
+% Concatenate only non-empty, valid layer matrices.
+layers = cell(0, 4);
+if isempty(layer_cells)
+    return;
+end
+for idx = 1:numel(layer_cells)
+    candidate = layer_cells{idx};
+    if isempty(candidate)
+        continue;
+    end
+    if ~iscell(candidate) || size(candidate, 2) ~= 4
+        error('CSAM:InvalidLayerList', ...
+            'Each non-empty layer list entry must be a cell matrix with four columns.');
+    end
+    valid_rows = ~cellfun(@isempty, candidate(:, 3)) & ...
+        ~cellfun(@isempty, candidate(:, 4));
+    layers = [layers; candidate(valid_rows, :)]; %#ok<AGROW>
+end
+end
+
+function valid = is_valid_polygon_vertices(vertices)
+valid = isnumeric(vertices) && size(vertices, 2) == 2;
+if ~valid || isempty(vertices)
+    valid = false;
+    return;
+end
+finite_vertices = vertices(all(isfinite(vertices), 2), :);
+valid = size(unique(finite_vertices, 'rows'), 1) >= 3;
+end
+
+function publish_empty_layer(progress_callback, layer_idx, total_layers)
+if ~isempty(progress_callback)
+    feval(progress_callback, layer_idx, total_layers, ...
+        zeros(0, 6), strings(0, 1));
+end
+end
+
 function [infill_points, infill_velocity, infill_zone] = generate_infill(polygon, buffer_distance, scanning_angle, scanning_step, layerID, z_slice)
 % Generate the infill path
 
@@ -103,16 +176,31 @@ function [infill_points, infill_velocity, infill_zone] = generate_infill(polygon
 % infill_velocity: name of speeddata of infill path, N*1 string
 % infill_zone: name of zonedata of infill path, N*1 string
 
+infill_points = zeros(0, 6);
+infill_velocity = strings(0, 1);
+infill_zone = strings(0, 1);
+if ~isscalar(scanning_step) || ~isfinite(scanning_step) || scanning_step <= 0
+    error('CSAM:InvalidScanningStep', 'scanning_step must be a positive finite scalar.');
+end
+
 % Create the buffer
 polygon_infill = polybuffer(polygon,-buffer_distance,'JointType','miter','MiterLimit',3);
-polygon_infill.Vertices= rotate_vertices(polygon_infill.Vertices,-scanning_angle);
-min_x_polygon_infill = min(polygon_infill.Vertices(:,1));
-max_x_polygon_infill = max(polygon_infill.Vertices(:,1));
-min_y_polygon_infill = min(polygon_infill.Vertices(:,2));
-max_y_polygon_infill = max(polygon_infill.Vertices(:,2));
+vertices = polygon_infill.Vertices;
+vertices = vertices(all(isfinite(vertices), 2), :);
+if size(unique(vertices, 'rows'), 1) < 3 || area(polygon_infill) <= eps
+    return;
+end
+vertices = rotate_vertices(vertices,-scanning_angle);
+min_x_polygon_infill = min(vertices(:,1));
+max_x_polygon_infill = max(vertices(:,1));
+min_y_polygon_infill = min(vertices(:,2));
+max_y_polygon_infill = max(vertices(:,2));
 
 % Create the scanning lines
 scan_lines = min_y_polygon_infill:scanning_step:max_y_polygon_infill;
+if isempty(scan_lines)
+    return;
+end
 scan_lines = scan_lines + 1/2*(max_y_polygon_infill-scan_lines(end));
 scanning_points = zeros(2*size(scan_lines,2),2);
 for i = 1:size(scanning_points,1)
@@ -129,30 +217,36 @@ for i = 1:size(scanning_points,1)
 end
 
 % Calculate the infill points
-infill_points = []; % initialize after every iteration
-[infill_points(:,1),infill_points(:,2)] = polyxpoly(scanning_points(:,1),scanning_points(:,2),...
-    polygon_infill.Vertices([1:end,1],1),polygon_infill.Vertices([1:end,1],2),'unique'); % need ranking
+[intersection_x, intersection_y] = polyxpoly( ...
+    scanning_points(:,1), scanning_points(:,2), ...
+    vertices([1:end,1],1), vertices([1:end,1],2), 'unique');
+if isempty(intersection_x)
+    return;
+end
+infill_xy = [intersection_x, intersection_y];
 % First rank by y and then second by x (odd rows in ascending order, even rows in descending order)
-infill_points = sortrows(round(infill_points,4),[2,1]); % first y, then x
+infill_xy = sortrows(round(infill_xy,4),[2,1]); % first y, then x
 % Reverse the x order for even rows
-[~,infill_idx] = unique(infill_points(:,2)); % find the starting index of each row
+[~,infill_idx] = unique(infill_xy(:,2)); % find the starting index of each row
+infill_idx = sort(infill_idx);
 for m = 2:2:length(infill_idx)
     infill_start_idx = infill_idx(m);
     if m < length(infill_idx)
         infill_end_idx = infill_idx(m+1)-1;
     else
-        infill_end_idx = size(infill_points,1);
+        infill_end_idx = size(infill_xy,1);
     end
-    infill_points(infill_start_idx:infill_end_idx,:) = flipud(infill_points(infill_start_idx:infill_end_idx,:));
+    infill_xy(infill_start_idx:infill_end_idx,:) = ...
+        flipud(infill_xy(infill_start_idx:infill_end_idx,:));
 end
 
 % Add the layer height and the normal vector
-infill_points = rotate_vertices(infill_points,scanning_angle);
+infill_xy = rotate_vertices(infill_xy,scanning_angle);
 if mod(layerID, 2) == 0
-    infill_points = flipud(infill_points); % reduce regional crossing
+    infill_xy = flipud(infill_xy); % reduce regional crossing
 end
-infill_points = [infill_points,ones(size(infill_points,1),1)*z_slice,...
-    zeros(size(infill_points,1),2),ones(size(infill_points,1),1)];
+infill_points = [infill_xy,ones(size(infill_xy,1),1)*z_slice,...
+    zeros(size(infill_xy,1),2),ones(size(infill_xy,1),1)];
 infill_velocity = repmat("velocity_infill", [size(infill_points,1),1]);
 infill_zone = repmat("zone_infill", [size(infill_points,1),1]);
 end
@@ -186,11 +280,25 @@ function [edge_points, edge_velocity, edge_zone] = generate_edge(infill_points, 
 % edge_velocity: name of speeddata of edge path, N*1 string
 % edge_zone: name of zonedata of edge path, N*1 string
 
+edge_points = zeros(0, 6);
+edge_velocity = strings(0, 1);
+edge_zone = strings(0, 1);
+if isempty(infill_points)
+    return;
+end
+if ~isscalar(edge_step_size) || ~isfinite(edge_step_size) || edge_step_size <= 0
+    error('CSAM:InvalidEdgeStep', 'edge_step_size must be a positive finite scalar.');
+end
+
 % Calculate the edge points
 infill_end_point = infill_points(end,1:2);% Extract the ending coordinates
 polygon_contour_outer = [];
 polygon_contour_inner = [];
-[polygon_contour_outer(:,1), polygon_contour_outer(:,2)] = boundary(polygon, find(ishole(polygon) == 0,1)); % outer boundary vertices
+outer_index = find(ishole(polygon) == 0, 1);
+if isempty(outer_index)
+    return;
+end
+[polygon_contour_outer(:,1), polygon_contour_outer(:,2)] = boundary(polygon, outer_index); % outer boundary vertices
 polygon_contour_outer = polygon_contour_outer(1:end-1,:);
 if ~isempty(find(ishole(polygon) == 1,1))
     [polygon_contour_inner(:,1), polygon_contour_inner(:,2)] = boundary(polygon, find(ishole(polygon) == 1,1)); % inner boundary vertices
@@ -201,9 +309,13 @@ end
 polygon_contour_outer_filtered = polygon_contour_outer...
     (abs(polygon_contour_outer(:, 1) - infill_end_point(1, 1)) <= 3*buffer_distance |...
     abs(polygon_contour_outer(:, 2) - infill_end_point(1, 2)) <= 3*buffer_distance,:);% radius scanning
+if isempty(polygon_contour_outer_filtered)
+    polygon_contour_outer_filtered = polygon_contour_outer;
+end
 [~, row_outer_filtered_idx] = min(vecnorm(polygon_contour_outer_filtered - infill_end_point, 2, 2), [], 1, 'linear');
 polygon_contour_outer_start = polygon_contour_outer_filtered(row_outer_filtered_idx, :);
 [row_outer_idx, ~] = find(all(polygon_contour_outer == polygon_contour_outer_start, 2));
+row_outer_idx = row_outer_idx(1);
 polygon_contour_outer = polygon_contour_outer([row_outer_idx:end,1:row_outer_idx-1], :);
 polygon_contour_outer = polygon_contour_outer([1:end, 1], :);
 
@@ -213,9 +325,13 @@ else
     polygon_contour_inner_filtered = polygon_contour_inner...
         (abs(polygon_contour_inner(:, 1) - infill_end_point(1, 1)) <= 3*buffer_distance |...
         abs(polygon_contour_inner(:, 2)-infill_end_point(1, 2)) <= 3*buffer_distance,:); % radius scanning
+    if isempty(polygon_contour_inner_filtered)
+        polygon_contour_inner_filtered = polygon_contour_inner;
+    end
     [~, row_inner_filtered_idx] = min(vecnorm(polygon_contour_inner_filtered-infill_end_point, 2, 2), [], 1, 'linear');
     polygon_contour_inner_start = polygon_contour_inner_filtered(row_inner_filtered_idx, :);
     [row_inner_idx, ~] = find(all(polygon_contour_inner == polygon_contour_inner_start, 2));
+    row_inner_idx = row_inner_idx(1);
     polygon_contour_inner = polygon_contour_inner([row_inner_idx:end, 1:row_inner_idx-1], :);
     polygon_contour_inner = polygon_contour_inner([1:end,1], :);
 end
@@ -244,13 +360,27 @@ if nargin ~= 4
 end
 
 % Make sure polyline is Nx2 or Nx3 matrix
-if size(polyline, 2) ~= 0 && size(polyline, 2) ~= 2 && size(polyline, 2) ~= 3
-    error('polyline must be Nx2 or Nx3 matrix!');
+if ~isempty(polyline) && size(polyline, 2) ~= 2
+    error('CSAM:InvalidPolyline', 'polyline must be an N-by-2 matrix.');
 end
 
+if ~isscalar(edge_step_size) || ~isfinite(edge_step_size) || edge_step_size <= 0
+    error('CSAM:InvalidEdgeStep', 'edge_step_size must be a positive finite scalar.');
+end
+
+edge_points = zeros(0, 6);
 if isempty(polyline)
-    edge_points = [];
-else
+    return;
+end
+
+% Consecutive duplicate vertices create zero-length segments and undefined
+% interpolation ratios. Remove them before sampling.
+keep = [true; vecnorm(diff(polyline, 1, 1), 2, 2) > eps];
+polyline = polyline(keep, :);
+if size(polyline, 1) < 2
+    return;
+end
+
     % Calculate the length of each line segment and accumulative length.
     segments = diff(polyline, 1, 1); % Line segment vector
     segment_normal_vector = [-segments(:,2),segments(:,1),zeros(size(segments,1),1)];
@@ -285,11 +415,18 @@ else
         seg_end_point = polyline(seg_idx + 1, :);
         edge_points(ii, 1:2) = seg_start_point + ratio * (seg_end_point - seg_start_point);
         edge_points(ii, 3) =  layer_height;
-        edge_points(ii, 4:6) = segment_normal_vector(seg_idx,:)+...
-            norm(segment_normal_vector(seg_idx,:))*tand(tilt_angle)*[0,0,1];
-        edge_points(ii, 4:6) = edge_points(ii, 4:6)/norm(edge_points(ii, 4:6));
+        horizontal_normal = segment_normal_vector(seg_idx,:);
+        normal_length = norm(horizontal_normal);
+        spray_normal = horizontal_normal + ...
+            normal_length*tand(tilt_angle)*[0,0,1];
+        spray_normal_length = norm(spray_normal);
+        if spray_normal_length <= eps || ~isfinite(spray_normal_length)
+            spray_normal = [0, 0, 1];
+        else
+            spray_normal = spray_normal / spray_normal_length;
+        end
+        edge_points(ii, 4:6) = spray_normal;
     end
-end
 end
 
 function [link_points, link_velocity, link_zone] = generate_link(regionCounter, x_min, x_max, y_min, y_max, linkPath_freeDistance, resolution,...
@@ -313,9 +450,20 @@ function [link_points, link_velocity, link_zone] = generate_link(regionCounter, 
 % link_velocity: name of speeddata of link path, N*1 string
 % link_zone: name of zonedata of link path, N*1 string
 
-if regionCounter == 1
-    link_points = [];
-else
+link_points = zeros(0, 6);
+if regionCounter == 1 || isempty(pointlist) || isempty(infill_points)
+    link_velocity = strings(0, 1);
+    link_zone = strings(0, 1);
+    return;
+end
+if ~isscalar(resolution) || ~isfinite(resolution) || resolution <= 0
+    error('CSAM:InvalidResolution', 'resolution must be a positive finite scalar.');
+end
+if any(~isfinite([x_min, x_max, y_min, y_max])) || ...
+        x_min > x_max || y_min > y_max
+    error('CSAM:InvalidModelBounds', 'Model bounds must be finite and ordered.');
+end
+
     % Create the substrate map
     xGrid = x_min-linkPath_freeDistance:resolution:x_max+linkPath_freeDistance;
     yGrid = y_min-linkPath_freeDistance:resolution:y_max+linkPath_freeDistance;
@@ -336,11 +484,17 @@ else
     OriginalGoalPoint = infill_points(1,1:2);
     [StartNode, OriginalgoalNode, GoalNode] = coordinate2index(xGrid, yGrid, StartPoint, OriginalGoalPoint, occupancyMap);
     [link_points_X, link_points_Y] = aStarSearch(xGrid, yGrid, occupancyMap, StartNode, OriginalgoalNode, GoalNode, '8-connected');
+    if isempty(link_points_X) || isempty(link_points_Y)
+        warning('CSAM:LinkPathUnavailable', ...
+            'No collision-free link path was found; continuing without a link segment.');
+        link_velocity = strings(0, 1);
+        link_zone = strings(0, 1);
+        return;
+    end
     link_points = [link_points_X;link_points_Y]';
     link_points = removeColinearPoints(link_points);
     link_points = [link_points, ones(size(link_points,1),1)*z_slice, ...
         zeros(size(link_points,1),2), ones(size(link_points,1),1)];
-end
 link_velocity = repmat("velocity_link", [size(link_points,1),1]);
 link_zone = repmat("zone_link", [size(link_points,1),1]);
 end
@@ -360,12 +514,15 @@ function [StartNode, OriginalGoalNode, GoalNode] = coordinate2index(xGrid, yGrid
 % GoalNode: index of GoalNode, 1*2 matrix
 
 % Convert the start point and the goal point to grid indexes
-startIdxX = find(xGrid >= StartPoint(1), 1);
-startIdxY = find(yGrid >= StartPoint(2), 1);
+if isempty(xGrid) || isempty(yGrid) || isempty(occupancyMap)
+    error('CSAM:EmptyLinkGrid', 'The link-path occupancy grid is empty.');
+end
+[~, startIdxX] = min(abs(xGrid - StartPoint(1)));
+[~, startIdxY] = min(abs(yGrid - StartPoint(2)));
 StartNode = [startIdxY, startIdxX]; % Y is row and X is col in MATLAB
 
-originalgoalIdxX = find(xGrid >= OriginalGoalPoint(1), 1);
-originalgoalIdxY = find(yGrid >= OriginalGoalPoint(2), 1);
+[~, originalgoalIdxX] = min(abs(xGrid - OriginalGoalPoint(1)));
+[~, originalgoalIdxY] = min(abs(yGrid - OriginalGoalPoint(2)));
 OriginalGoalNode = [originalgoalIdxY, originalgoalIdxX];
 GoalNode = adjustGoalIfOnEdge(OriginalGoalNode, occupancyMap, 3);
 end
@@ -387,6 +544,9 @@ end
 [rows, cols] = size(occupancyMap);
 goalRow = OriginalGoalNode(1);
 goalCol = OriginalGoalNode(2);
+if goalRow < 1 || goalRow > rows || goalCol < 1 || goalCol > cols
+    error('CSAM:GoalOutsideGrid', 'The link-path goal lies outside the occupancy grid.');
+end
 
 % If the original goal node itself is passable, return directly
 if ~occupancyMap(goalRow, goalCol)

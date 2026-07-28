@@ -9,6 +9,7 @@ P2-1 增强：真实 Lead-in / Lead-out / Layer 分层 / Spindle 启动(M3) / �
 from __future__ import annotations
 from typing import Optional, Dict
 import datetime
+from functools import lru_cache
 import os
 import subprocess
 import numpy as np
@@ -17,12 +18,16 @@ from repair_app.config import schema_loader as _schema
 from repair_app.utils.logger_config import warning
 
 
+@lru_cache(maxsize=1)
 def _get_git_commit() -> str:
     """获取当前 Git commit hash（失败返回 unknown）。
 
     超时时间从 schema system_parameters.git_commit_timeout_sec 读取。
     """
-    _timeout = int(_schema.get_system_value("git_commit_timeout_sec"))
+    try:
+        _timeout = max(1, int(_schema.get_system_value("git_commit_timeout_sec")))
+    except (KeyError, TypeError, ValueError):
+        _timeout = 2
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -119,10 +124,13 @@ class GCodeExporter:
             layer_indices: (N,) int 每个航点的层号（从 0 或 1 开始），None 视为单层
             output_path: 输出文件路径，None 则返回字符串
         """
-        n = len(waypoints)
+        waypoints = np.asarray(waypoints)
         # 形状校验优先 — 防止畸形输入导致 IndexError（NaN 检查依赖 [:, :3] 切片）
         if waypoints.ndim != 2 or waypoints.shape[1] < 3:
             raise ValueError(f"航点必须为 (N, 3+) 数组，当前 = {waypoints.shape}")
+        n = len(waypoints)
+        if n == 0:
+            raise ValueError("航点数组为空，无法生成 G-code")
         # NaN/Inf 检查 — 防止异常值写入 G-code 导致设备事故
         if np.any(~np.isfinite(waypoints[:, :3])):
             bad_idx = np.where(~np.all(np.isfinite(waypoints[:, :3]), axis=1))[0]
@@ -147,8 +155,12 @@ class GCodeExporter:
         layer_boundaries = self._find_layer_boundaries(layer_ids)
 
         # P2-1: Lead-in（引入线）— 从安全高度下降到起点，含切线接近段
-        x0, y0, z0 = waypoints[0]
-        self._emit_lead_in(x0, y0, z0, is_incremental)
+        x0, y0, z0 = waypoints[0, :3]
+        lead_in_direction = self._path_tangent(waypoints[:, :3], from_start=True)
+        lead_out_direction = self._path_tangent(waypoints[:, :3], from_start=False)
+        self._emit_lead_in(
+            x0, y0, z0, is_incremental, direction_xy=lead_in_direction
+        )
 
         # 当前位置（用于增量模式计算差值）
         cur_x, cur_y, cur_z = x0, y0, z0
@@ -160,7 +172,7 @@ class GCodeExporter:
         # 逐航点
         prev_layer = layer_ids[0]
         for i in range(n):
-            x, y, z = waypoints[i]
+            x, y, z = waypoints[i, :3]
             fr = velocities[i] if velocities is not None and i < len(velocities) else self.feed_rate
             nozzle_on = nozzle_on_mask[i] if nozzle_on_mask is not None and i < len(nozzle_on_mask) else True
             cur_layer = layer_ids[i]
@@ -208,7 +220,10 @@ class GCodeExporter:
         self._line(f"M{self.powder_m_code + 2}  (送粉关闭)")
 
         # P2-1: Lead-out（引出线）— 从终点抬刀到安全高度，含切线离开段
-        self._emit_lead_out(cur_x, cur_y, cur_z, is_incremental)
+        self._emit_lead_out(
+            cur_x, cur_y, cur_z, is_incremental,
+            direction_xy=lead_out_direction,
+        )
 
         # 尾部
         self._footer()
@@ -238,16 +253,40 @@ class GCodeExporter:
                 boundaries.append(i)
         return boundaries
 
-    def _emit_lead_in(self, x0: float, y0: float, z0: float, is_incremental: bool) -> None:
+    @staticmethod
+    def _path_tangent(waypoints: np.ndarray, *, from_start: bool) -> np.ndarray:
+        """Return the first/last non-zero XY path tangent."""
+        xy = np.asarray(waypoints, dtype=float)[:, :2]
+        deltas = np.diff(xy, axis=0)
+        if not from_start:
+            deltas = deltas[::-1]
+        for delta in deltas:
+            length = float(np.linalg.norm(delta))
+            if np.isfinite(length) and length > 1e-9:
+                return delta / length
+        return np.array([1.0, 0.0], dtype=float)
+
+    def _emit_lead_in(
+        self,
+        x0: float,
+        y0: float,
+        z0: float,
+        is_incremental: bool,
+        direction_xy: Optional[np.ndarray] = None,
+    ) -> None:
         """P2-1: 生成 Lead-in 引入线。
 
         真实几何过渡：安全高度定位 → 沿 XY 切线方向接近起点外延 → 下降到工作高度。
         Lead-in 方向取起点切向的反向延伸（若无第二点则取 +X 方向）。
         """
         L = self.lead_in_length
-        # 简化切线方向：若无第二点信息，沿 +X 延伸 lead_in_length 作为引入线起点
-        approach_x = x0 - L
-        approach_y = y0
+        direction = np.asarray(
+            [1.0, 0.0] if direction_xy is None else direction_xy,
+            dtype=float,
+        )
+        direction /= max(float(np.linalg.norm(direction)), 1e-9)
+        approach_x = x0 - L * direction[0]
+        approach_y = y0 - L * direction[1]
 
         if is_incremental:
             self._line("G90  (临时绝对坐标定位 Lead-in)")
@@ -260,15 +299,26 @@ class GCodeExporter:
             self._line(f"G1 Z{z0:.3f} F{self.feed_rate:.0f}  (Lead-in: 下降到工作高度)")
             self._line(f"G1 X{x0:.3f} Y{y0:.3f} F{self.feed_rate:.0f}  (Lead-in: 切线接近起点)")
 
-    def _emit_lead_out(self, end_x: float, end_y: float, end_z: float, is_incremental: bool) -> None:
+    def _emit_lead_out(
+        self,
+        end_x: float,
+        end_y: float,
+        end_z: float,
+        is_incremental: bool,
+        direction_xy: Optional[np.ndarray] = None,
+    ) -> None:
         """P2-1: 生成 Lead-out 引出线。
 
         真实几何过渡：从终点沿切线方向延伸 lead_out_length → 抬刀到安全高度。
         """
         L = self.lead_out_length
-        # 沿 +X 延伸作为引出线终点
-        exit_x = end_x + L
-        exit_y = end_y
+        direction = np.asarray(
+            [1.0, 0.0] if direction_xy is None else direction_xy,
+            dtype=float,
+        )
+        direction /= max(float(np.linalg.norm(direction)), 1e-9)
+        exit_x = end_x + L * direction[0]
+        exit_y = end_y + L * direction[1]
 
         if is_incremental:
             self._line("G90  (临时绝对坐标 Lead-out)")
