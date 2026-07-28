@@ -65,6 +65,8 @@ class MatlabLifecycleManager(QObject):
     matlab_stopped = Signal()
     matlab_crashed = Signal(str)        # reason
     matlab_restarted = Signal(int)      # restart_count
+    _watchdog_requested = Signal()
+    _async_start_finished = Signal(bool, str)
 
     # 监控参数
     WATCH_INTERVAL_MS = 3000            # 监控轮询间隔（3 秒）
@@ -85,6 +87,8 @@ class MatlabLifecycleManager(QObject):
         self._auto_restart_enabled = True
         self._is_starting = False  # 防止并发启动
         self._state_lock = threading.Lock()  # 保护 _status/_message/_is_starting
+        self._watchdog_requested.connect(self._start_watchdog)
+        self._async_start_finished.connect(self._on_async_start_finished)
 
         # 合法状态转换表
         self._VALID_TRANSITIONS = {
@@ -232,8 +236,60 @@ class MatlabLifecycleManager(QObject):
             )
 
             # 启动监控定时器
-            self._start_watchdog()
+            self._watchdog_requested.emit()
             return True
+        finally:
+            with self._state_lock:
+                self._is_starting = False
+
+    def start_async(self, auto_restart: bool = True) -> bool:
+        """Start MATLAB without blocking the GUI event loop."""
+        self._auto_restart_enabled = auto_restart
+        self._enabled = True
+        with self._state_lock:
+            if self._is_starting:
+                return False
+            if self._status == LifecycleStatus.READY:
+                return True
+            self._is_starting = True
+
+        self._set_status(LifecycleStatus.STARTING, "正在启动 MATLAB + Bridge...")
+
+        def _launch() -> None:
+            try:
+                ok = self._launcher.start(timeout=self.STARTUP_TIMEOUT_S)
+                self._async_start_finished.emit(ok, "")
+            except Exception as exc:
+                self._async_start_finished.emit(False, str(exc))
+
+        threading.Thread(
+            target=_launch,
+            name="csam-matlab-startup",
+            daemon=True,
+        ).start()
+        return True
+
+    @Slot(bool, str)
+    def _on_async_start_finished(self, ok: bool, error: str) -> None:
+        try:
+            if ok:
+                version = self._launcher.matlab_version or "unknown"
+                reused = (
+                    "复用现有会话"
+                    if self._launcher.reused_existing
+                    else "新启动"
+                )
+                self._set_status(
+                    LifecycleStatus.READY,
+                    f"MATLAB {version} 已就绪（{reused}）",
+                )
+                self._start_watchdog()
+            else:
+                message = "MATLAB 启动失败"
+                if error:
+                    message += f": {error}"
+                self._set_status(LifecycleStatus.FAILED, message)
+                self._enabled = False
         finally:
             with self._state_lock:
                 self._is_starting = False
@@ -262,6 +318,29 @@ class MatlabLifecycleManager(QObject):
 
         # 未启动或失败状态：尝试启动
         return self.start(auto_restart=self._auto_restart_enabled)
+
+    def terminate_owned_worker(self, reason: str = "") -> bool:
+        """Terminate only a MATLAB process launched by this application.
+
+        Reused/manual MATLAB sessions are never killed.  On success the
+        lifecycle enters CRASHED so the next ``ensure_ready`` performs a clean
+        restart before accepting another computation.
+        """
+        if self._launcher.reused_existing:
+            logger.error("拒绝终止复用的 MATLAB 会话: %s", reason)
+            return False
+        if self._launcher.process is None:
+            logger.error("没有当前应用拥有的 MATLAB Worker 可终止: %s", reason)
+            return False
+
+        self._launcher.stop()
+        terminated = not self._launcher.is_process_alive
+        if terminated:
+            self._set_status(
+                LifecycleStatus.CRASHED,
+                f"MATLAB Worker 已终止，等待恢复: {reason}",
+            )
+        return terminated
 
     # ------------------------------------------------------------------
     # 监控看门狗

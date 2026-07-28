@@ -334,6 +334,10 @@ class MatlabService:
             return parsed
 
     # ---- 清理 ----
+    def abort_active_request(self) -> None:
+        """Abort the client-side wait without claiming MATLAB was cancelled."""
+        self._client.close(wait_ms=1000)
+
     def close(self, wait_ms: int = 4000) -> None:
         """停止服务并清理资源。"""
         self.stop_heartbeat()

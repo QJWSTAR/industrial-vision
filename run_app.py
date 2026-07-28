@@ -135,11 +135,11 @@ def main():
 
             # 启动 MATLAB（后台自动检测 + 启动 + 监控）
             info("开始初始化 MATLAB 生命周期...")
-            ok = manager.start(auto_restart=True)
-            if ok:
-                info("MATLAB 已就绪: %s", manager.matlab_version)
+            started = manager.start_async(auto_restart=True)
+            if started:
+                info("MATLAB 后台初始化已启动")
             else:
-                warning("MATLAB 初始化失败，用户可手动启动 MATLAB Bridge")
+                warning("MATLAB 已在启动中或无法启动")
         except Exception as exc:
             warning("MATLAB 生命周期初始化异常: %s", exc)
 

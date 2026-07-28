@@ -42,17 +42,17 @@ class TestProgressPublisher:
     def test_get_instance_singleton(self):
         from repair_app.bridge.progress_publisher import ProgressPublisher
         # 重置单例
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
         a = ProgressPublisher.get_instance()
         b = ProgressPublisher.get_instance()
         assert a is b
         # 清理
         a.stop()
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
 
     def test_start_with_mock_zmq(self, monkeypatch):
         from repair_app.bridge.progress_publisher import ProgressPublisher
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
         pub = ProgressPublisher.get_instance()
 
         # Mock zmq
@@ -67,11 +67,11 @@ class TestProgressPublisher:
         assert result is True
         assert pub._enabled is True
         pub.stop()
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
 
     def test_start_failure(self, monkeypatch):
         from repair_app.bridge.progress_publisher import ProgressPublisher
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
         pub = ProgressPublisher.get_instance()
 
         # Mock zmq 抛异常
@@ -82,22 +82,22 @@ class TestProgressPublisher:
         result = pub.start()
         assert result is False
         assert pub._enabled is False
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
 
     def test_start_idempotent(self, monkeypatch):
         """已启动时再次 start 应直接返回 True。"""
         from repair_app.bridge.progress_publisher import ProgressPublisher
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
         pub = ProgressPublisher.get_instance()
         pub._enabled = True
         pub._sock = MagicMock()
         result = pub.start()
         assert result is True
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
 
     def test_stop_clears_state(self, monkeypatch):
         from repair_app.bridge.progress_publisher import ProgressPublisher
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
         pub = ProgressPublisher.get_instance()
         mock_sock = MagicMock()
         mock_ctx = MagicMock()
@@ -110,12 +110,12 @@ class TestProgressPublisher:
         assert pub._ctx is None
         mock_sock.close.assert_called_once_with(0)
         mock_ctx.term.assert_called_once()
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
 
     def test_stop_with_exception(self, monkeypatch):
         """stop 中异常不应抛出。"""
         from repair_app.bridge.progress_publisher import ProgressPublisher
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
         pub = ProgressPublisher.get_instance()
         mock_sock = MagicMock()
         mock_sock.close.side_effect = Exception("close failed")
@@ -124,23 +124,23 @@ class TestProgressPublisher:
         pub._enabled = True
         pub.stop()  # 不应抛异常
         assert pub._sock is None
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
 
     def test_publish_progress_disabled(self):
         """未启用时 publish_progress 应直接返回。"""
         from repair_app.bridge.progress_publisher import ProgressPublisher
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
         pub = ProgressPublisher.get_instance()
         pub._enabled = False
         pub._sock = None
         # 不应抛异常
         pub.publish_progress(request_id="test", stage=1)
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
 
     def test_publish_progress_with_data(self, monkeypatch):
         """启用状态下发布进度（内部异常被捕获，不抛出）。"""
         from repair_app.bridge.progress_publisher import ProgressPublisher
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
         pub = ProgressPublisher.get_instance()
         mock_sock = MagicMock()
         pub._sock = mock_sock
@@ -153,12 +153,12 @@ class TestProgressPublisher:
             progress=0.4, message="computing",
         )
         # 不断言 sock.send（内部可能因 mock 环境失败而跳过）
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
 
     def test_publish_progress_with_waypoints_and_mesh(self, monkeypatch):
         """带 waypoints 和 mesh 的发布路径（不抛异常）。"""
         from repair_app.bridge.progress_publisher import ProgressPublisher
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
         pub = ProgressPublisher.get_instance()
         mock_sock = MagicMock()
         pub._sock = mock_sock
@@ -173,7 +173,7 @@ class TestProgressPublisher:
             total_layers=3, layer_index=1,
             layer_max_height=2.0, layer_avg_height=1.5, layer_dep_eff=0.8,
         )
-        ProgressPublisher._instance = None
+        ProgressPublisher.reset_instance()
 
 
 class TestPublishProgressModuleFunc:
@@ -182,10 +182,10 @@ class TestPublishProgressModuleFunc:
     def test_module_func_swallows_exception(self, monkeypatch):
         """模块级 publish_progress 异常不应抛出。"""
         from repair_app.bridge import progress_publisher as mod
-        mod.ProgressPublisher._instance = None
+        mod.ProgressPublisher.reset_instance()
         # 即使内部失败也不抛异常
         mod.publish_progress(request_id="x", stage=1)
-        mod.ProgressPublisher._instance = None
+        mod.ProgressPublisher.reset_instance()
 
 
 class TestTrianglesToStlBytes:

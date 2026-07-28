@@ -12,7 +12,7 @@ ZMQ Socket Thread Ownership:
 - 每个 ZMQ socket 由单个线程创建和独占使用。
 - BridgeClient.request_blocking(): 在调用线程中创建 REQ socket。
 - _RequestWorker: 在其 QThread 中创建 REQ socket。
-- ProgressPublisher: PUB socket 由主线程持有。
+- ProgressPublisher: PUB socket 由专属发送线程持有。
 - ProgressSubscriber: SUB socket 由其 QThread 持有。
 - 严禁跨线程共享 ZMQ socket。
 """
@@ -150,12 +150,16 @@ class _HealthWorker(QThread):
                 from repair_app.bridge.communication.protocol import (
                     PROTOCOL_VERSION, COMPATIBLE_PROTOCOL_VERSIONS,
                 )
-                service_version = parsed.get("service_version", "")
-                if service_version and service_version not in COMPATIBLE_PROTOCOL_VERSIONS:
+                protocol_version = parsed.get("protocol_version", "")
+                if (
+                    protocol_version
+                    and protocol_version not in COMPATIBLE_PROTOCOL_VERSIONS
+                ):
                     from repair_app.bridge.communication.exceptions import ProtocolError
                     self.result_ready.emit(
                         False,
-                        f"版本不兼容: 客户端 {PROTOCOL_VERSION} / 服务端 {service_version}",
+                        "协议版本不兼容: "
+                        f"客户端 {PROTOCOL_VERSION} / 服务端 {protocol_version}",
                         latency,
                     )
                     return

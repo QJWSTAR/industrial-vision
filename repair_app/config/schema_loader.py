@@ -22,6 +22,14 @@ _SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paramet
 _G_SCHEMA: Optional[dict] = None
 _G_LOCK = threading.Lock()
 
+PATH_PLANNING_GROUP = "path_planning"
+COLD_SPRAY_GROUP = "cold_spray"
+REQUIRED_UI_PROCESS_GROUPS = (PATH_PLANNING_GROUP, COLD_SPRAY_GROUP)
+
+
+class SchemaValidationError(ValueError):
+    """Raised when the parameter schema cannot satisfy the UI contract."""
+
 
 def _load_schema() -> dict:
     """加载 schema（线程安全单例）。"""
@@ -42,6 +50,36 @@ def get_schema() -> dict:
 def get_schema_version() -> str:
     """返回 schema 版本号。"""
     return _load_schema().get("schema_version", "unknown")
+
+
+def validate_required_ui_groups(
+    required_groups: tuple[str, ...] = REQUIRED_UI_PROCESS_GROUPS,
+) -> None:
+    """Validate the canonical process groups required by the main UI.
+
+    Group identifiers are UI metadata only.  This validation deliberately
+    does not change the flat ``RepairRequest`` protobuf contract used by the
+    MATLAB bridge.
+    """
+    params = _load_schema().get("process_parameters")
+    if not isinstance(params, dict):
+        raise SchemaValidationError(
+            "parameter_schema.json missing object 'process_parameters'"
+        )
+
+    available = {
+        str(spec.get("group", ""))
+        for spec in params.values()
+        if isinstance(spec, dict) and spec.get("ui_key")
+    }
+    missing = [group for group in required_groups if group not in available]
+    if missing:
+        missing_text = "', '".join(missing)
+        available_text = ", ".join(sorted(available)) or "<none>"
+        raise SchemaValidationError(
+            f"Schema group '{missing_text}' missing in UI parameter definitions "
+            f"(available: {available_text})"
+        )
 
 
 # ============================================================

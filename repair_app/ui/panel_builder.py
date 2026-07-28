@@ -177,6 +177,8 @@ class PanelBuilder:
 
     @staticmethod
     def build_path_planning_panel(parent) -> QWidget:
+        if not hasattr(parent, "_pp_fields"):
+            parent._pp_fields = {}
         p = ThemeManager.get_palette()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -243,7 +245,7 @@ class PanelBuilder:
         ppl.setSpacing(5)
         # MF-8: 从 PARAM_SPECS 唯一权威源动态生成（消除硬编码范围双源冲突）
         for spec_key, ui_key, label, suffix, tooltip, _grp, read_only in UI_PARAM_SPECS:
-            if _grp != "pp":
+            if _grp != schema_loader.PATH_PLANNING_GROUP:
                 continue
             lo, hi, default, step = get_ui_param(spec_key)[:4]
             row = QHBoxLayout()
@@ -312,6 +314,14 @@ class PanelBuilder:
             f"QPushButton:disabled{{background:{p.border_strong};color:{p.text_disabled};}}"
         )
         ol.addWidget(parent._btn_start_repair)
+        parent._btn_cancel_repair = QPushButton("取消当前计算")
+        parent._btn_cancel_repair.setMinimumHeight(36)
+        parent._btn_cancel_repair.setEnabled(False)
+        parent._btn_cancel_repair.setToolTip(
+            "请求 MATLAB 在下一个安全检查点停止；若超时，只会终止本软件拥有的 Worker。"
+        )
+        parent._btn_cancel_repair.clicked.connect(parent._on_cancel_computation)
+        ol.addWidget(parent._btn_cancel_repair)
 
         l.addWidget(og)
         l.addStretch()
@@ -321,6 +331,8 @@ class PanelBuilder:
 
     @staticmethod
     def build_morphology_panel(parent) -> QWidget:
+        if not hasattr(parent, "_cs_fields"):
+            parent._cs_fields = {}
         p = ThemeManager.get_palette()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -351,7 +363,7 @@ class PanelBuilder:
         cpl.setSpacing(5)
         # MF-8: 从 PARAM_SPECS 唯一权威源动态生成（消除硬编码范围双源冲突）
         for spec_key, ui_key, label, suffix, tooltip, _grp, read_only in UI_PARAM_SPECS:
-            if _grp != "cs":
+            if _grp != schema_loader.COLD_SPRAY_GROUP:
                 continue
             lo, hi, default, step = get_ui_param(spec_key)[:4]
             row = QHBoxLayout()
@@ -591,39 +603,11 @@ class PanelBuilder:
         # ---- 实时统计面板 + 逐层播放器 ----
         from repair_app.ui.realtime_stats import RealtimeStatsPanel
         from repair_app.ui.layer_player import LayerPlayer
-        from repair_app.ui.progress_subscriber import ProgressSubscriber
         parent._realtime_stats = RealtimeStatsPanel()
         layout.addWidget(parent._realtime_stats)
         parent._layer_player = LayerPlayer()
         parent._layer_player.layer_changed.connect(parent._on_layer_changed)
         layout.addWidget(parent._layer_player)
-
-        # ---- 实时进度订阅器（ZMQ SUB，监听 MATLAB 逐步发布的进度） ----
-        parent._progress_subscriber = ProgressSubscriber(parent)
-        parent._progress_subscriber.stats_updated.connect(parent._realtime_stats.update_stats)
-        parent._progress_subscriber.layer_completed.connect(parent._on_layer_completed)
-        parent._progress_subscriber.mesh_updated.connect(parent._on_mesh_updated)
-        parent._progress_subscriber.progress_received.connect(parent._on_progress_received)
-
-        # ---- 计算编排控制器（Phase 8：提取 MATLAB / Compute 逻辑） ----
-        from repair_app.ui.compute_controller import ComputeController
-        import os as _os
-        _project_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-        parent._compute_controller = ComputeController(
-            parent=parent,
-            project_root=_project_root,
-            session=getattr(parent, '_session', None),
-            license_manager=getattr(parent, '_license', None),
-            params_collector=getattr(parent, '_collect_params', None),
-            selector=getattr(parent, '_selector', None),
-        )
-        parent._compute_controller.stage_changed.connect(parent._on_compute_stage)
-        parent._compute_controller.result_ready.connect(parent._on_compute_result)
-        parent._compute_controller.computation_failed.connect(parent._on_compute_failed)
-        parent._compute_controller.operation_id_ready.connect(parent._on_operation_id_received)
-        parent._compute_controller.matlab_startup_started.connect(parent._on_matlab_startup_started)
-        parent._compute_controller.matlab_startup_done.connect(parent._on_matlab_startup_done)
-        parent._compute_controller.matlab_startup_failed.connect(parent._on_matlab_startup_failed)
 
         parent._top_splitter = parent._main_splitter  # 兼容旧引用
         parent._bottom_splitter = parent._main_splitter

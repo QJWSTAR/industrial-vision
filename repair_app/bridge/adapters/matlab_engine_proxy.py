@@ -583,6 +583,12 @@ class MatlabEngineProxy:
         base["num_layers"] = safe_float(
             meta.get("num_layers"), 3.0
         )
+        base["preview_fps"] = safe_float(
+            meta.get("preview_fps"), 8.0
+        )
+        base["preview_max_triangles"] = safe_float(
+            meta.get("preview_max_triangles"), 1500.0
+        )
         # request_id 用于 MATLAB 进度发布（ProgressPublisher）
         base["request_id"] = str(meta.get("request_id", ""))
         return base
@@ -720,6 +726,7 @@ class MatlabEngineProxy:
             "link_path_free_dist": safe_float(meta.get("link_path_free_dist_mm"), 20.0),
             "resolution": safe_float(meta.get("obstacle_resolution_mm"), 2.0),
             "traversing_speed_mms": safe_float(meta.get("traversing_speed_mms"), 500.0),
+            "request_id": str(meta.get("request_id", "")),
         }
 
     @staticmethod

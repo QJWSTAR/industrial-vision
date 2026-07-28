@@ -1,5 +1,5 @@
 // ============================================================
-// 协议版本: 2026-06-v2.1
+// 协议版本: 2026-07-v3.0
 // 用途：冷喷涂缺陷修复软件 —— 前端 ↔ MATLAB/Python 黑盒通信
 //
 // v2.1 变更：
@@ -43,6 +43,7 @@ enum RepairStatusCode {
   ERR_ALGORITHM_FAIL  = 3;   // 算法内部异常
   ERR_TIMEOUT         = 4;   // 计算超时
   ERR_NOT_FEASIBLE    = 5;   // 修复不可行（v2.1 新增）
+  ERR_CANCELLED       = 6;   // 用户取消（v3.0 新增）
   ERR_UNKNOWN         = 99;  // 未知错误
 }
 
@@ -228,6 +229,8 @@ message RepairResult {
 // 服务治理消息
 // ============================================================
 
+// v2.x legacy progress message. Keep during the v3 migration so older
+// publishers can still be decoded by the Python subscriber.
 message ProgressUpdate {
   enum Stage {
     STAGE_UNSPECIFIED = 0;
@@ -252,6 +255,110 @@ message ProgressUpdate {
   repeated LayerProfile layer_profiles = 13; // 当前可用的逐层轮廓
 }
 
+// ============================================================
+// v3.0 实时计算事件协议
+// ============================================================
+
+enum ProgressEventType {
+  PROGRESS_EVENT_UNSPECIFIED = 0;
+  PROGRESS_TOPO_SNAPSHOT     = 1;
+  PROGRESS_TOPO_LAYER_READY  = 2;
+  PROGRESS_PATH_LAYER_READY  = 3;
+  PROGRESS_PATH_SEGMENT_READY = 4;
+  PROGRESS_HEARTBEAT         = 5;
+  PROGRESS_COMPLETED         = 6;
+  PROGRESS_FAILED            = 7;
+  PROGRESS_CANCELLED         = 8;
+  PROGRESS_PATH_COMPLETED    = 9;
+}
+
+enum MeshFrameKind {
+  MESH_FRAME_UNSPECIFIED             = 0;
+  MESH_PREVIEW_SNAPSHOT              = 1;
+  MESH_FULL_RESOLUTION_SNAPSHOT      = 2;
+}
+
+message ErrorInfo {
+  string code      = 1;
+  string message   = 2;
+  bool retryable   = 3;
+}
+
+message MeshSnapshot {
+  bytes mesh_data              = 1;
+  string mesh_format           = 2;  // "stl_binary"
+  MeshFrameKind frame_kind     = 3;
+  uint32 triangle_count        = 4;
+  float layer_max_height_mm    = 5;
+  float layer_avg_height_mm    = 6;
+  float layer_dep_efficiency   = 7;
+}
+
+message PathLayerPayload {
+  repeated RepairResult.Waypoint waypoints = 1;
+}
+
+message PathSegmentPayload {
+  repeated RepairResult.Waypoint waypoints = 1;
+  int32 segment_index = 2;
+}
+
+message StatusPayload {
+  string message = 1;
+  float elapsed_s = 2;
+}
+
+message ProgressEnvelope {
+  uint32 schema_version     = 1;  // current value: 3
+  string operation_id       = 2;
+  uint64 sequence_number    = 3;  // monotonic within operation
+  int64 timestamp_ms        = 4;
+  ProgressEventType event_type = 5;
+  int32 layer_index         = 6;  // one-based; 0 when not applicable
+  int32 total_layers        = 7;
+  double progress           = 8;  // [0, 1]
+  ErrorInfo error           = 9;
+  string message            = 10;
+  float elapsed_s           = 11;
+
+  oneof payload {
+    MeshSnapshot mesh_snapshot       = 20;
+    PathLayerPayload path_layer      = 21;
+    PathSegmentPayload path_segment  = 22;
+    StatusPayload status             = 23;
+  }
+}
+
+enum ControlCommand {
+  CONTROL_COMMAND_UNSPECIFIED = 0;
+  CONTROL_CANCEL_REQUEST      = 1;
+}
+
+enum ControlStatus {
+  CONTROL_STATUS_UNSPECIFIED = 0;
+  CONTROL_ACCEPTED           = 1;
+  CONTROL_DUPLICATE          = 2;
+  CONTROL_ALREADY_COMPLETED  = 3;
+  CONTROL_OPERATION_NOT_FOUND = 4;
+  CONTROL_ERROR              = 5;
+}
+
+message ControlRequest {
+  uint32 schema_version = 1;
+  ControlCommand command = 2;
+  string operation_id = 3;
+  string request_id = 4;
+  int64 timestamp_ms = 5;
+}
+
+message ControlResponse {
+  uint32 schema_version = 1;
+  ControlStatus status = 2;
+  string operation_id = 3;
+  string request_id = 4;
+  string message = 5;
+}
+
 message HealthCheckRequest {
   string client_version = 1;  // 客户端版本号
 }
@@ -267,4 +374,5 @@ message HealthCheckResponse {
   float  memory_usage_mb  = 3;  // 进程内存占用 (MB)
   int64  uptime_s         = 4;  // 服务运行时间 (s)
   int32  pending_requests = 5;  // 当前排队请求数
+  string protocol_version = 6;  // 通信协议版本（与 service_version 分离）
 }

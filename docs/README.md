@@ -31,6 +31,7 @@ docs/
 | 软件怎么用 | [用户手册/使用手册](用户手册/使用手册.md) |
 | 5 分钟上手 | [用户手册/快速开始](用户手册/快速开始.md) |
 | MATLAB 算法 | [MATLAB集成/算法说明](MATLAB集成/算法说明.md) |
+| Windows + MATLAB R2025b 验收 | [MATLAB集成/Windows 与 MATLAB R2025b 稳定性验收手册](MATLAB集成/Windows与MATLAB_R2025b稳定性验收手册.md) |
 | 通信协议 | [API/通信协议](API/通信协议.md) |
 | 接口字段 | [API/API接口](API/API接口.md) |
 | 软件架构 | [架构设计/软件架构](架构设计/软件架构.md) |

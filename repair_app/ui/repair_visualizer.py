@@ -83,7 +83,10 @@ def _triangulate_xy(pts: np.ndarray, max_pts: int = 3000) -> Optional[tuple]:
         return None
 
 
-def _parse_binary_stl_to_points(stl_bytes: bytes) -> Optional[np.ndarray]:
+def _parse_binary_stl_to_points(
+    stl_bytes: bytes,
+    max_triangles: int = 10000,
+) -> Optional[np.ndarray]:
     """解析二进制 STL bytes 为 N×3 点云数组（用于实时 mesh 刷新）。
 
     二进制 STL 结构：
@@ -98,19 +101,21 @@ def _parse_binary_stl_to_points(stl_bytes: bytes) -> Optional[np.ndarray]:
         n_tri = struct.unpack_from("<I", stl_bytes, 80)[0]
         if n_tri <= 0 or len(stl_bytes) < 84 + n_tri * 50:
             return None
-        # 每三角形 3 个顶点，每顶点 3 个 float
-        pts = np.empty((n_tri * 3, 3), dtype=np.float32)
-        offset = 84
-        for i in range(n_tri):
-            # 跳过 12 字节法向量，读取 9 个 float（3 顶点 × 3 坐标）
-            base = offset + i * 50 + 12
-            v1 = struct.unpack_from("<fff", stl_bytes, base)
-            v2 = struct.unpack_from("<fff", stl_bytes, base + 12)
-            v3 = struct.unpack_from("<fff", stl_bytes, base + 24)
-            pts[i * 3] = v1
-            pts[i * 3 + 1] = v2
-            pts[i * 3 + 2] = v3
-        return pts
+        record_dtype = np.dtype([
+            ("normal", "<f4", (3,)),
+            ("vertices", "<f4", (3, 3)),
+            ("attribute", "<u2"),
+        ])
+        records = np.frombuffer(
+            stl_bytes,
+            dtype=record_dtype,
+            count=n_tri,
+            offset=84,
+        )
+        if n_tri > max_triangles:
+            stride = int(np.ceil(n_tri / max_triangles))
+            records = records[::stride]
+        return np.asarray(records["vertices"], dtype=np.float32).reshape(-1, 3).copy()
     except Exception:
         return None
 
@@ -336,7 +341,9 @@ class RepairVisualizer(QWidget):
         if not mesh_bytes:
             return
         try:
-            pts = _parse_binary_stl_to_points(mesh_bytes)
+            # The full-resolution keyframe remains cached by MainWindow, while
+            # realtime rendering uses a bounded LOD to keep matplotlib smooth.
+            pts = _parse_binary_stl_to_points(mesh_bytes, max_triangles=3000)
             if pts is not None and len(pts) > 0:
                 self._partial_repair = pts
                 self._render()

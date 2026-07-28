@@ -429,18 +429,26 @@ class TestCase7DuplicateClick:
 
         assert result is False
 
-    def test_cancel_computation_resets_busy(self):
-        """取消计算后 busy 状态重置"""
-        from repair_app.ui.compute_controller import ComputeController
+    def test_cancel_computation_stays_busy_until_confirmed(self):
+        """取消请求发出后保持 busy，直到 MATLAB 确认终止。"""
+        from repair_app.ui.compute_controller import (
+            ComputeController,
+            OperationState,
+        )
 
         controller = ComputeController(project_root="/fake")
         controller._busy = True
+        controller._state = OperationState.RUNNING
+        controller._operation_id = "op-cancel-pending"
         controller._compute_thread = MagicMock()
         controller._compute_thread.isRunning.return_value = False
 
-        controller.cancel_computation()
+        with patch("repair_app.ui.compute_controller.threading.Thread") as thread:
+            controller.cancel_computation()
 
-        assert controller._busy is False
+        assert controller._busy is True
+        assert controller.state == OperationState.CANCELLING
+        thread.assert_called_once()
 
     def test_cleanup_resets_busy(self):
         """cleanup 后 busy 状态重置"""
@@ -554,18 +562,25 @@ class TestCase9TimeoutRetry:
     """timeout 后 Retry → 旧任务不和新任务并行"""
 
     def test_cancel_before_new_computation(self):
-        """先取消再发起新计算，确保不并行"""
-        from repair_app.ui.compute_controller import ComputeController
+        """取消未确认前拒绝新计算，确保旧任务不会与新任务并行。"""
+        from repair_app.ui.compute_controller import (
+            ComputeController,
+            OperationState,
+        )
 
         controller = ComputeController(project_root="/fake")
         controller._busy = True
+        controller._state = OperationState.RUNNING
+        controller._operation_id = "op-cancel-pending"
         controller._compute_thread = MagicMock()
         controller._compute_thread.isRunning.return_value = True
 
-        controller.cancel_computation()
+        with patch("repair_app.ui.compute_controller.threading.Thread"):
+            controller.cancel_computation()
 
-        # 取消后 busy 重置
-        assert controller._busy is False
+        assert controller._busy is True
+        assert controller.state == OperationState.CANCELLING
+        assert controller.execute_computation(b"next") is False
 
     def test_start_worker_cleans_previous_thread(self):
         """_start_worker 强制清理仍在运行的旧线程"""

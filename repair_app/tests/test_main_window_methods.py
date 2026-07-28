@@ -744,7 +744,7 @@ class TestProgressSlots:
         MainWindow._stop_progress_subscriber(stub)  # 不应抛
 
     def test_on_progress_received_caches_layer(self):
-        """_on_progress_received 缓存层数据并刷新可视化。"""
+        """进度槽缓存层数据；mesh 由限帧后的独立信号刷新。"""
         session = RepairSession()
         stub = _make_stub(
             _session=session,
@@ -765,7 +765,8 @@ class TestProgressSlots:
         assert 2 in session.layer.by_layer
         stub._layer_player.set_total_layers.assert_called_with(5)
         stub._visualizer.set_partial_waypoints.assert_called_with(waypoints)
-        stub._visualizer.set_partial_mesh.assert_called_with(b"meshbytes")
+        assert session.layer.by_layer[2]["mesh_bytes"] == b"meshbytes"
+        stub._visualizer.set_partial_mesh.assert_not_called()
 
     def test_on_progress_received_no_waypoints(self):
         """无航点时不刷新 visualizer.set_partial_waypoints。"""
@@ -791,7 +792,8 @@ class TestProgressSlots:
         stub = _make_stub(_session=session, _layer_player=MagicMock())
         MainWindow._on_layer_completed(stub, 2)
         stub._layer_player.set_total_layers.assert_called_with(3)
-        stub._layer_player.set_current_layer.assert_called_with(2)
+        # 实时协议层号从 1 开始，LayerPlayer UI 索引从 0 开始。
+        stub._layer_player.set_current_layer.assert_called_with(1)
 
     def test_on_layer_completed_empty_cache_uses_min_one(self):
         """空缓存时 total = max(1, 0) = 1。"""
@@ -1937,7 +1939,7 @@ class TestLogAndExplorer:
         def fake_startfile(path):
             called["path"] = path
 
-        monkeypatch.setattr(os, "startfile", fake_startfile)
+        monkeypatch.setattr(os, "startfile", fake_startfile, raising=False)
         monkeypatch.setattr(sys, "platform", "win32")
         mw = _make_main_window_new()
         mw._open_in_explorer("C:/exports")
@@ -1980,7 +1982,12 @@ class TestLogAndExplorer:
 
     def test_open_in_explorer_exception_falls_back_to_toast(self, monkeypatch):
         """异常时通过 Toast.info 提示。"""
-        monkeypatch.setattr(os, "startfile", lambda p: (_ for _ in ()).throw(OSError("no")))
+        monkeypatch.setattr(
+            os,
+            "startfile",
+            lambda p: (_ for _ in ()).throw(OSError("no")),
+            raising=False,
+        )
         monkeypatch.setattr(sys, "platform", "win32")
         import repair_app.ui.toast as toast_mod
         info_called = []

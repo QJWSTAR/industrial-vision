@@ -41,6 +41,7 @@ class ApplicationShutdownController:
         autosave_fn: Optional[Callable[[], None]] = None,
         autosave_timer: Any = None,
         worker_threads: Optional[List[Any]] = None,
+        compute_controller: Any = None,
         progress_subscriber: Any = None,
         zmq_client: Any = None,
         visualizer: Any = None,
@@ -48,6 +49,7 @@ class ApplicationShutdownController:
         self._autosave_fn = autosave_fn
         self._autosave_timer = autosave_timer
         self._worker_threads = worker_threads or []
+        self._compute_controller = compute_controller
         self._progress_subscriber = progress_subscriber
         self._zmq_client = zmq_client
         self._visualizer = visualizer
@@ -58,6 +60,7 @@ class ApplicationShutdownController:
         """按标准顺序执行关闭流程。每步独立容错，不因某步异常而中断。"""
         self._step_autosave()
         self._step_stop_timer()
+        self._step_stop_compute_controller()
         self._step_stop_worker_threads()
         self._step_stop_progress_subscriber()
         self._step_stop_lifecycle()
@@ -96,6 +99,14 @@ class ApplicationShutdownController:
                 if not thread.wait(self.THREAD_WAIT_MS):
                     thread.terminate()
                     thread.wait(self.THREAD_TERMINATE_WAIT_MS)
+            except Exception:
+                pass
+
+    def _step_stop_compute_controller(self) -> None:
+        """Stop the owner of the MATLAB worker and realtime subscriber."""
+        if self._compute_controller is not None:
+            try:
+                self._compute_controller.cleanup()
             except Exception:
                 pass
 

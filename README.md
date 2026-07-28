@@ -187,6 +187,7 @@ bandit -r repair_app/ -x repair_app/tests/ -ll
 | MATLAB 集成 | [Bridge 稳定性审计](docs/MATLAB集成/Bridge稳定性审计.md) | 架构师 |
 | MATLAB 集成 | [算法集成报告](docs/MATLAB集成/算法集成报告.md) | 架构师 |
 | MATLAB 集成 | [算法验证体系](docs/MATLAB集成/算法验证体系.md) | QA、算法工程师 |
+| MATLAB 集成 | [Windows + MATLAB R2025b 稳定性验收](docs/MATLAB集成/Windows与MATLAB_R2025b稳定性验收手册.md) | QA、发布工程师 |
 | 架构设计 | [软件架构](docs/架构设计/软件架构.md) | 架构师 |
 | 架构设计 | [UX 重设计报告](docs/架构设计/UX重设计报告.md) | 产品、设计 |
 | 架构设计 | [Windows 界面优化](docs/架构设计/Windows界面优化.md) | 前端开发 |
