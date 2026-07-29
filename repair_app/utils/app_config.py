@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from pathlib import Path
@@ -50,6 +51,7 @@ except ImportError:  # pragma: no cover - 开发环境回退
 
 CONFIG_FILENAME = "app_config.json"
 ENV_VAR = "CSAM_DEVELOPER_MODE"
+_LOGGER = logging.getLogger(__name__)
 
 # 真值集合：环境变量 / JSON 中这些值被视为 True
 _TRUE_VALUES = {"true", "1", "yes", "on"}
@@ -115,7 +117,11 @@ class _AppConfig:
                         data = json.load(f)
                     if isinstance(data, dict):
                         return data
-            except (json.JSONDecodeError, OSError):
+                    _LOGGER.warning(
+                        "Ignoring app config %s because its root is not an object", p
+                    )
+            except (json.JSONDecodeError, OSError) as exc:
+                _LOGGER.warning("Unable to read app config %s: %s", path, exc)
                 continue
         return {}
 

@@ -271,6 +271,17 @@ class ComputeController(QObject):
         if self._session.point_cloud.xyz is None:
             logger.warning("ComputeController: 点云数据为空")
             return False
+        xyz = np.asarray(self._session.point_cloud.xyz)
+        if (
+            xyz.ndim != 2
+            or xyz.shape[1] != 3
+            or len(xyz) == 0
+            or not np.all(np.isfinite(xyz))
+        ):
+            logger.warning(
+                "ComputeController: 点云形状无效或包含 NaN/Inf: %s", xyz.shape
+            )
+            return False
 
         # 4. 获取选区掩码
         if repair_mode == mode_repairing:
@@ -283,6 +294,15 @@ class ComputeController(QObject):
                 )
                 return False
             sel_mask = self._selector.get_selection_mask()
+            sel_mask = np.asarray(sel_mask)
+            if sel_mask.ndim != 1 or len(sel_mask) != len(xyz):
+                logger.warning(
+                    "ComputeController: 选区掩码形状不匹配: %s, expected (%d,)",
+                    sel_mask.shape,
+                    len(xyz),
+                )
+                return False
+            sel_mask = sel_mask.astype(bool, copy=False)
             if not np.any(sel_mask):
                 logger.warning("ComputeController: 未选取缺陷区域")
                 return False
@@ -342,7 +362,16 @@ class ComputeController(QObject):
         self.matlab_startup_done.emit()
 
         # 9. 创建 Worker 和线程
-        self._start_worker(request_bytes)
+        try:
+            self._start_worker(request_bytes)
+        except Exception as exc:
+            self._transition(OperationState.FAILED)
+            self._emit_failure_once(
+                ErrorCode.UNKNOWN.value,
+                "无法启动 MATLAB 计算线程",
+                str(exc),
+            )
+            return False
         self._transition(OperationState.RUNNING)
         self._liveness_timer.start()
 
@@ -411,7 +440,16 @@ class ComputeController(QObject):
             self._matlab_service = matlab_service
 
         self._begin_operation()
-        self._start_worker(request_bytes)
+        try:
+            self._start_worker(request_bytes)
+        except Exception as exc:
+            self._transition(OperationState.FAILED)
+            self._emit_failure_once(
+                ErrorCode.UNKNOWN.value,
+                "无法启动 MATLAB 计算线程",
+                str(exc),
+            )
+            return False
         self._transition(OperationState.RUNNING)
         self._liveness_timer.start()
         return True
@@ -463,27 +501,73 @@ class ComputeController(QObject):
             daemon=True,
         ).start()
 
-    def cleanup(self) -> None:
-        """Application shutdown cleanup."""
+    def cleanup(self) -> bool:
+        """Application shutdown cleanup.
+
+        Returns ``False`` only when the computation QThread could not be
+        stopped safely.  In that case its references are deliberately retained
+        instead of destroying a live QThread.
+        """
         logger.info("ComputeController: 清理资源")
         self._liveness_timer.stop()
         self._cancel_completion_timer.stop()
         if self._busy:
             self.cancel_computation()
+        # ``cancel_computation`` arms this timer for normal runtime recovery;
+        # application shutdown owns its own bounded wait below.
+        self._cancel_completion_timer.stop()
         if self._matlab_service is not None:
             try:
                 self._matlab_service.abort_active_request()
             except Exception:
                 pass
-        if self._compute_thread is not None and self._compute_thread.isRunning():
-            self._compute_thread.requestInterruption()
-            self._compute_thread.quit()
-            self._compute_thread.wait(5000)
-        self._cleanup_worker()
-        self._progress_subscriber.stop()
+        thread = self._compute_thread
+        compute_stopped = True
+        try:
+            thread_running = thread is not None and thread.isRunning()
+        except RuntimeError:
+            thread_running = False
+        if thread_running:
+            thread.requestInterruption()
+            thread.quit()
+            compute_stopped = thread.wait(5000)
+            if not compute_stopped:
+                # The cooperative request has already been sent and the
+                # client-side ZMQ wait aborted.  As an application-shutdown
+                # fallback, terminate only a MATLAB worker launched by this
+                # application, then give the request thread one final chance
+                # to unwind.  Reused/manual MATLAB sessions are never killed.
+                try:
+                    from repair_app.bridge.lifecycle_manager import (
+                        MatlabLifecycleManager,
+                    )
+
+                    MatlabLifecycleManager.get_instance().terminate_owned_worker(
+                        "application shutdown timed out"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "关闭期间无法终止应用拥有的 MATLAB Worker: %s",
+                        exc,
+                    )
+                if self._matlab_service is not None:
+                    try:
+                        self._matlab_service.abort_active_request()
+                    except Exception:
+                        pass
+                compute_stopped = thread.wait(5000)
+
+        if compute_stopped:
+            self._cleanup_worker(thread)
+        else:
+            logger.critical(
+                "ComputeController 线程未安全退出；保留 QObject 引用以避免销毁运行中的 QThread"
+            )
+        subscriber_stopped = self._progress_subscriber.stop()
         self._busy = False
         with self._state_lock:
             self._state = OperationState.IDLE
+        return compute_stopped and subscriber_stopped
 
     @Slot(str)
     def _on_heartbeat(self, operation_id: str) -> None:
@@ -496,6 +580,9 @@ class ComputeController(QObject):
     @Slot()
     def _check_liveness(self) -> None:
         if self.state not in {OperationState.RUNNING, OperationState.CANCELLING}:
+            return
+        if self._last_heartbeat_monotonic <= 0:
+            self._last_heartbeat_monotonic = time.monotonic()
             return
         silence_s = time.monotonic() - self._last_heartbeat_monotonic
         if silence_s <= self._heartbeat_timeout_s:
@@ -658,14 +745,48 @@ class ComputeController(QObject):
             raise ValueError("params_collector 未设置，无法构建请求参数")
 
         params = self._params_collector()
-        request_xyz = self._session.point_cloud.xyz[sel_mask]
+        if not isinstance(params, dict):
+            raise ValueError("params_collector 必须返回 dict")
+        if self._session is None or self._session.point_cloud.xyz is None:
+            raise ValueError("session 点云未初始化")
+        xyz = np.asarray(self._session.point_cloud.xyz)
+        if (
+            xyz.ndim != 2
+            or xyz.shape[1] != 3
+            or len(xyz) == 0
+            or not np.all(np.isfinite(xyz))
+        ):
+            raise ValueError(f"点云必须为有限的 (N, 3) 数组，当前为 {xyz.shape}")
+        sel_mask = np.asarray(sel_mask)
+        if sel_mask.ndim != 1 or len(sel_mask) != len(xyz):
+            raise ValueError(
+                f"选区掩码必须为 ({len(xyz)},)，当前为 {sel_mask.shape}"
+            )
+        sel_mask = sel_mask.astype(bool, copy=False)
+        if not np.any(sel_mask):
+            raise ValueError("选区为空，无法构建 MATLAB 请求")
+
+        request_xyz = xyz[sel_mask]
+        normals = self._session.point_cloud.normals
+        if normals is not None:
+            normals = np.asarray(normals)
+            if normals.shape != xyz.shape or not np.all(np.isfinite(normals)):
+                raise ValueError(
+                    f"法向量必须为有限的 {xyz.shape} 数组，当前为 {normals.shape}"
+                )
         request_normals = (
-            self._session.point_cloud.normals[sel_mask]
-            if self._session.point_cloud.normals is not None
+            normals[sel_mask]
+            if normals is not None
             else _Coord.estimate_normals(request_xyz, k=30)
         )
 
-        material = params.get("material", "")
+        material = str(params.get("material", "")).strip()
+        if material not in _Coord().proto_material_map:
+            logger.warning(
+                "ComputeController: 未知材料键 %r，回退到 MATERIAL_UNSPECIFIED",
+                material,
+            )
+            material = "MATERIAL_UNSPECIFIED"
         scan_id = f"SCAN-{getattr(self._session, 'latest_seed', 0):04d}"
 
         request = _Coord.build_repair_request(
@@ -703,11 +824,20 @@ class ComputeController(QObject):
     def _start_worker(self, request_bytes: bytes) -> None:
         """创建并启动 ComputePipelineWorker。"""
         # 防御性检查：确保前一个计算线程已完成
-        if self._compute_thread is not None and self._compute_thread.isRunning():
+        previous_thread = self._compute_thread
+        try:
+            previous_running = (
+                previous_thread is not None and previous_thread.isRunning()
+            )
+        except RuntimeError:
+            previous_running = False
+        if previous_running:
             logger.warning("ComputeController: 上一次计算线程仍在运行，强制清理")
-            self._compute_thread.requestInterruption()
-            self._compute_thread.quit()
-            self._compute_thread.wait(5000)
+            previous_thread.requestInterruption()
+            previous_thread.quit()
+            if not previous_thread.wait(5000):
+                raise RuntimeError("上一次 MATLAB 计算线程未能安全退出")
+        self._cleanup_worker(previous_thread)
 
         matlab_service = self._matlab_service
         self._compute_thread = QThread(self)
@@ -736,8 +866,13 @@ class ComputeController(QObject):
             "ComputeController: Worker 已启动 (operation_id=%s)", self._operation_id
         )
 
-    def _cleanup_worker(self) -> None:
+    def _cleanup_worker(self, expected_thread: Optional[QThread] = None) -> None:
         """清理 Worker 和线程引用。"""
+        if (
+            expected_thread is not None
+            and self._compute_thread is not expected_thread
+        ):
+            return
         self._compute_thread = None
         self._compute_worker = None
 
@@ -749,6 +884,19 @@ class ComputeController(QObject):
 
     def _on_worker_result(self, result: dict) -> None:
         """Worker 计算成功 → 转发给 MainWindow。"""
+        if not isinstance(result, dict):
+            if self.state in {
+                OperationState.STARTING,
+                OperationState.RUNNING,
+                OperationState.CANCELLING,
+            }:
+                self._transition(OperationState.FAILED)
+            self._emit_failure_once(
+                ErrorCode.UNKNOWN.value,
+                "MATLAB 返回了无法识别的结果格式",
+                f"Expected dict, got {type(result).__name__}",
+            )
+            return
         status_name = str(result.get("status_name", ""))
         if (
             status_name == "ERR_CANCELLED"
@@ -804,7 +952,10 @@ class ComputeController(QObject):
 
     def _on_thread_finished(self) -> None:
         """计算线程结束 → 清理引用。"""
-        self._cleanup_worker()
+        sender = self.sender()
+        self._cleanup_worker(
+            sender if isinstance(sender, QThread) else None
+        )
 
     # ---- 内部：进度订阅器管理 ----
 

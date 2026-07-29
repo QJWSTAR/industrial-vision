@@ -151,6 +151,14 @@ class Toast(QWidget):
             self._reposition_others()
         self._fade_out.start()
 
+    def closeEvent(self, event) -> None:
+        """Remove externally closed toasts from the class-level stack."""
+        self._timer.stop()
+        if self in Toast._active_toasts:
+            Toast._active_toasts.remove(self)
+            self._reposition_others()
+        super().closeEvent(event)
+
     def _reposition_others(self) -> None:
         """重新排列剩余的 Toast（向上移动）。"""
         if self._parent is None:

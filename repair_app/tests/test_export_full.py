@@ -749,14 +749,13 @@ class TestRobotExporterNormals:
         # X 方向法向量 → B=90 (arccos(0))
         assert "B 90.0" in result
 
-    def test_normals_shorter_than_waypoints(self):
-        """normals 长度不足时缺失部分使用默认姿态。"""
+    def test_normals_shorter_than_waypoints_rejected(self):
+        """normals 长度不足时拒绝生成不完整姿态轨迹。"""
         exporter = RobotExporter(robot_type=RobotType.KUKA)
         waypoints = np.array([[0, 0, 1], [100, 0, 1]], dtype=np.float32)
         normals = np.array([[0, 0, 1]], dtype=np.float32)  # 仅 1 个
-        result = exporter.export(waypoints, normals=normals)
-        # 不抛异常即通过
-        assert "DEF" in result
+        with pytest.raises(ValueError, match="normals must have shape"):
+            exporter.export(waypoints, normals=normals)
 
 
 @pytest.mark.export

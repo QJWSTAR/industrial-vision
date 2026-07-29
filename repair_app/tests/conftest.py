@@ -22,13 +22,14 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 
 # 确保项目根目录在 sys.path
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
@@ -55,6 +56,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "stress: 压力测试 — 大数据量/极端参数",
         "mock: Mock 测试 — MATLAB Mock / License Mock",
         "slow: 慢测试 — 运行时间 >2s",
+        "real_qtimer: 使用真实 QTimer.singleShot 事件循环，不启用泄漏防护",
     ]
     for marker in markers:
         config.addinivalue_line("markers", marker)
@@ -109,12 +111,15 @@ def _disable_loguru_console_sink():
 # 修复：在测试中将 QTimer.singleShot 替换为空操作，阻止延迟回调注册。
 # _check_recovery 等方法由各自的专项测试（test_crash_recovery.py）直接验证。
 # ============================================================
-@pytest.fixture(autouse=True, scope="session")
-def _disable_qtimer_singleshot():
-    """测试中禁用 QTimer.singleShot，防止延迟回调泄漏到后续测试。"""
+@pytest.fixture(autouse=True)
+def _guard_qtimer_singleshot(request, monkeypatch):
+    """Disable leaking callbacks per test, with an explicit real-timer opt-out."""
+    if request.node.get_closest_marker("real_qtimer") is not None:
+        yield
+        return
     try:
         from PySide6.QtCore import QTimer
-        QTimer.singleShot = lambda *args, **kwargs: None
+        monkeypatch.setattr(QTimer, "singleShot", lambda *args, **kwargs: None)
     except ImportError:
         pass
     yield

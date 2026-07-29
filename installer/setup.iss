@@ -16,6 +16,16 @@
 #define MyAppExeName "CSAM_Repair.exe"
 #define MyAppDescription "冷喷涂缺陷修复软件"
 
+; 生产公钥可放在仓库外，通过环境变量注入。与 repair_app.spec 使用
+; 同一个 CSAM_PUBLIC_KEY_PATH，确保 EXE 与安装目录内公钥一致。
+#define PublicKeySource GetEnv("CSAM_PUBLIC_KEY_PATH")
+#if PublicKeySource == ""
+  #define PublicKeySource "..\config\public_key.pem"
+#endif
+#if !FileExists(PublicKeySource)
+  #error "License public key not found. Set CSAM_PUBLIC_KEY_PATH to the reviewed public_key.pem."
+#endif
+
 [Setup]
 ; 基础信息
 AppId={{B8F4A3D2-7E1C-4A5B-9D6F-1C8E3A7B2D5F}
@@ -84,7 +94,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 Source: "..\dist\CSAM_Repair.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: main
 
 ; 配置文件（公钥 — 安全关键，必须打包）
-Source: "..\config\public_key.pem"; DestDir: "{app}\config"; Flags: ignoreversion; Components: config
+Source: "{#PublicKeySource}"; DestDir: "{app}\config"; DestName: "public_key.pem"; Flags: ignoreversion; Components: config
 
 ; 配置文件（开发模式默认配置）
 Source: "..\config\app_config.json"; DestDir: "{app}\config"; Flags: ignoreversion; Components: config
@@ -93,9 +103,6 @@ Source: "..\config\app_config.json"; DestDir: "{app}\config"; Flags: ignoreversi
 Source: "..\matlab_bridge_server.m"; DestDir: "{app}"; Flags: ignoreversion; Components: main
 Source: "..\path_planning\*"; DestDir: "{app}\path_planning"; Flags: ignoreversion recursesubdirs; Components: main
 Source: "..\profile_prediction\*"; DestDir: "{app}\profile_prediction"; Flags: ignoreversion recursesubdirs; Components: main
-
-; 分发版配置文件（空目录，运行时由程序自动填充）
-Source: "..\dist\config\public_key.pem"; DestDir: "{app}\config"; Flags: ignoreversion; Components: config
 
 ; 法律文件
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion; Components: main
@@ -125,32 +132,46 @@ Type: filesandordirs; Name: "{app}\cache"
 // ============================================================
 var
   MatlabDetectedPage: TOutputMsgWizardPage;
+  DetectedMatlabRelease: String;
+
+function TryMatlabRelease(const VersionKey, ReleaseName: String): Boolean;
+var
+  MatlabRoot: String;
+begin
+  Result :=
+    RegQueryStringValue(
+      HKLM64, 'SOFTWARE\MathWorks\MATLAB\' + VersionKey,
+      'MATLABROOT', MatlabRoot
+    );
+  if Result then
+    DetectedMatlabRelease := ReleaseName;
+end;
 
 function IsMatlabInstalled: Boolean;
-var
-  Version: String;
 begin
-  Result := False;
-  // 检查 MATLAB R2023b 及以上版本
-  if RegQueryStringValue(HKLM, 'SOFTWARE\MathWorks\MATLAB\9.15', 'MATLABROOT', Version) then
+  DetectedMatlabRelease := '';
+  // MATLAB 从 R2024b 起使用 24.x/25.x 版本键；同时兼容发行名键。
+  if TryMatlabRelease('25.2', 'R2025b') then
     Result := True
-  else if RegQueryStringValue(HKLM, 'SOFTWARE\MathWorks\MATLAB\9.14', 'MATLABROOT', Version) then
+  else if TryMatlabRelease('R2025b', 'R2025b') then
     Result := True
-  else if RegQueryStringValue(HKLM, 'SOFTWARE\MathWorks\MATLAB\9.13', 'MATLABROOT', Version) then
-    Result := True;
+  else if TryMatlabRelease('25.1', 'R2025a') then
+    Result := True
+  else if TryMatlabRelease('R2025a', 'R2025a') then
+    Result := True
+  else if TryMatlabRelease('24.2', 'R2024b') then
+    Result := True
+  else if TryMatlabRelease('R2024b', 'R2024b') then
+    Result := True
+  else if TryMatlabRelease('9.16', 'R2024a') then
+    Result := True
+  else
+    Result := TryMatlabRelease('9.15', 'R2023b');
 end;
 
 function GetMatlabVersion: String;
-var
-  Version: String;
 begin
-  Result := '';
-  if RegQueryStringValue(HKLM, 'SOFTWARE\MathWorks\MATLAB\9.15', 'MATLABROOT', Version) then
-    Result := 'R2025b'
-  else if RegQueryStringValue(HKLM, 'SOFTWARE\MathWorks\MATLAB\9.14', 'MATLABROOT', Version) then
-    Result := 'R2025a'
-  else if RegQueryStringValue(HKLM, 'SOFTWARE\MathWorks\MATLAB\9.13', 'MATLABROOT', Version) then
-    Result := 'R2024b';
+  Result := DetectedMatlabRelease;
 end;
 
 // 显示 MATLAB 检测结果

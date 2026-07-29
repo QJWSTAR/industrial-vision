@@ -15,7 +15,7 @@ DO NOT call MainWindow() directly —— __init__ 会启动 QTimer.singleShot
   3. 模块级函数（_friendly_error / _show_error）
      直接调用，无需任何实例。
 
-conftest.py 已在 session 级别禁用 QTimer.singleShot（替换为 no-op），
+conftest.py 默认按单个测试禁用 QTimer.singleShot（替换为 no-op），
 并移除 loguru stderr sink 避免多线程日志死锁。
 
 运行：python -m pytest repair_app/tests/test_main_window_methods.py -v --timeout=60
@@ -28,7 +28,6 @@ import sys
 # ---- 环境变量（必须在导入 PySide6 之前设置） ----
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("CSAM_ALGORITHM_ENGINE", "python")
-os.environ.setdefault("CSAM_DEVELOPER_MODE", "1")  # 跳过 License 校验
 
 # ---- 项目根路径注入 ----
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -3431,7 +3430,8 @@ class TestCollectAndApply:
         mw._sp_max_layers = MagicMock()
         mw._sp_max_layers.value.return_value = 5
         result = mw._collect_params()
-        assert "material" in result
+        assert result["material"] == "STEEL_316L"
+        assert result["material_name"] == "316L 不锈钢"
         assert "particle_velocity_ms" in result
         assert "layer_height_mm" in result
         mw.deleteLater()

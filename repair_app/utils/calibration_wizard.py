@@ -9,7 +9,8 @@ import os
 import json
 import time
 from typing import Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
+from pathlib import Path
 
 import numpy as np
 
@@ -166,8 +167,8 @@ class CalibrationWizard:
         """获取标定数据库路径，兼容打包环境和开发环境。"""
         if get_config_dir is not None:
             return str(get_config_dir() / CALIBRATION_DB)
-        # 回退：使用 __file__ 所在目录的 config/ 子目录
-        return os.path.join(os.path.dirname(__file__), "config", CALIBRATION_DB)
+        # 回退：repair_app/utils -> repository root/config
+        return str(Path(__file__).resolve().parents[2] / "config" / CALIBRATION_DB)
 
     def _load(self) -> None:
         path = self._get_db_path()
@@ -176,8 +177,12 @@ class CalibrationWizard:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            allowed_fields = {item.name for item in fields(CalibrationRecord)}
             for item in data.get("records", []):
-                self._records.append(CalibrationRecord(**item))
+                if not isinstance(item, dict):
+                    continue
+                filtered = {k: v for k, v in item.items() if k in allowed_fields}
+                self._records.append(CalibrationRecord(**filtered))
         except Exception as e:
             logger.warning(f"加载标定数据库失败: {e}")
 

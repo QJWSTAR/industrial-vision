@@ -74,6 +74,7 @@ class ProcessParams:
     obstacle_resolution_mm: float = 2.0
     num_layers: int = 5
     depth_compensation: float = 1.0
+    max_morphology_layers: int = 5
 
     # Cold spray
     particle_velocity_ms: float = 500.0
@@ -86,6 +87,7 @@ class ProcessParams:
     gas_temperature_c: float = 800.0
     gas_pressure_bar: float = 40.0
     powder_feed_rate_gmin: float = 30.0
+    preheat_temp_c: float = 200.0
 
     # Material
     material_name: str = "316L 不锈钢"

@@ -8,52 +8,55 @@ echo ============================================
 echo.
 
 REM 1. 检查 Python
-echo [1/5] 检查 Python 环境...
+echo [1/6] 检查 Python 环境...
 python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [错误] 未找到 Python，请先安装 Python 3.11+
+if errorlevel 1 (
+    echo [错误] 未找到 Python，请先安装 Python 3.10-3.12
     echo 下载: https://www.python.org/downloads/
     pause
     exit /b 1
 )
 python --version
-echo.
-
-REM 2. 升级 pip 并安装依赖
-echo [2/5] 安装依赖包（可能需要 5-10 分钟）...
-python -m pip install --upgrade pip -q
-python -m pip install -r requirements.txt
-python -m pip install pyinstaller
-if %errorlevel% neq 0 (
-    echo [错误] 依赖安装失败，请检查网络或 requirements.txt
+python -c "import sys; raise SystemExit(0 if (3, 10) ^<= sys.version_info[:2] ^< (3, 13) else 1)"
+if errorlevel 1 (
+    echo [错误] 仅支持 Python 3.10-3.12。
     pause
     exit /b 1
 )
 echo.
 
+REM 2. 升级 pip 并安装依赖
+echo [2/6] 安装依赖包（可能需要 5-10 分钟）...
+python -m pip install --upgrade pip -q
+if errorlevel 1 goto :dependency_error
+python -m pip install -r requirements.txt
+if errorlevel 1 goto :dependency_error
+python -m pip install pyinstaller
+if errorlevel 1 goto :dependency_error
+echo.
+
 REM 3. 验证关键模块
-echo [3/5] 验证关键模块...
+echo [3/6] 验证关键模块...
 python -c "import PySide6, zmq, google.protobuf, numpy, matplotlib, reportlab, cryptography; print('核心模块全部可用')"
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo [错误] 模块导入失败！
     pause
     exit /b 1
 )
 echo.
 
-REM 4. 生成 License 密钥对（如不存在）
-echo [4/6] 检查 License 密钥对...
-if not exist "config\public_key.pem" (
-    echo 正在生成 RSA 密钥对...
-    python -m repair_app.utils.license_manager keygen
-    if %errorlevel% neq 0 (
-        echo [错误] 密钥对生成失败！
-        pause
-        exit /b 1
-    )
-) else (
-    echo 密钥对已存在，跳过生成。
+REM 4. 验证发布 License 公钥（生产构建绝不自动生成密钥）
+echo [4/6] 检查 License 公钥...
+if "%CSAM_PUBLIC_KEY_PATH%"=="" set "CSAM_PUBLIC_KEY_PATH=%CD%\config\public_key.pem"
+for %%I in ("%CSAM_PUBLIC_KEY_PATH%") do set "CSAM_PUBLIC_KEY_PATH=%%~fI"
+if not exist "%CSAM_PUBLIC_KEY_PATH%" (
+    echo [错误] 未找到发布公钥: %CSAM_PUBLIC_KEY_PATH%
+    echo 请设置 CSAM_PUBLIC_KEY_PATH 指向已审核的 public_key.pem。
+    echo 为避免发布密钥不一致，本脚本不会自动生成生产密钥。
+    pause
+    exit /b 1
 )
+echo 使用发布公钥: %CSAM_PUBLIC_KEY_PATH%
 echo.
 
 REM 5. 清理旧构建
@@ -66,7 +69,7 @@ REM 6. 运行 PyInstaller
 echo [6/6] 开始打包（可能需要 3-10 分钟）...
 echo.
 python -m PyInstaller --clean repair_app.spec
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo.
     echo [错误] 打包失败！请检查上面的错误信息。
     echo.
@@ -95,3 +98,9 @@ echo - ZMQ 联调需要 MATLAB 环境（或 MCR）在后台运行
 echo - 首次启动可能较慢（解压临时文件）
 echo - matplotlib 3D 渲染在虚拟机中可能不支持 GPU 加速
 pause
+exit /b 0
+
+:dependency_error
+echo [错误] 依赖安装失败，请检查网络或 requirements.txt
+pause
+exit /b 1

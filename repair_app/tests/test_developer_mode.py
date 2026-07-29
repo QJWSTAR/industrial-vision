@@ -33,22 +33,21 @@ class TestAppConfig:
     """AppConfig 配置加载与优先级测试。"""
 
     def test_default_is_developer_mode_from_project_config(self):
-        """项目 config/app_config.json 默认 developer_mode=true（开发阶段）。
+        """项目 config/app_config.json 默认 developer_mode=false（安全默认）。
 
         本测试验证 AppConfig 能正确读取项目配置文件。
         """
         from repair_app.utils.app_config import AppConfig
         AppConfig.reload()
-        # 项目 config/app_config.json 设置 developer_mode=true
-        assert AppConfig.is_developer_mode() is True
+        assert AppConfig.is_developer_mode() is False
 
     def test_env_var_overrides_json(self, monkeypatch):
         """环境变量 CSAM_DEVELOPER_MODE 优先级高于 JSON 文件。"""
         from repair_app.utils.app_config import AppConfig
-        # JSON 中 developer_mode=true，环境变量设为 false
-        monkeypatch.setenv("CSAM_DEVELOPER_MODE", "false")
+        # JSON 中 developer_mode=false，环境变量设为 true
+        monkeypatch.setenv("CSAM_DEVELOPER_MODE", "true")
         AppConfig.reload()
-        assert AppConfig.is_developer_mode() is False
+        assert AppConfig.is_developer_mode() is True
 
     def test_env_var_true_values(self, monkeypatch):
         """环境变量接受 true/1/yes/on。"""
@@ -71,8 +70,7 @@ class TestAppConfig:
         from repair_app.utils.app_config import AppConfig
         monkeypatch.setenv("CSAM_DEVELOPER_MODE", "")
         AppConfig.reload()
-        # JSON 中 developer_mode=true
-        assert AppConfig.is_developer_mode() is True
+        assert AppConfig.is_developer_mode() is False
 
     def test_override_context_manager(self):
         """override() 上下文管理器临时覆盖状态。"""

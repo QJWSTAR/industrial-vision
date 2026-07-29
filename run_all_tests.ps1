@@ -54,10 +54,16 @@ if (-not $SkipInstall) {
     Write-Host ""
     Write-Host "[0/4] Installing dev dependencies..." -ForegroundColor Yellow
     python -m pip install --upgrade pip -q
-    pip install -e ".[dev]" -q
+    python -m pip install -e ".[dev]" -q
     if ($LASTEXITCODE -ne 0) {
         Write-Host "WARN: dependency install failed, continuing with existing env" -ForegroundColor Yellow
     }
+}
+
+python -m pytest --version
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: pytest is unavailable; run python -m pip install -e .[dev]" -ForegroundColor Red
+    exit 1
 }
 
 $env:QT_QPA_PLATFORM = "offscreen"
@@ -83,7 +89,7 @@ foreach ($layer in $Layers) {
     Write-Host "  --- $layer ---" -ForegroundColor Cyan
     $layerStart = Get-Date
 
-    & pytest -m $layer --tb=short -q --no-header `
+    & python -m pytest -m $layer --tb=short -q --no-header `
         -p no:cacheprovider `
         --junitxml="test_result_$layer.xml" `
         $TestPaths 2>&1
@@ -109,13 +115,12 @@ if (-not $NoCoverage) {
         "--cov-report=term-missing",
         "--cov-report=xml:coverage.xml",
         "--cov-report=html:htmlcov",
-        "--cov-branch",
-        "--cov-fail-under=0"
+        "--cov-branch"
     )
 }
 
 $fullStart = Get-Date
-& pytest --tb=short -q --no-header `
+& python -m pytest --tb=short -q --no-header `
     -p no:cacheprovider `
     --junitxml=test_result_full.xml `
     @covArgs $TestPaths 2>&1
@@ -188,6 +193,14 @@ if ($fullExit -ne 0) {
     Write-Host "Note: some tests failed. See TEST_REPORT.md section 4." -ForegroundColor Yellow
 }
 
-# Don't propagate pytest's non-zero exit (e.g. coverage threshold) as script failure
-# The report is still generated successfully
+$layerFailed = $false
+foreach ($entry in $LayerResults.GetEnumerator()) {
+    if ($entry.Value.exit -ne 0) {
+        $layerFailed = $true
+        break
+    }
+}
+if ($fullExit -ne 0 -or $layerFailed) {
+    exit 1
+}
 exit 0

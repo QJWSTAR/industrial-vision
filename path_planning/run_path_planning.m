@@ -53,6 +53,7 @@ function [pointlist_out, feed_rates_out, layer_indices_out, meta_out] = ...
         'traversing_speed_mms', 500.0, ...
         'request_id', '');
     params = complete_struct(params, defaults);
+    validate_params(params);
 
     % ---- 1. 读取 STL ----
     assert_not_cancelled(params.request_id, 'before STL loading');
@@ -63,7 +64,7 @@ function [pointlist_out, feed_rates_out, layer_indices_out, meta_out] = ...
 
     % ---- 2. 模型预处理 ----
     assert_not_cancelled(params.request_id, 'before model preprocessing');
-    [all_triangles, additive_cluster, repairing_clusters, ...
+    [~, additive_cluster, repairing_clusters, ...
      x_min, x_max, y_min, y_max] = ...
         model_process(triangles, 1.0, 1e-8, params.base_plane);
 
@@ -122,6 +123,38 @@ function s = complete_struct(s, defaults)
     end
 end
 
+function validate_params(params)
+% Validate values before entering geometry loops so failures are actionable.
+    finite_scalars = {'base_plane', 'scanning_angle', 'tilt_angle'};
+    positive_scalars = {'layer_height', 'scanning_step', 'edge_step_size', ...
+        'resolution', 'traversing_speed_mms'};
+    nonnegative_scalars = {'buffer_additive', 'buffer_repairing', ...
+        'link_path_free_dist'};
+
+    for idx = 1:numel(finite_scalars)
+        name = finite_scalars{idx};
+        value = params.(name);
+        if ~isnumeric(value) || ~isscalar(value) || ~isfinite(value)
+            error('CSAM:InvalidParameter', '%s must be a finite numeric scalar.', name);
+        end
+    end
+    for idx = 1:numel(positive_scalars)
+        name = positive_scalars{idx};
+        value = params.(name);
+        if ~isnumeric(value) || ~isscalar(value) || ~isfinite(value) || value <= 0
+            error('CSAM:InvalidParameter', '%s must be a positive finite scalar.', name);
+        end
+    end
+    for idx = 1:numel(nonnegative_scalars)
+        name = nonnegative_scalars{idx};
+        value = params.(name);
+        if ~isnumeric(value) || ~isscalar(value) || ~isfinite(value) || value < 0
+            error('CSAM:InvalidParameter', ...
+                '%s must be a non-negative finite scalar.', name);
+        end
+    end
+end
+
 function feed_rates = velocity_to_numeric(velocitylist, default_speed)
 % 将 ABB 速度字符串转为数值 (mm/s)
 %   "velocity_infill" -> default_speed
@@ -152,6 +185,13 @@ end
 function layer_indices = derive_layer_indices(pointlist, rep_layerlist, add_layerlist, base_plane)
 % 由 pointlist 的 Z 值反推层号
 % repairing 层在 base_plane 以下，additive 层在 base_plane 以上
+    if isempty(pointlist)
+        layer_indices = zeros(0, 1);
+        return;
+    end
+    if size(pointlist, 2) < 3
+        error('CSAM:InvalidPointList', 'pointlist must have at least three columns.');
+    end
     z_vals = pointlist(:, 3);
     n = size(pointlist, 1);
     layer_indices = zeros(n, 1);

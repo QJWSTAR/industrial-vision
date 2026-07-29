@@ -78,6 +78,8 @@ class PathSanitizer:
         """
         if text is None:
             return None
+        if isinstance(text, bytes):
+            text = text.decode("utf-8", errors="replace")
         if not isinstance(text, str):
             return text
 

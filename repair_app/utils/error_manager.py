@@ -486,7 +486,11 @@ class ErrorManager:
         except Exception as dialog_exc:
             # 对话框自身失败时退化到 stderr（绝不再次抛出）
             _log_error(f"[ErrorManager] ErrorDialog 显示失败: {dialog_exc}")
-            print(f"[ErrorManager] {friendly.title}: {friendly.what}", file=sys.stderr)
+            if sys.stderr is not None:
+                print(
+                    f"[ErrorManager] {friendly.title}: {friendly.what}",
+                    file=sys.stderr,
+                )
 
     # ============================================================
     # 装饰器 API

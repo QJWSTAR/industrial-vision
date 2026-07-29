@@ -13,6 +13,7 @@ matplotlib.use("QtAgg")
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 from repair_app.platform.fonts import get_matplotlib_fonts
+from repair_app.utils.logger_config import debug as log_debug, warning as log_warning
 plt.rcParams["font.sans-serif"] = get_matplotlib_fonts()
 plt.rcParams["axes.unicode_minus"] = False
 
@@ -79,7 +80,8 @@ def _triangulate_xy(pts: np.ndarray, max_pts: int = 3000) -> Optional[tuple]:
     try:
         tri = mtri.Triangulation(pts[:, 0], pts[:, 1])
         return tri.triangles, pts
-    except Exception:
+    except Exception as exc:
+        log_debug(f"实时 STL 解析失败: {exc}")
         return None
 
 
@@ -278,8 +280,7 @@ class RepairVisualizer(QWidget):
 
     def _toggle_animation(self) -> None:
         if self._animating:
-            self._anim_timer.stop()
-            self._anim_timer = None
+            self._destroy_anim_timer()
             self._animating = False
             self._btn_anim.setText("▶ 逐层动画")
             return
@@ -296,8 +297,7 @@ class RepairVisualizer(QWidget):
                 self._lb_layer.setText(str(self._current_layer + 1))
                 self._render()
             else:
-                self._anim_timer.stop()
-                self._anim_timer = None
+                self._destroy_anim_timer()
                 self._animating = False
                 self._btn_anim.setText("▶ 逐层动画")
         self._anim_timer.timeout.connect(_step)
@@ -347,9 +347,8 @@ class RepairVisualizer(QWidget):
             if pts is not None and len(pts) > 0:
                 self._partial_repair = pts
                 self._render()
-        except Exception:
-            # 解析失败静默忽略，不影响主流程
-            pass
+        except Exception as exc:
+            log_warning(f"实时 mesh 刷新失败: {exc}")
 
     def set_nozzle_orientations(
         self,
@@ -528,7 +527,10 @@ class RepairVisualizer(QWidget):
                                             edgecolor="none", facecolor=color)
                 self._ax.add_collection3d(mesh)
                 from matplotlib.lines import Line2D
-                c = "#10B981" if not colormap and color is None else (color if not colormap else "#10B981")
+                if colormap:
+                    c = matplotlib.colors.to_hex(cm(0.65))
+                else:
+                    c = color or "#10B981"
                 return Line2D([0], [0], color=c, lw=4, alpha=alpha), label
 
         # 散点回退
@@ -628,12 +630,7 @@ class RepairVisualizer(QWidget):
         应在 MainWindow closeEvent 中调用。
         """
         # 停止动画定时器
-        if hasattr(self, "_anim_timer") and self._anim_timer is not None:
-            try:
-                self._anim_timer.stop()
-            except Exception:
-                pass
-            self._anim_timer = None
+        self._destroy_anim_timer()
         # 清理 matplotlib Figure
         if hasattr(self, "_fig") and self._fig is not None:
             try:
@@ -649,6 +646,21 @@ class RepairVisualizer(QWidget):
             except Exception:
                 pass
             self._canvas = None
+
+    def _destroy_anim_timer(self) -> None:
+        timer = getattr(self, "_anim_timer", None)
+        if timer is None:
+            return
+        try:
+            timer.stop()
+            timer.deleteLater()
+        except RuntimeError:
+            pass
+        self._anim_timer = None
+
+    def closeEvent(self, event) -> None:
+        self.cleanup()
+        super().closeEvent(event)
 
     def toggle_axes(self) -> None:
         """显示/隐藏坐标轴。"""

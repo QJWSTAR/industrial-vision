@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from repair_app.platform.fonts import get_matplotlib_fonts
+from repair_app.utils.logger_config import debug as log_debug
 plt.rcParams["font.sans-serif"] = get_matplotlib_fonts()
 plt.rcParams["axes.unicode_minus"] = False
 
@@ -90,7 +91,8 @@ def decode_binary_stl(data: bytes) -> Optional[np.ndarray]:
             tris[i] = v
             offset += 50
         return tris
-    except (struct.error, ValueError):
+    except (struct.error, ValueError) as exc:
+        log_debug(f"二进制 STL 解码失败: {exc}")
         return None
 
 
@@ -152,6 +154,7 @@ class ProfileResultPanel(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._profile: Optional[dict[str, Any]] = None
+        self._cleaned_up = False
         self._init_ui()
 
     # ---------- UI ----------
@@ -208,6 +211,33 @@ class ProfileResultPanel(QWidget):
         btn_row.addWidget(self._lb_status)
         btn_row.addStretch()
         layout.addLayout(btn_row)
+
+    def cleanup(self) -> None:
+        """Release all matplotlib figures/canvases exactly once."""
+        if self._cleaned_up:
+            return
+        self._cleaned_up = True
+        for name in ("mesh", "layers", "particles", "unif"):
+            fig = getattr(self, f"_fig_{name}", None)
+            if fig is not None:
+                try:
+                    fig.clear()
+                    plt.close(fig)
+                except Exception:
+                    pass
+                setattr(self, f"_fig_{name}", None)
+            canvas = getattr(self, f"_canvas_{name}", None)
+            if canvas is not None:
+                try:
+                    canvas.close()
+                    canvas.deleteLater()
+                except RuntimeError:
+                    pass
+                setattr(self, f"_canvas_{name}", None)
+
+    def closeEvent(self, event) -> None:
+        self.cleanup()
+        super().closeEvent(event)
 
     def _tab_qss(self) -> str:
         return f"""

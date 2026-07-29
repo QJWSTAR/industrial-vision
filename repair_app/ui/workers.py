@@ -24,6 +24,26 @@ from repair_app.utils.error_manager import ErrorCode, ErrorManager
 from repair_app.ui.worker_base import BaseWorker
 
 
+def _validated_cloud_selection(
+    session: RepairSession,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a finite point cloud and a non-empty, aligned boolean mask."""
+    xyz = np.asarray(session.point_cloud.xyz)
+    if xyz.ndim != 2 or xyz.shape[1] != 3 or len(xyz) == 0:
+        raise ValueError(f"point cloud must have shape (N, 3), got {xyz.shape}")
+    if not np.all(np.isfinite(xyz)):
+        raise ValueError("point cloud contains NaN or Inf")
+    defect_mask = np.asarray(session.selection.mask)
+    if defect_mask.ndim != 1 or len(defect_mask) != len(xyz):
+        raise ValueError(
+            f"selection mask must have shape ({len(xyz)},), got {defect_mask.shape}"
+        )
+    defect_mask = defect_mask.astype(bool, copy=False)
+    if not np.any(defect_mask):
+        raise ValueError("selection mask is empty")
+    return xyz, defect_mask
+
+
 def _pack_error(exc: BaseException, code: ErrorCode = ErrorCode.UNKNOWN,
                 context: str = "") -> tuple[str, str, str]:
     """将异常打包为 (code_value, friendly_msg, detail) 三元组。
@@ -73,8 +93,9 @@ class PathPlanningWorker(BaseWorker):
     def run(self) -> None:
         self._mark_start()  # P3-1: 启动计时
         try:
-            xyz = self._session.point_cloud.xyz
-            defect_mask = self._session.selection.mask
+            xyz, defect_mask = _validated_cloud_selection(self._session)
+            if self._n_layers <= 0:
+                raise ValueError("n_layers must be positive")
             last_waypoints = np.zeros((0, 3))
             for layer_idx, waypoints in enumerate(
                 iter_path_from_cloud(
@@ -129,9 +150,16 @@ class MorphologyWorker(BaseWorker):
         repair = np.zeros((0, 3))
         is_mock = True  # P2-3: 默认标记为 mock，仅当真实算法成功输出才置 False
         try:
-            xyz = self._session.point_cloud.xyz
-            defect_mask = self._session.selection.mask
-            waypoints = self._session.waypoint.mock
+            xyz, defect_mask = _validated_cloud_selection(self._session)
+            waypoints = np.asarray(self._session.waypoint.mock)
+            if waypoints.ndim != 2 or waypoints.shape[1] < 3 or len(waypoints) == 0:
+                raise ValueError(
+                    f"waypoints must have shape (M, 3+), got {waypoints.shape}"
+                )
+            if not np.all(np.isfinite(waypoints[:, :3])):
+                raise ValueError("waypoints contain NaN or Inf")
+            if self._n_layers <= 0:
+                raise ValueError("n_layers must be positive")
             # P2-3: mock 兜底数据（明确标记，仅用于算法失败时的 fallback）
             base = xyz[defect_mask]
             n_pts = min(int(np.sum(defect_mask) * 0.4), 5000)

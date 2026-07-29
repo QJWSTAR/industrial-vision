@@ -125,6 +125,18 @@ class TestRobotExporter:
 # 3. CalibrationWizard 测试
 # ================================================================
 class TestCalibrationWizard:
+    @pytest.fixture(autouse=True)
+    def _isolated_calibration_db(self, tmp_path, monkeypatch):
+        """Never let calibration tests mutate the tracked project database."""
+        from repair_app.utils.calibration_wizard import CalibrationWizard
+
+        db_path = tmp_path / "calibration_db.json"
+        monkeypatch.setattr(
+            CalibrationWizard,
+            "_get_db_path",
+            lambda self: str(db_path),
+        )
+
     def test_full_flow(self):
         from repair_app.utils.calibration_wizard import CalibrationWizard
         cw = CalibrationWizard()

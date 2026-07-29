@@ -6,12 +6,15 @@
 from __future__ import annotations
 
 from enum import Enum, auto
+import logging
 from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QLabel, QPushButton
 
 from repair_app.ui.pipeline_indicator import PipelineIndicator, PipelineStage
+
+logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -23,6 +26,7 @@ class StepState(Enum):
     ACTIVE = auto()
     DONE = auto()
     LOCKED = auto()
+    FAILED = auto()
 
 
 class WorkflowStep(Enum):
@@ -142,8 +146,8 @@ class WorkflowController(QObject):
         """标记步骤为 FAILED（同时更新 PipelineIndicator 为 failed）。"""
         if not (0 <= step < 5):
             return
-        self._step_states[step] = StepState.LOCKED
-        self.step_state_changed.emit(step, StepState.LOCKED.name)
+        self._step_states[step] = StepState.FAILED
+        self.step_state_changed.emit(step, StepState.FAILED.name)
         if self._pipeline_indicator is not None:
             self._pipeline_indicator.set_failed(step)
 
@@ -154,8 +158,8 @@ class WorkflowController(QObject):
         # 同步内部状态
         for i, state in self._step_states.items():
             if state == StepState.ACTIVE:
-                self._step_states[i] = StepState.LOCKED
-                self.step_state_changed.emit(i, StepState.LOCKED.name)
+                self._step_states[i] = StepState.FAILED
+                self.step_state_changed.emit(i, StepState.FAILED.name)
                 return
 
     def get_step_state(self, step: int) -> StepState:
@@ -315,8 +319,13 @@ class WorkflowController(QObject):
             mode_repairing: 修复模式常量值
             lb_mode_state: 可选，模式状态 QLabel
         """
-        morph_done = session.morphology.repair_xyz is not None
-        path_ready = session.output.path_output_ready
+        if session is None:
+            logger.warning("update_all_steps called without a RepairSession")
+            morph_done = False
+            path_ready = False
+        else:
+            morph_done = session.has_morphology()
+            path_ready = session.output.path_output_ready
 
         # 更新 4 个步骤按钮
         self.update_step_button_style(0, step1_btn, repair_mode, morph_done, path_ready, current_page)
@@ -342,7 +351,10 @@ class WorkflowController(QObject):
             session: RepairSession 实例
             lb_workflow_state: 工作流状态 QLabel
         """
-        morph_done = session.morphology.repair_xyz is not None
+        if session is None:
+            lb_workflow_state.setText("等待数据")
+            return
+        morph_done = session.has_morphology()
         path_ready = session.output.path_output_ready
 
         if session.is_busy:

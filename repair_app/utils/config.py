@@ -18,16 +18,27 @@ from repair_app import __version__ as APP_VERSION
 APP_TITLE = f"冷喷涂缺陷修复软件 v{APP_VERSION}"
 
 
+def _system_int(key: str, fallback: int) -> int:
+    """Read a positive integer system setting with a startup-safe fallback."""
+    try:
+        value = int(schema_loader.get_system_value(key))
+        if value <= 0:
+            raise ValueError(f"{key} must be positive")
+        return value
+    except (KeyError, TypeError, ValueError):
+        return fallback
+
+
 # ============================================================
 # WindowConfig — 从 schema 系统参数读取
 # ============================================================
 @dataclass
 class WindowConfig:
     """主窗口尺寸配置（默认值从 schema system_parameters 读取）。"""
-    left_panel_width: int = int(schema_loader.get_system_value("left_panel_width"))
-    right_panel_width: int = int(schema_loader.get_system_value("right_panel_width"))
-    window_width: int = int(schema_loader.get_system_value("window_width"))
-    window_height: int = int(schema_loader.get_system_value("window_height"))
+    left_panel_width: int = _system_int("left_panel_width", 340)
+    right_panel_width: int = _system_int("right_panel_width", 320)
+    window_width: int = _system_int("window_width", 1700)
+    window_height: int = _system_int("window_height", 950)
 
 
 @dataclass
