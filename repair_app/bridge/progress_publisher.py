@@ -372,6 +372,8 @@ class ProgressPublisher:
             self._active_operation_id = operation_id
             self._sequence_by_operation[operation_id] = 0
             self._latest_coalescible = None
+            # 清空旧 operation 残留的 reliable 队列，避免旧 terminal 事件污染新 operation
+            self._reliable.clear()
             self._condition.notify_all()
 
     def publish_terminal(
@@ -411,8 +413,12 @@ class ProgressPublisher:
 
     def finish_operation(self, request_id: str) -> None:
         """Stop heartbeats for a completed operation after queued events flush."""
-        if self._active_operation_id == str(request_id):
+        operation_id = str(request_id)
+        if self._active_operation_id == operation_id:
             self._active_operation_id = ""
+        # 清理序列号字典，防止长期运行内存泄露
+        with self._condition:
+            self._sequence_by_operation.pop(operation_id, None)
 
 
 def publish_progress(**kwargs) -> None:

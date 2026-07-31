@@ -571,14 +571,34 @@ class TestMatlabBridgeLauncher:
         assert result is False
 
     def test_start_already_running(self, tmp_path, monkeypatch):
-        """端口已开放时 start 应复用现有会话。"""
+        """端口已开放且身份验证通过时 start 应复用现有会话。"""
         from repair_app.bridge.launcher import MatlabBridgeLauncher
         launcher = MatlabBridgeLauncher(str(tmp_path))
         # Mock _is_port_open 返回 True（端口已开放）
         monkeypatch.setattr(launcher, "_is_port_open", lambda port: True)
+        # P0-9: 身份验证也需通过（模拟端口上是真实 Bridge）
+        monkeypatch.setattr(launcher, "_verify_bridge_identity", lambda: True)
         result = launcher.start(timeout=1)
         assert result is True
         assert launcher._reused_existing is True
+
+    def test_start_port_hijacked_rejects_reuse(self, tmp_path, monkeypatch):
+        """端口被非 Bridge 进程占用时应拒绝复用并尝试清理（P0-9）。"""
+        from repair_app.bridge.launcher import MatlabBridgeLauncher
+        launcher = MatlabBridgeLauncher(str(tmp_path))
+        monkeypatch.setattr(launcher, "_is_port_open", lambda port: True)
+        # 模拟端口被非 Bridge 进程占用（身份验证失败）
+        monkeypatch.setattr(launcher, "_verify_bridge_identity", lambda: False)
+        # _kill_matlab_by_port 和 _find_matlab_executable_with_version 避免真实操作
+        monkeypatch.setattr(launcher, "_kill_matlab_by_port", lambda: None)
+        monkeypatch.setattr(
+            launcher, "_find_matlab_executable_with_version",
+            staticmethod(lambda: (None, None)),
+        )
+        result = launcher.start(timeout=1)
+        # 找不到 MATLAB → 启动失败，但不应误判为就绪
+        assert result is False
+        assert launcher._reused_existing is False
 
 
 # ================================================================
@@ -871,6 +891,30 @@ class TestMatlabAdapterStatics:
 class TestMatlabAdapterHandleRepair:
     """测试 MatlabAdapter.handle_repair。"""
 
+    def setup_method(self):
+        """每个测试前重置所有 Bridge 单例，避免端口/引擎残留。"""
+        from repair_app.bridge.progress_publisher import ProgressPublisher
+        from repair_app.bridge.operation_control import CancellationControlServer
+        ProgressPublisher.reset_instance()
+        CancellationControlServer.reset_instance()
+        try:
+            from repair_app.bridge.adapters.matlab_engine_proxy import MatlabEngineProxy
+            MatlabEngineProxy.reset_singleton()
+        except Exception:
+            pass
+
+    def teardown_method(self):
+        """每个测试后清理所有 Bridge 单例。"""
+        from repair_app.bridge.progress_publisher import ProgressPublisher
+        from repair_app.bridge.operation_control import CancellationControlServer
+        ProgressPublisher.reset_instance()
+        CancellationControlServer.reset_instance()
+        try:
+            from repair_app.bridge.adapters.matlab_engine_proxy import MatlabEngineProxy
+            MatlabEngineProxy.reset_singleton()
+        except Exception:
+            pass
+
     def test_handle_repair_empty_cloud(self):
         """空点云应返回错误结果。"""
         from repair_app.bridge.adapters.matlab_adapter import MatlabAdapter
@@ -886,12 +930,13 @@ class TestMatlabAdapterHandleRepair:
         result = adapter.handle_repair(req)
         assert result.status_code == RepairStatusCode.ERR_INVALID_INPUT
 
-    def test_handle_repair_python_mode(self):
+    def test_handle_repair_python_mode(self, monkeypatch):
         """Python 模式下应成功返回航点。"""
         from repair_app.bridge.adapters.matlab_adapter import MatlabAdapter
         from repair_app.bridge.communication.serializer import Serializer
         from repair_app.bridge.communication.protocol import RepairStatusCode
 
+        monkeypatch.setenv("CSAM_ALGORITHM_ENGINE", "python")
         adapter = MatlabAdapter()
         rng = np.random.default_rng(42)
         xyz = rng.uniform(-5, 5, (50, 3)).astype(np.float32)
@@ -906,8 +951,13 @@ class TestMatlabAdapterHandleRepair:
             MatlabAdapter, MatlabAlgorithmError,
         )
         monkeypatch.setenv("CSAM_ALGORITHM_ENGINE", "matlab")
-        with pytest.raises(MatlabAlgorithmError):
-            MatlabAdapter()
+        # Mock MatlabEngineProxy 模拟 MATLAB 不可用
+        with patch(
+            "repair_app.bridge.adapters.matlab_engine_proxy.MatlabEngineProxy._ensure_connected",
+            side_effect=Exception("MATLAB engine not available (mocked)"),
+        ):
+            with pytest.raises(MatlabAlgorithmError):
+                MatlabAdapter()
 
     def test_handle_repair_exception_path(self):
         """handle_repair 异常输入应返回错误结果。"""
@@ -948,14 +998,22 @@ class TestMatlabAdapterSelectAlgorithm:
             MatlabAdapter, MatlabAlgorithmError,
         )
         monkeypatch.setenv("CSAM_ALGORITHM_ENGINE", "matlab")
-        with pytest.raises(MatlabAlgorithmError):
-            MatlabAdapter()
+        with patch(
+            "repair_app.bridge.adapters.matlab_engine_proxy.MatlabEngineProxy._ensure_connected",
+            side_effect=Exception("MATLAB engine not available (mocked)"),
+        ):
+            with pytest.raises(MatlabAlgorithmError):
+                MatlabAdapter()
 
     def test_select_algorithm_auto_fallback(self, monkeypatch):
         """auto 模式下 MATLAB 不可用应降级到 Python。"""
         from repair_app.bridge.adapters.matlab_adapter import MatlabAdapter
         monkeypatch.setenv("CSAM_ALGORITHM_ENGINE", "auto")
-        adapter = MatlabAdapter()
+        with patch(
+            "repair_app.bridge.adapters.matlab_engine_proxy.MatlabEngineProxy._ensure_connected",
+            side_effect=Exception("MATLAB engine not available (mocked)"),
+        ):
+            adapter = MatlabAdapter()
         assert adapter._algorithm_fn == MatlabAdapter._default_algorithm
 
 
@@ -1002,9 +1060,13 @@ class TestMATLABPipeline:
         """auto 模式下无 MATLAB 应返回 False。"""
         from repair_app.bridge.adapters.matlab_pipeline import MATLABPipeline
         monkeypatch.setenv("CSAM_ALGORITHM_ENGINE", "auto")
-        p = MATLABPipeline()
-        # 无 MATLAB 环境，应返回 False
-        assert p.is_available() is False
+        with patch(
+            "repair_app.bridge.adapters.matlab_engine_proxy.MatlabEngineProxy._ensure_connected",
+            side_effect=Exception("MATLAB engine not available (mocked)"),
+        ):
+            p = MATLABPipeline()
+            # 无 MATLAB 环境，应返回 False
+            assert p.is_available() is False
 
     def test_run_with_mock_proxy(self, monkeypatch):
         """run 应委托给 proxy.call_full_pipeline。"""

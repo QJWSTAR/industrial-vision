@@ -11,9 +11,11 @@ workers.py — UI工作线程模块
 """
 
 from __future__ import annotations
+import logging
 import os
 import time
 import traceback
+from typing import Any
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Slot, Signal
 
@@ -22,6 +24,8 @@ from repair_app.core.morphology_predictor import iter_repair_mesh_layers
 from repair_app.core.repair_session import RepairSession
 from repair_app.utils.error_manager import ErrorCode, ErrorManager
 from repair_app.ui.worker_base import BaseWorker
+
+logger = logging.getLogger("csam.ui.workers")
 
 
 def _validated_cloud_selection(
@@ -242,8 +246,20 @@ class ComputePipelineWorker(BaseWorker):
         try:
             self.stage.emit("正在执行路径规划 + 形貌预测...")
 
+            # P0-12: 把 QThread 的中断标志透传到 ZMQ poll 循环，
+            # 600s 长计算期间点取消能立即中断并抛 MatlabCallCancelledError。
+            # BaseWorker 是 QObject（非 QThread），通过 currentThread() 获取
+            # 实际承载线程来查询中断标志（与 check_interruption 内部一致）。
+            from PySide6.QtCore import QThread
+
+            def _is_cancelled() -> bool:
+                t = QThread.currentThread()
+                return t is not None and t.isInterruptionRequested()
+
             parsed = self._matlab_service.run_full_pipeline_blocking(
-                self._request_bytes, timeout_s=self._zmq_timeout
+                self._request_bytes,
+                timeout_s=self._zmq_timeout,
+                is_cancelled=_is_cancelled,
             )
 
             if self.check_interruption():
@@ -253,5 +269,153 @@ class ComputePipelineWorker(BaseWorker):
             self.result.emit(parsed)
 
         except Exception as exc:
+            # P0-12: 用户取消走 cancelled 语义而非 failed，避免弹出错误对话框
+            from repair_app.bridge.communication.exceptions import (
+                MatlabCallCancelledError,
+            )
+            if isinstance(exc, MatlabCallCancelledError):
+                # 发出结构化取消信息，由 _on_compute_cancelled 处理
+                logger.info("ComputePipelineWorker: 计算被用户取消")
+                # 复用 failed 信号传递取消标记（error_code="CANCELLED"），
+                # MainWindow._on_compute_failed 据此走取消路径
+                self.failed.emit("CANCELLED", "计算已取消", str(exc))
+                return
             code = ErrorManager.classify(exc, context="一键计算")
             self.failed.emit(*_pack_error(exc, code, "一键计算"))
+
+
+class PointCloudLoadWorker(BaseWorker):
+    """点云加载工作线程（P0-1/P0-4）。
+
+    在后台线程执行文件读取 + 法向量估计，避免大文件阻塞 UI。
+    纯数据操作，无 UI 交互，线程安全。
+    """
+    progress = Signal(str)
+    finished = Signal(object, object, str)  # xyz, normals, file_path
+    failed = Signal(str, str, str)
+
+    def __init__(
+        self,
+        file_path: str,
+        file_service: Any,
+        timeout_s: float | None = 120.0,
+    ) -> None:
+        super().__init__(timeout_s=timeout_s)
+        self._file_path = file_path
+        self._file_service = file_service
+
+    @Slot()
+    def run(self) -> None:
+        self._mark_start()
+        try:
+            self.progress.emit("正在加载点云文件...")
+            xyz, normals = self._file_service.load_point_cloud(self._file_path)
+            if self.check_interruption():
+                return
+            if normals is None:
+                self.progress.emit("正在估计法向量...")
+                from repair_app.core.coordination_system import CoordinateSystem
+                normals = CoordinateSystem.estimate_normals(xyz, k=30)
+            if self.check_interruption():
+                return
+            self.finished.emit(xyz, normals, self._file_path)
+        except Exception as exc:
+            code = ErrorManager.classify(exc, context="加载点云")
+            self.failed.emit(*_pack_error(exc, code, "加载点云"))
+
+
+class ExportWorker(BaseWorker):
+    """导出工作线程（P0-2）。
+
+    在后台线程执行实际导出操作（export），避免 PDF/G-code 生成阻塞 UI。
+    UI 交互（配置对话框、文件对话框）在主线程完成后再启动此 Worker。
+    """
+    finished = Signal(object)  # ExportResult
+    failed = Signal(str, str, str)
+
+    def __init__(
+        self,
+        exporter: Any,
+        session: RepairSession,
+        output_path: str,
+        config: dict,
+        timeout_s: float | None = 180.0,
+    ) -> None:
+        super().__init__(timeout_s=timeout_s)
+        self._exporter = exporter
+        self._session = session
+        self._output_path = output_path
+        self._config = config
+
+    @Slot()
+    def run(self) -> None:
+        self._mark_start()
+        try:
+            result = self._exporter.export(
+                self._session, self._output_path, **self._config
+            )
+            if self.check_interruption():
+                return
+            self.finished.emit(result)
+        except Exception as exc:
+            code = ErrorManager.classify(exc, context="导出")
+            self.failed.emit(*_pack_error(exc, code, "导出"))
+
+
+class ReportWorker(BaseWorker):
+    """报告生成工作线程（P0-3）。
+
+    在后台线程执行指标计算 + PDF 生成，避免 matplotlib 渲染阻塞 UI。
+    所有计算数据在主线程预收集，Worker 只做计算和文件写入。
+    """
+    progress = Signal(str)
+    finished = Signal(str)  # output_path
+    failed = Signal(str, str, str)
+
+    def __init__(
+        self,
+        report_data: dict,
+        export_service: Any,
+        session: RepairSession,
+        output_path: str,
+        timeout_s: float | None = 120.0,
+    ) -> None:
+        super().__init__(timeout_s=timeout_s)
+        self._report_data = report_data
+        self._export_service = export_service
+        self._session = session
+        self._output_path = output_path
+
+    @Slot()
+    def run(self) -> None:
+        self._mark_start()
+        try:
+            self.progress.emit("正在计算统计指标...")
+            # 将预收集的数据写入 session
+            self._session.report.scan_info = self._report_data["scan_info"]
+            self._session.report.parameters = self._report_data["parameters"]
+            self._session.report.results = self._report_data["results"]
+            self._session.report.layers = self._report_data["layers"]
+            self._session.report.statistics = self._report_data["statistics"]
+            self._session.report.quality = self._report_data["quality"]
+            self._session.metrics.defect = self._report_data["defect_metrics"]
+            self._session.metrics.path = self._report_data["path_metrics"]
+            self._session.metrics.layers = self._report_data["layers"]
+            self._session.metrics.statistics = self._report_data["statistics"]
+            self._session.metrics.quality = self._report_data["quality"]
+            if self.check_interruption():
+                return
+            self.progress.emit("正在生成 PDF 报告...")
+            ok = self._export_service.export_pdf_report(
+                self._session, output_path=self._output_path
+            )
+            if self.check_interruption():
+                return
+            if ok:
+                self.finished.emit(self._output_path)
+            else:
+                from repair_app.utils.error_manager import ErrorCode
+                raise RuntimeError("PDF 报告生成失败")
+        except Exception as exc:
+            code = ErrorManager.classify(exc, context="报告生成")
+            self.failed.emit(*_pack_error(exc, code, "报告生成"))

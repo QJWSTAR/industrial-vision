@@ -3,7 +3,8 @@ from .config import BridgeConfig, DEFAULT_CONFIG
 from .exceptions import (
     AlgorithmError,
     BridgeError,
-    ConnectionError,
+    BridgeConnectionError,
+    ConnectionError,  # backward-compatible alias for BridgeConnectionError
     ConnectionTimeoutError,
     EngineCrashError,
     EngineUnavailableError,
@@ -38,7 +39,8 @@ __all__ = [
     "MessageType",
     "EngineStatus",
     "BridgeError",
-    "ConnectionError",
+    "BridgeConnectionError",
+    "ConnectionError",  # backward-compatible alias
     "ConnectionTimeoutError",
     "EngineUnavailableError",
     "EngineCrashError",

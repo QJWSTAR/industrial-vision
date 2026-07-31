@@ -1,6 +1,6 @@
 # Windows 与 MATLAB R2025b 稳定性验收手册
 
-> 版本：1.0.0 | 协议：v2.1（请求/结果）+ v3.0（实时事件） | 更新日期：2026-07-24 | 文档语言：简体中文
+> 版本：1.1.0 | 协议：v2.1（请求/结果）+ v3.0（实时事件） | 更新日期：2026-07-29 | 文档语言：简体中文
 
 ---
 
@@ -79,6 +79,8 @@
 - 一个 MATLAB Bridge；
 - 一个进度 PUB socket；
 - 一个取消 REP socket。
+
+REP socket（主请求通道与取消控制通道）已配置 `RCVTIMEO=100ms` 与 `SNDTIMEO=5000ms`，确保 `stop()` 能够在有限时间内中断阻塞的 `recv`/`send`，不会因客户端失联导致 Bridge 无法退出。PUB socket 维持 `LINGER=0`，关闭时不等待订阅者。
 
 ### 2.2 协议版本
 
@@ -396,6 +398,16 @@ disp('MATLAB-Python preflight: OK');
 - 两个 Python 模块导入无异常。
 - 最后一行是 `MATLAB-Python preflight: OK`。
 
+若 `venv\Scripts\python.exe` 不存在，`matlab_bridge_server.m` 会输出明确警告 `WARNING: venv not found. Using system Python.` 并提示如何创建虚拟环境。此时 Bridge 仍会尝试用系统 Python 启动，但通常因缺少 `repair_app` 依赖而失败，必须先按第 6.2 节创建 `venv` 再重试。
+
+Bridge 启动后，`MatlabEngineProxy` 在 pyenv 宿主模式下按以下三级递进策略连接 MATLAB 引擎，确保任一层失败都能自动降级到下一层：
+
+1. `connect_matlab()`（无参数）—— 连接当前宿主 MATLAB 会话，最轻量；
+2. `connect_matlab(sharedName)` —— 按名称 `matlab_bridge` 连接共享会话；
+3. `start_matlab(background=True)` —— 启动后台引擎会话，作为兜底（耗时较长）。
+
+外部模式（Python 不在 MATLAB 进程内）则依次尝试 `find_matlab` + 按名称连接、默认共享会话、独立启动（仅 `CSAM_ALGORITHM_ENGINE=matlab` 时）。全部失败时抛出 `EngineUnavailableError`，由上层降级或报错。
+
 将 MATLAB 命令窗口输出复制到：
 
 ```text
@@ -434,7 +446,7 @@ end
 在同一个全新 MATLAB 会话中执行：
 
 ```matlab
-op = char(java.util.UUID.randomUUID);
+op = ['op_', lower(dec2hex(randi(2^52)))];  % MATLAB-native UUID, no JVM needed
 py.repair_app.bridge.operation_control.begin_operation(op);
 tf = logical(py.repair_app.bridge.operation_control.is_cancel_requested(op));
 assert(~tf, 'New operation must not be cancelled');
@@ -457,7 +469,7 @@ publisher = py.repair_app.bridge.progress_publisher.ProgressPublisher.get_instan
 started = logical(publisher.start());
 assert(started, 'ProgressPublisher failed to bind tcp://127.0.0.1:5556');
 
-op = char(java.util.UUID.randomUUID);
+op = ['op_', lower(dec2hex(randi(2^52)))];  % MATLAB-native UUID, no JVM needed
 publisher.begin_operation(op);
 
 mesh = [
@@ -731,6 +743,7 @@ Get-NetTCPConnection -LocalPort 5555,5556,5557 -State Listen -ErrorAction Stop |
 - 取消完成前不能启动新任务。
 - 取消完成后能启动新任务。
 - 新任务有新的 operation ID，不继承旧任务的取消标志、序号、mesh 或路径缓存。
+- `ProgressPublisher.begin_operation` 在新任务开始时会清空 `_reliable` 队列，避免旧任务的 terminal 事件（如上一轮的 `CANCELLED`/`FAILED`）污染新任务的实时流；`finish_operation` 在任务结束时清理该 operation 的序列号字典项，防止长期运行后内存单调增长。
 
 ### 13.4 安全边界
 
@@ -766,6 +779,8 @@ python run_app.py
 - 应用显示结构化、可理解的错误，不得假装实时服务已就绪。
 - GUI 不死锁。
 - 不创建第二个 ProgressPublisher。
+- `MatlabAdapter` 一旦检测到实时通信服务启动失败，会在本次进程内将 `_matlab_available` 置为 `False`，后续请求不再重复尝试 MATLAB 路径，避免反复失败造成的卡顿。
+- `ComputeController` 在 MATLAB 启动失败路径上会对 `_matlab_service` 执行 `close()` 并置 `None`，避免泄露 ZMQ 客户端 socket。
 - 关闭 GUI 后，在 PowerShell A 按 Ctrl+C 释放占用。
 - 重新启动 GUI 后三个端口均能正常绑定并完成一次计算。
 
@@ -782,6 +797,7 @@ python run_app.py
 - Bridge 明确报告取消控制端口绑定失败。
 - 应用不能把“取消不可用”的任务当作完整稳定服务启动。
 - 不挂死，不出现无限重试或多个控制线程。
+- `BridgeServer.stop()` 在设置 `_running=False` 后会强制关闭 REP socket（`linger=0`），中断可能阻塞在 `recv`/`send` 上的调用；配合 `RCVTIMEO=100ms`/`SNDTIMEO=5000ms`，关闭路径不会无限等待客户端。
 - 释放端口并重启后恢复正常。
 
 ### 14.3 应用拥有的 MATLAB Worker 异常退出
@@ -808,10 +824,13 @@ Stop-Process -Id <APP_OWNED_MATLAB_PID> -Force
 - 应用检测到 MATLAB Worker/heartbeat 丢失并显示错误。
 - 状态进入 CRASHED/RECOVERING，而不是继续显示成功。
 - 不保留旧任务为 busy。
+- `MatlabLifecycleManager._try_restart` 在后台线程执行重启（MATLAB 冷启动耗时 30–60s），不阻塞 Qt 主线程，窗口在恢复期间仍可响应。
+- `MatlabBridgeLauncher.restart()` 在重新调用 `start()` 前会等待旧 Bridge 端口释放（最多 10s），避免残留端口被误判为“已就绪”导致复用一个已经死亡的会话。
 - 下一次启动计算时，应用自动启动新的 owned MATLAB Worker。
 - 新 MATLAB PID 与旧 PID 不同。
 - 5555、5556、5557 重新各有一个监听者。
 - 恢复后可以成功完成一次任务。
+- 计算过程中若发生引擎级异常（`EngineUnavailableError`、`MatlabEngineUnhealthyError`、`EngineCrashError`），`execution_scope` 将状态转为 `RECOVERING`；若只是临时网络错误（`BridgeError` 子类如连接超时），状态保持 `READY`，允许下次重试而不触发完整恢复流程。
 
 ### 14.4 手工 MATLAB 会话保护
 
@@ -871,6 +890,8 @@ $Csv = Join-Path $Evidence "process-samples.csv"
 - 没有持续 Protobuf parse error。
 - 没有重复 `ComputeController`、`ProgressSubscriber` 或 PUB/SUB socket。
 - 取消后下一次任务不继承旧 operation 的路径、mesh、状态或序号。
+- `ProgressPublisher.finish_operation` 在每个任务结束时清理该 operation 的序列号字典项，长时间重复运行（≥10 次）后 `_sequence_by_operation` 不应持续增长；`begin_operation` 清空 `_reliable` 队列确保旧 terminal 事件不残留。
+- `MatlabAdapter._matlab_available` 在首次 MATLAB 失败后置 `False`，后续请求直接跳过 MATLAB 路径，不应在 10 分钟窗口内看到反复重试 MATLAB 引擎的日志风暴。
 
 若内存增幅超过 25%，不得仅凭任务规模解释。应延长到 30 分钟并使用采样数据定位是 MATLAB 算法缓存、Python mesh、Qt 对象还是日志增长。
 
@@ -899,6 +920,9 @@ Get-CimInstance Win32_Process -Filter "Name='MATLAB.exe'" |
 - 由本应用启动的 MATLAB Worker 已退出。
 - 手工启动且被复用的 MATLAB 会话仍运行。
 - 日志中没有 QThread 销毁警告。
+- `MatlabBridgeLauncher.stop()` 通过 `_stop_lock` 防止 `atexit` 回调与显式 `stop()`/`restart()` 并发重入；重复调用安全。
+- `MatlabAdapter.shutdown()` 幂等（`_shutdown_done` 标志保护），`_cleanup` 与显式 `shutdown()` 重复调用不会二次释放 MATLAB 引擎引用或实时通信 socket。
+- `BridgeServer.stop()` 强制关闭 REP socket 中断阻塞的 `recv`/`send`，退出过程有超时上限，不会因客户端失联而无限等待。
 
 ### 16.2 计算中关闭
 
@@ -911,6 +935,7 @@ Get-CimInstance Win32_Process -Filter "Name='MATLAB.exe'" |
 
 - 应用先请求协作式取消和线程停止，再退出。
 - 退出过程有超时上限，不无限等待。
+- `MatlabBridgeLauncher.start()` 在 MATLAB 进程提前退出或等待端口就绪超时的早期退出路径上，会清理可能派生的子进程（`_force_kill_os`），不残留僵尸 MATLAB。
 - 不遗留 5555–5557。
 - 不遗留应用拥有的 MATLAB Worker。
 
@@ -1004,6 +1029,20 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 `pyenv` 一旦进入 Loaded 状态，通常不能在同一 MATLAB 进程中切换到不同解释器。关闭所有 MATLAB 窗口，重新启动 R2025b，然后先执行 `pyenv('Version', ...)`，再调用任何 `py.*`。
 
+若 `matlab_bridge_server.m` 启动时输出 `WARNING: venv not found. Using system Python.`，说明项目根目录下没有 `venv\Scripts\python.exe`（或非 Windows 平台的 `venv/bin/python`）。此时 Bridge 会回退到系统 Python，通常因缺少 `repair_app` 依赖而失败。解决方法：按第 6.2 节创建名为 `venv` 的虚拟环境并执行 `python -m pip install -e ".[dev,full]"`，然后重启 MATLAB Bridge。
+
+### 19.2a MATLAB 引擎连接失败
+
+`MatlabEngineProxy` 在 pyenv 宿主模式下按三级递进策略连接：`connect_matlab()` → `connect_matlab(name)` → `start_matlab(background=True)`。若三层全部失败，会抛出 `EngineUnavailableError`。
+
+常见原因：
+
+- `matlab_bridge_server.m` 未运行，`CSAM_BRIDGE_IN_MATLAB` 环境变量未设置为 `1`，导致代理误判为外部模式；
+- 共享会话名称不匹配（默认 `matlab_bridge`，可通过 `CSAM_MATLAB_SHARED_NAME` 覆盖）；
+- MATLAB 引擎 API 未安装（需在 venv 中执行 `python -m pip install matlabengine`）。
+
+`auto` 模式下连接失败会自动降级到 Python 原型；`matlab` 模式下则直接报错，不降级。
+
 ### 19.3 `ModuleNotFoundError: repair_app`
 
 检查：
@@ -1053,3 +1092,15 @@ Get-NetTCPConnection -LocalPort 5555,5556,5557 -State Listen |
 - 检查 MATLAB 循环是否经过取消检查点；
 - 只有应用拥有的 MATLAB Worker 才允许被精确 PID 终止；
 - 复用的手工 MATLAB 会话不得被强杀。
+
+### 19.7 配置加载失败导致 Bridge 启动异常
+
+`DEFAULT_CONFIG` 已改为惰性初始化（`_ConfigProxy`），首次访问属性时才构造 `BridgeConfig`，避免模块导入阶段因 `parameter_schema.json` 异常导致级联导入失败。`_env_int`/`_env_str` 在读取 schema 失败时会记录警告并回退到传入的 `fallback` 值，不会抛出异常中断 Bridge 启动。
+
+若日志出现 `读取 schema '...' 失败，使用 fallback=...` 警告，应检查 `parameter_schema.json` 是否存在且 `network_parameters` 节点完整。此时 Bridge 仍能以回退默认值启动，但超时、心跳间隔等参数可能与正式环境不一致，验收时需记录实际生效值。
+
+### 19.8 MATLAB 反复失败后仍持续重试
+
+`MatlabAdapter._matlab_available` 是进程内统一降级标志：首次 MATLAB 管线超时或异常后置 `False`，后续 `_invoke_pipeline_with_fallback` 和 `_try_profile_prediction` 直接跳过 MATLAB 路径，避免在 MATLAB 不可用时反复重试造成的卡顿和日志风暴。
+
+若需在同一进程内重新尝试 MATLAB（例如已重启 MATLAB Bridge），应重启 GUI 进程以重置该标志。`auto` 模式下降级到 Python 原型；`matlab` 模式下首次失败即返回错误，不降级。

@@ -153,7 +153,7 @@ class _MockMatlabService:
         self._run_full_pipeline_blocking_side_effect = None
         self._run_full_pipeline_blocking_result = None
 
-    def run_full_pipeline_blocking(self, request_bytes, timeout_s=600.0):
+    def run_full_pipeline_blocking(self, request_bytes, timeout_s=600.0, is_cancelled=None):
         if self._run_full_pipeline_blocking_side_effect:
             raise self._run_full_pipeline_blocking_side_effect
         return self._run_full_pipeline_blocking_result

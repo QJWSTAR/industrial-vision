@@ -266,22 +266,25 @@ finally:
 
 
 def test_compute_controller_never_overwrites_a_live_worker_thread(qapp):
+    """P1-25: 旧线程仍在运行时拒绝启动新计算，不阻塞 UI 等待旧线程退出。"""
     from repair_app.ui.compute_controller import ComputeController
 
     controller = ComputeController(project_root="/unused")
     previous_thread = MagicMock()
     previous_thread.isRunning.return_value = True
-    previous_thread.wait.return_value = False
     controller._compute_thread = previous_thread
     controller._compute_worker = MagicMock()
 
-    with pytest.raises(RuntimeError, match="未能安全退出"):
-        controller._start_worker(b"request")
+    # P1-25: 不再抛 RuntimeError 也不调用 wait 阻塞 UI，改为返回 False 拒绝启动
+    result = controller._start_worker(b"request")
 
+    assert result is False
+    # 旧线程引用保留（由其自身 finished 回调清理）
     assert controller._compute_thread is previous_thread
-    previous_thread.requestInterruption.assert_called_once()
-    previous_thread.quit.assert_called_once()
-    previous_thread.wait.assert_called_once_with(5000)
+    # 不应强制中断或等待旧线程
+    previous_thread.requestInterruption.assert_not_called()
+    previous_thread.quit.assert_not_called()
+    previous_thread.wait.assert_not_called()
 
     # Prevent QObject teardown from treating the test double as a real child.
     controller._compute_thread = None

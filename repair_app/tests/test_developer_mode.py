@@ -32,12 +32,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 class TestAppConfig:
     """AppConfig 配置加载与优先级测试。"""
 
-    def test_default_is_developer_mode_from_project_config(self):
+    def test_default_is_developer_mode_from_project_config(self, monkeypatch):
         """项目 config/app_config.json 默认 developer_mode=false（安全默认）。
 
         本测试验证 AppConfig 能正确读取项目配置文件。
         """
         from repair_app.utils.app_config import AppConfig
+        monkeypatch.delenv("CSAM_DEVELOPER_MODE", raising=False)
         AppConfig.reload()
         assert AppConfig.is_developer_mode() is False
 

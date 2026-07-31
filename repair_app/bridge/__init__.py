@@ -10,7 +10,8 @@ from .communication import (
     BridgeConfig,
     BridgeError,
     BridgeServer,
-    ConnectionError,
+    BridgeConnectionError,
+    ConnectionError,  # backward-compatible alias
     ConnectionTimeoutError,
     DEFAULT_CONFIG,
     EngineStatus,
@@ -38,7 +39,8 @@ __all__ = [
     "BridgeServer",
     "BridgeConfig",
     "BridgeError",
-    "ConnectionError",
+    "BridgeConnectionError",
+    "ConnectionError",  # backward-compatible alias
     "ConnectionTimeoutError",
     "EngineUnavailableError",
     "EngineCrashError",

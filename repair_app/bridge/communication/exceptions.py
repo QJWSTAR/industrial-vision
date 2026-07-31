@@ -19,11 +19,11 @@ class BridgeError(Exception):
         return super().__str__()
 
 
-class ConnectionError(BridgeError):
+class BridgeConnectionError(BridgeError):
     """无法建立连接或连接中断。"""
 
 
-class ConnectionTimeoutError(ConnectionError):
+class ConnectionTimeoutError(BridgeConnectionError):
     """连接或请求超时。"""
 
     def __init__(self, message: str = "请求超时", *, timeout_ms: int = 0, **kwargs):
@@ -31,7 +31,7 @@ class ConnectionTimeoutError(ConnectionError):
         self.timeout_ms = timeout_ms
 
 
-class EngineUnavailableError(ConnectionError):
+class EngineUnavailableError(BridgeConnectionError):
     """MATLAB 引擎未启动或不可达。"""
 
 
@@ -79,6 +79,14 @@ class MatlabRecoveryError(EngineUnavailableError):
     """MATLAB 引擎恢复失败。"""
 
 
+class MatlabCallCancelledError(BridgeError):
+    """MATLAB 计算被用户取消（P0-12）。
+
+    在 ZMQ 阻塞轮询期间检测到取消标志时抛出，区别于超时和引擎崩溃。
+    业务层捕获后应走"已取消"路径而非"失败"路径。
+    """
+
+
 class ProtocolError(BridgeError):
     """协议版本不兼容或消息格式错误。"""
 
@@ -103,9 +111,14 @@ def translate_zmq_error(exc: Exception, *, request_id: str = "") -> BridgeError:
         timeout = int(exc.get("timeout", 0)) if hasattr(exc, "get") else 0
         return ConnectionTimeoutError("ZMQ 接收超时", timeout_ms=timeout, request_id=request_id)
     if isinstance(exc, zmq.ZMQError):
-        return ConnectionError(f"ZMQ 错误: {exc}", request_id=request_id)
+        return BridgeConnectionError(f"ZMQ 错误: {exc}", request_id=request_id)
     if isinstance(exc, (ValueError, TypeError)):
         return InvalidParameterError(str(exc), request_id=request_id)
     if isinstance(exc, BridgeError):
         return exc
     return BridgeError(f"未预期的通信错误: {exc}", request_id=request_id)
+
+
+# 向后兼容别名（deprecated，将在 V2 移除）
+# 保留旧名称以避免破坏现有 import，但新代码应使用 BridgeConnectionError
+ConnectionError = BridgeConnectionError

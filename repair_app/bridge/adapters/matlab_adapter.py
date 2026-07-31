@@ -37,6 +37,16 @@ from ..communication.zmq_server import BridgeServer
 logger = logging.getLogger("csam.bridge.matlab")
 
 
+def _safe_float(raw: dict, key: str, default: float) -> float:
+    """安全读取浮点数，避免 `or` 短路覆盖合法 0.0 值。
+
+    `float(raw.get(k, d) or d)` 当值为 0.0 时会被默认值覆盖（0.0 是 falsy）。
+    本函数仅在 key 缺失或值为 None 时使用 default，保留合法的 0.0。
+    """
+    val = raw.get(key, default)
+    return float(val) if val is not None else float(default)
+
+
 class MatlabAlgorithmError(Exception):
     """MATLAB 算法执行错误。"""
 
@@ -71,6 +81,10 @@ class MatlabAdapter(BridgeServer):
         self._realtime_ready = bool(
             self._progress_publisher.start() and self._control_server.start()
         )
+        # 统一降级标志：任一 MATLAB 路径失败后置 False，避免重复尝试
+        self._matlab_available: bool = (
+            self._algorithm_fn is not self._default_algorithm
+        )
         if not self._realtime_ready:
             logger.error(
                 "实时通信服务启动失败: progress=%s control=%s",
@@ -82,8 +96,14 @@ class MatlabAdapter(BridgeServer):
         """关闭适配器，释放 MATLAB 引擎引用。
 
         在 BridgeServer._cleanup 之后调用，确保单例状态清空，
-        下次启动不会残留旧连接。
+        下次启动不会残留旧连接。幂等：多次调用安全。
+
+        P1-20: 同时停止 launcher 启动的 MATLAB 进程，避免 Bridge 关闭后
+        MATLAB 子进程残留（占用端口与 license）。
         """
+        if getattr(self, "_shutdown_done", False):
+            return
+        self._shutdown_done = True
         try:
             self._control_server.stop()
             self._progress_publisher.stop()
@@ -95,6 +115,15 @@ class MatlabAdapter(BridgeServer):
             logger.info("MatlabAdapter 已关闭，MATLAB 引擎引用已释放")
         except Exception as exc:
             logger.warning("MatlabAdapter 关闭异常: %s", exc)
+        # P1-20: 停止 launcher 启动的 MATLAB 进程，防止残留
+        try:
+            from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
+            manager = MatlabLifecycleManager.get_instance()
+            manager.stop()
+            logger.info("MATLAB 生命周期已停止，子进程已清理")
+        except Exception as exc:
+            # best-effort：lifecycle_manager 可能未初始化（如测试环境）
+            logger.debug("停止 MATLAB 生命周期跳过（可能未初始化）: %s", exc)
 
     def handle_repair(self, request: RepairRequest) -> RepairResult:
         """处理修复请求：解析 → 调用 MATLABPipeline → 构建结果。
@@ -107,25 +136,14 @@ class MatlabAdapter(BridgeServer):
         terminal_status = "failed"
         terminal_message = "MATLAB computation failed"
 
-        if not self._realtime_ready:
-            return self._build_error_result(
-                request_id,
-                RepairStatusCode.ERR_ALGORITHM_FAIL,
-                "实时通信服务不可用",
-                "进度或取消控制端口无法绑定。请关闭重复的 Bridge 实例，"
-                "或配置 CSAM_ZMQ_PROGRESS_ADDRESS/CSAM_ZMQ_CONTROL_ADDRESS。",
-            )
-
         from repair_app.bridge.operation_control import (
             begin_operation,
             finish_operation,
             is_cancel_requested,
         )
 
-        begin_operation(request_id)
-        self._progress_publisher.begin_operation(request_id)
-
         try:
+            # 先解析和验证输入，再检查实时通信服务
             xyz, _normals, meta = Serializer.parse_point_cloud(request)
 
             if len(xyz) == 0:
@@ -134,6 +152,19 @@ class MatlabAdapter(BridgeServer):
                     "空点云请求", "输入点云为空",
                 )
 
+            # 输入有效后，检查实时通信服务
+            if not self._realtime_ready:
+                logger.warning(
+                    "实时通信服务不可用（progress=%s control=%s），"
+                    "将跳过进度发布继续计算",
+                    self._progress_publisher.address,
+                    self._control_server.address,
+                )
+
+            begin_operation(request_id)
+            if self._realtime_ready:
+                self._progress_publisher.begin_operation(request_id)
+
             # ---- 生产路径：MATLABPipeline 完整管线 ----
             pipeline_result = self._invoke_pipeline_with_fallback(xyz, meta)
 
@@ -141,7 +172,7 @@ class MatlabAdapter(BridgeServer):
                 # MATLAB 管线成功：使用真实计算结果
                 waypoints = pipeline_result["waypoints"]
                 elapsed_ms = int((time.time() - started) * 1000)
-                density_gcm3 = float(meta.get("material_density_gcm3", 7.99)) or 7.99
+                density_gcm3 = _safe_float(meta, "material_density_gcm3", 7.99)
 
                 # 将 MATLAB warnings 附加到 feasibility_reason（Protobuf 无独立 warnings 字段）
                 warnings_list = pipeline_result.get("warnings", [])
@@ -271,16 +302,18 @@ class MatlabAdapter(BridgeServer):
                 "completed": ProgressEventType.PROGRESS_COMPLETED,
                 "cancelled": ProgressEventType.PROGRESS_CANCELLED,
             }.get(terminal_status, ProgressEventType.PROGRESS_FAILED)
-            self._progress_publisher.publish_terminal(
-                request_id,
-                event_type,
-                message=terminal_message,
-                error_code="" if terminal_status == "completed" else terminal_status,
-                retryable=terminal_status == "failed",
-                elapsed_s=time.time() - started,
-            )
+            if self._realtime_ready:
+                self._progress_publisher.publish_terminal(
+                    request_id,
+                    event_type,
+                    message=terminal_message,
+                    error_code="" if terminal_status == "completed" else terminal_status,
+                    retryable=terminal_status == "failed",
+                    elapsed_s=time.time() - started,
+                )
             finish_operation(request_id, terminal_status)
-            self._progress_publisher.finish_operation(request_id)
+            if self._realtime_ready:
+                self._progress_publisher.finish_operation(request_id)
 
     def _invoke_pipeline_with_fallback(
         self, xyz: np.ndarray, meta: dict[str, Any]
@@ -297,6 +330,21 @@ class MatlabAdapter(BridgeServer):
         if engine_mode == "python":
             logger.info("算法引擎：Python（手动指定），跳过 MATLAB 管线")
             return None
+
+        # 恢复机制：若 MATLAB 之前不可用，尝试恢复后再决定是否降级
+        if not self._matlab_available:
+            try:
+                from .matlab_engine_proxy import MatlabEngineProxy
+                proxy = MatlabEngineProxy()
+                if proxy.recover():
+                    self._matlab_available = True
+                    logger.info("MATLAB 引擎已恢复，重新启用 MATLAB 管线")
+                else:
+                    logger.debug("MATLAB 恢复失败，继续降级到 Python")
+                    return None
+            except Exception as exc:
+                logger.debug("MATLAB 恢复失败，继续降级: %s", exc)
+                return None
 
         try:
             from .matlab_pipeline import MATLABPipeline
@@ -336,7 +384,7 @@ class MatlabAdapter(BridgeServer):
                 vcr = np.asarray(pd_raw.get("vcr", []), dtype=np.float32)
                 diameter = np.asarray(pd_raw.get("diameter", []), dtype=np.float32)
                 temperature = np.asarray(pd_raw.get("temperature", []), dtype=np.float32)
-                dep_eff = float(pd_raw.get("dep_efficiency", 0.0) or 0.0)
+                dep_eff = _safe_float(pd_raw, "dep_efficiency", 0.0)
                 if len(px) > 0:
                     particle_dist = build_particle_distribution(
                         px, py, vx, vy, vz,
@@ -351,10 +399,10 @@ class MatlabAdapter(BridgeServer):
 
             return {
                 "waypoints": result["waypoints"],
-                "predicted_volume_mm3": float(result.get("predicted_volume_mm3", 0.0) or 0.0),
-                "estimated_mass_g": float(result.get("estimated_mass_g", 0.0) or 0.0),
-                "estimated_time_s": float(result.get("estimated_time_s", 0.0) or 0.0),
-                "uniformity": float(result.get("uniformity", 0.78) or 0.78),
+                "predicted_volume_mm3": _safe_float(result, "predicted_volume_mm3", 0.0),
+                "estimated_mass_g": _safe_float(result, "estimated_mass_g", 0.0),
+                "estimated_time_s": _safe_float(result, "estimated_time_s", 0.0),
+                "uniformity": _safe_float(result, "uniformity", 0.78),
                 "layer_profiles": layer_profiles,
                 "particle_dist": particle_dist,
                 "mesh_data": mesh_data,
@@ -364,11 +412,13 @@ class MatlabAdapter(BridgeServer):
 
         except MatlabCallTimeoutError as exc:
             logger.error("MATLAB 管线超时: %s", exc)
+            self._matlab_available = False
             if engine_mode == "matlab":
                 raise MatlabAlgorithmError(f"MATLAB 管线超时 ({exc.timeout_s}s)") from exc
             logger.warning("MATLAB 管线超时，降级到 Python: %s", exc)
             return None
         except Exception as exc:
+            self._matlab_available = False
             if engine_mode == "matlab":
                 logger.warning("MATLAB 管线失败（强制模式）: %s", exc)
                 raise MatlabAlgorithmError(f"MATLAB 管线失败: {exc}") from exc
@@ -388,8 +438,8 @@ class MatlabAdapter(BridgeServer):
         engine_mode = os.environ.get("CSAM_ALGORITHM_ENGINE", "auto").lower()
         if engine_mode == "python":
             return None
-        # 若路径规划已降级到 Python（MATLAB 不可用），跳过形貌预测避免重复连接延迟
-        if self._algorithm_fn is self._default_algorithm:
+        # 前置检查：若 MATLAB 已标记不可用，跳过形貌预测
+        if not self._matlab_available:
             return None
 
         try:
@@ -443,7 +493,7 @@ class MatlabAdapter(BridgeServer):
             vcr = np.asarray(pd_raw.get("vcr", []), dtype=np.float32)
             diameter = np.asarray(pd_raw.get("diameter", []), dtype=np.float32)
             temperature = np.asarray(pd_raw.get("temperature", []), dtype=np.float32)
-            dep_eff = float(pd_raw.get("dep_efficiency", 0.0) or 0.0)
+            dep_eff = _safe_float(pd_raw, "dep_efficiency", 0.0)
             if len(px) > 0:
                 particle_dist = build_particle_distribution(
                     px, py, vx, vy, vz,
@@ -458,10 +508,10 @@ class MatlabAdapter(BridgeServer):
         mesh_format = "stl_binary" if mesh_data else ""
 
         return {
-            "predicted_volume_mm3": float(raw.get("predicted_volume_mm3", 0.0) or 0.0),
-            "estimated_mass_g": float(raw.get("estimated_mass_g", 0.0) or 0.0),
-            "estimated_time_s": float(raw.get("estimated_time_s", 0.0) or 0.0),
-            "uniformity": float(raw.get("uniformity", 0.78) or 0.78),
+            "predicted_volume_mm3": _safe_float(raw, "predicted_volume_mm3", 0.0),
+            "estimated_mass_g": _safe_float(raw, "estimated_mass_g", 0.0),
+            "estimated_time_s": _safe_float(raw, "estimated_time_s", 0.0),
+            "uniformity": _safe_float(raw, "uniformity", 0.78),
             "layer_profiles": layer_profiles,
             "particle_dist": particle_dist,
             "mesh_data": mesh_data,
@@ -639,11 +689,11 @@ class MatlabAdapter(BridgeServer):
             raise MatlabAlgorithmError(f"算法执行失败: {exc}") from exc
 
     def _invoke_with_fallback(self, xyz: np.ndarray, meta: dict[str, Any]) -> np.ndarray:
-        """调用算法，auto 模式下 MATLAB 失败时自动降级到 Python 原型。
+        """调用算法，auto 模式下 MATLAB 失败时本次降级到 Python 原型。
 
         工业可靠性保证：MATLAB 不可用或算法异常时，生产连续性优先，
         降级到 Python 本地路径规划器，不中断服务。
-        降级后切换 _algorithm_fn 到 Python，避免后续请求重复尝试 MATLAB。
+        不永久切换 _algorithm_fn，下次调用仍可尝试 MATLAB（由 _matlab_available 控制）。
         """
         try:
             return self._invoke_algorithm(xyz, meta)
@@ -652,10 +702,9 @@ class MatlabAdapter(BridgeServer):
             # 仅当当前算法不是 Python 默认算法时才降级（避免无限递归）
             if engine_mode == "auto" and self._algorithm_fn is not self._default_algorithm:
                 logger.warning(
-                    "MATLAB 算法失败，auto 模式降级到 Python 原型: %s", exc
+                    "MATLAB 算法失败，auto 模式本次降级到 Python 原型: %s", exc
                 )
-                # 切换到 Python，后续请求（含 _try_profile_prediction）直接跳过 MATLAB
-                self._algorithm_fn = self._default_algorithm
+                # 不永久切换 _algorithm_fn，下次调用仍可尝试 MATLAB（由 _matlab_available 控制）
                 return self._default_algorithm(xyz=xyz, meta=meta)
             raise
 

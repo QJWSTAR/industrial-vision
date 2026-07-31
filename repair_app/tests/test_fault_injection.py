@@ -38,13 +38,14 @@ class TestCase1MatlabStuck:
     """MATLAB 永久卡死 → timeout → RECOVERING → GUI 不卡死"""
 
     def test_execution_scope_exception_triggers_recovering(self):
-        """计算异常时 execution_scope 自动进入 RECOVERING 状态"""
+        """引擎异常时 execution_scope 自动进入 RECOVERING 状态"""
+        from repair_app.bridge.communication.exceptions import EngineUnavailableError
         manager = _make_manager()
         manager._set_status(LifecycleStatus.READY, "ready")
 
-        with pytest.raises(ValueError, match="simulated crash"):
+        with pytest.raises(EngineUnavailableError, match="simulated crash"):
             with manager.execution_scope():
-                raise ValueError("simulated crash")
+                raise EngineUnavailableError("simulated crash")
 
         assert manager.status == LifecycleStatus.RECOVERING
 
@@ -71,13 +72,14 @@ class TestCase1MatlabStuck:
 
     def test_timeout_handler_does_not_block_gui(self):
         """超时处理不阻塞 GUI（非阻塞信号）"""
+        from repair_app.bridge.communication.exceptions import EngineUnavailableError
         manager = _make_manager()
         manager._set_status(LifecycleStatus.READY, "ready")
 
-        # 模拟超时：execution_scope 异常 → RECOVERING
-        with pytest.raises(ValueError):
+        # 模拟引擎超时：execution_scope 引擎异常 → RECOVERING
+        with pytest.raises(EngineUnavailableError):
             with manager.execution_scope():
-                raise ValueError("timeout")
+                raise EngineUnavailableError("timeout")
 
         assert manager.status == LifecycleStatus.RECOVERING
         # 状态变更通过 Qt Signal 异步发出，不阻塞
@@ -583,7 +585,7 @@ class TestCase9TimeoutRetry:
         assert controller.execute_computation(b"next") is False
 
     def test_start_worker_cleans_previous_thread(self):
-        """_start_worker 强制清理仍在运行的旧线程"""
+        """P1-25: _start_worker 检测到旧线程仍在运行时拒绝启动（非阻塞）"""
         from repair_app.ui.compute_controller import ComputeController
 
         controller = ComputeController(project_root="/fake")
@@ -600,12 +602,17 @@ class TestCase9TimeoutRetry:
             mock_worker = MagicMock()
             mock_worker_cls.return_value = mock_worker
 
-            controller._start_worker(b"test")
+            # P1-25: 旧线程仍在运行时返回 False，不阻塞 UI 等待旧线程退出
+            result = controller._start_worker(b"test")
 
-        # 旧线程被中断
-        old_thread.requestInterruption.assert_called_once()
-        old_thread.quit.assert_called_once()
-        old_thread.wait.assert_called_once()
+        # 拒绝启动，返回 False
+        assert result is False
+        # P1-25: 不再强制中断旧线程（旧线程由自身 finished 回调清理）
+        old_thread.requestInterruption.assert_not_called()
+        old_thread.quit.assert_not_called()
+        old_thread.wait.assert_not_called()
+        # 也不应创建新线程
+        mock_qthread.assert_not_called()
 
     def test_operation_id_changes_per_computation(self):
         """每次计算生成不同的 operation_id"""

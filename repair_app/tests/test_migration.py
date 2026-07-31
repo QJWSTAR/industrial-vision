@@ -74,6 +74,13 @@ class TestMainWindowBridgeIntegration:
                 f"MainWindow._zmq_client 期望 LegacyZmqClient，实际 {type(mw._zmq_client).__name__}"
             )
         finally:
+            # P2-9: 清理 ComputeController（含 ProgressSubscriber 线程），避免 access violation
+            cc = getattr(mw, "_compute_controller", None)
+            if cc is not None:
+                try:
+                    cc.cleanup()
+                except Exception:
+                    pass
             if mw._zmq_client is not None:
                 mw._zmq_client.close()
             mw.deleteLater()
@@ -89,6 +96,13 @@ class TestMainWindowBridgeIntegration:
             # 验证：返回 bool（_use_zmq_engine 可能因 engine 未就绪返回 False）
             assert isinstance(result, bool)
         finally:
+            # P2-9: 清理 ComputeController（含 ProgressSubscriber 线程），避免 access violation
+            cc = getattr(mw, "_compute_controller", None)
+            if cc is not None:
+                try:
+                    cc.cleanup()
+                except Exception:
+                    pass
             if mw._zmq_client is not None:
                 mw._zmq_client.close()
             mw.deleteLater()

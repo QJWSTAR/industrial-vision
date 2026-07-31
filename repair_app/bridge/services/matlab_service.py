@@ -27,7 +27,7 @@ from ..communication import (
     BridgeClient,
     BridgeConfig,
     BridgeError,
-    ConnectionError,
+    BridgeConnectionError,
     DEFAULT_CONFIG,
     EngineStatus,
     Serializer,
@@ -156,6 +156,10 @@ class MatlabService:
             import os
             project_root = os.environ.get("CSAM_PROJECT_ROOT", "")
 
+        if not project_root:
+            logger.error("project_root 为空，无法定位 matlab_bridge_server.m")
+            return False
+
         manager = MatlabLifecycleManager.get_instance(project_root)
         return manager.ensure_ready()
 
@@ -272,7 +276,10 @@ class MatlabService:
 
     # ---- 完整管线计算（阻塞，任务7 Phase 1） ----
     def run_full_pipeline_blocking(
-        self, request_bytes: bytes, timeout_s: float = 600.0
+        self,
+        request_bytes: bytes,
+        timeout_s: float = 600.0,
+        is_cancelled: Optional[Callable[[], bool]] = None,
     ) -> dict:
         """阻塞执行完整计算管线（路径规划 + 形貌预测）。
 
@@ -281,12 +288,15 @@ class MatlabService:
         Args:
             request_bytes: 序列化后的 protobuf RepairRequest 字节
             timeout_s: 超时（秒），默认 600s
+            is_cancelled: 可选取消检查回调（P0-12）。在 ZMQ poll 循环中周期调用，
+                返回 True 时抛出 MatlabCallCancelledError，让长计算期间取消按钮生效。
 
         Returns:
             解析后的结果 dict（与旧版 parse_repair_result 格式一致）
 
         Raises:
             BridgeError: 通信失败
+            MatlabCallCancelledError: 用户取消
             RuntimeError: 结果解析失败
         """
         import time as _time
@@ -303,7 +313,9 @@ class MatlabService:
         with manager.execution_scope():
             try:
                 reply_bytes = self._client.request_blocking(
-                    request_bytes, timeout_ms=int(timeout_s * 1000)
+                    request_bytes,
+                    timeout_ms=int(timeout_s * 1000),
+                    is_cancelled=is_cancelled,
                 )
             except BridgeError as exc:
                 logger.error("完整管线计算通信失败: %s", exc)

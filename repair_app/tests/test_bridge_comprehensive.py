@@ -37,6 +37,10 @@ def _make_fake_zmq():
     zmq.RCVTIMEO = 27
     zmq.SNDTIMEO = 28
     zmq.POLLIN = 1
+    # ZMQError 异常类（用于 except zmq.ZMQError）
+    class _FakeZMQError(Exception):
+        pass
+    zmq.ZMQError = _FakeZMQError
     # Context 需要是一个类，并且有 instance() 类方法
     class _FakeContext:
         _instance = MagicMock()
@@ -839,11 +843,18 @@ class TestLifecycleManagerWatchdog:
         from repair_app.bridge.lifecycle_manager import (
             MatlabLifecycleManager, LifecycleStatus,
         )
+        import time as _time
         m = MatlabLifecycleManager.get_instance(str(tmp_path))
         monkeypatch.setattr(type(m._launcher), "restart_count", PropertyMock(return_value=1))
         monkeypatch.setattr(m._launcher, "restart", lambda timeout: False)
         result = m._try_restart()
-        assert result is False
+        # _try_restart 现在异步执行，返回 True 表示已启动重启
+        assert result is True
+        # 等待后台线程完成（restart 被 mock 为立即返回 False）
+        for _ in range(50):
+            if m.status == LifecycleStatus.CRASHED:
+                break
+            _time.sleep(0.02)
         assert m.status == LifecycleStatus.CRASHED
 
     def test_mark_idle_resets_restart(self, tmp_path, monkeypatch):
@@ -893,17 +904,18 @@ class TestLifecycleManagerPhase4:
         m._launcher.reset_restart_count.assert_called_once()
 
     def test_execution_scope_exception_triggers_recovering(self, tmp_path, monkeypatch):
-        """execution_scope 异常退出时进入 RECOVERING。"""
+        """execution_scope 引擎异常退出时进入 RECOVERING。"""
         from repair_app.bridge.lifecycle_manager import (
             MatlabLifecycleManager, LifecycleStatus,
         )
+        from repair_app.bridge.communication.exceptions import EngineUnavailableError
         m = MatlabLifecycleManager.get_instance(str(tmp_path))
         monkeypatch.setattr(type(m._launcher), "matlab_version", PropertyMock(return_value="R2025b"))
         m._set_status(LifecycleStatus.READY, "ready")
 
-        with pytest.raises(ValueError, match="test error"):
+        with pytest.raises(EngineUnavailableError, match="test engine crash"):
             with m.execution_scope():
-                raise ValueError("test error")
+                raise EngineUnavailableError("test engine crash")
 
         assert m.status == LifecycleStatus.RECOVERING
 
@@ -1180,6 +1192,7 @@ class TestMatlabAdapterInner:
         )
         from repair_app.bridge.communication.serializer import Serializer
         from repair_app.communication.repair_protocol_pb2 import RepairStatusCode
+        monkeypatch.setenv("CSAM_ALGORITHM_ENGINE", "python")
         adapter = MatlabAdapter()
         rng = np.random.default_rng(42)
         xyz = rng.uniform(-5, 5, (10, 3)).astype(np.float32)
@@ -1196,6 +1209,7 @@ class TestMatlabAdapterInner:
         from repair_app.bridge.adapters.matlab_adapter import MatlabAdapter
         from repair_app.bridge.communication.serializer import Serializer
         from repair_app.communication.repair_protocol_pb2 import RepairStatusCode
+        monkeypatch.setenv("CSAM_ALGORITHM_ENGINE", "python")
         adapter = MatlabAdapter()
         rng = np.random.default_rng(42)
         xyz = rng.uniform(-5, 5, (10, 3)).astype(np.float32)
@@ -1269,6 +1283,7 @@ class TestMatlabAdapterInner:
         adapter = MatlabAdapter.__new__(MatlabAdapter)
         adapter._address = "tcp://127.0.0.1:5555"
         adapter._algorithm_fn = MagicMock(side_effect=MatlabAlgorithmError("MATLAB fail"))
+        adapter._matlab_available = True
         rng = np.random.default_rng(42)
         xyz = rng.uniform(-5, 5, (10, 3)).astype(np.float32)
         with patch("repair_app.bridge.adapters.matlab_pipeline.MATLABPipeline") as mock_pipeline:
@@ -1449,7 +1464,8 @@ class TestMatlabAdapterInner:
         adapter._algorithm_fn = mock_fn
         result = adapter._invoke_with_fallback(np.zeros((10, 3)), {})
         assert result is not None
-        assert adapter._algorithm_fn is adapter._default_algorithm
+        # 本次降级：返回 default_algorithm 结果，但不永久切换 _algorithm_fn
+        assert adapter._algorithm_fn is mock_fn
 
     def test_invoke_with_fallback_matlab_force_raise(self, monkeypatch):
         from repair_app.bridge.adapters.matlab_adapter import MatlabAdapter, MatlabAlgorithmError
@@ -1716,6 +1732,7 @@ class TestZmqRepairWorker:
         mock_ctx.socket.return_value = mock_sock
         fake_zmq.Context._instance = mock_ctx
         monkeypatch.setitem(sys.modules, "zmq", fake_zmq)
+        monkeypatch.setattr("repair_app.communication.zmq_client.zmq", fake_zmq)
         monkeypatch.setattr("repair_app.communication.zmq_client._ZMQ_AVAILABLE", True)
         worker = ZmqRepairWorker(b"fake data", timeout_ms=100)
         errors = []
@@ -1730,10 +1747,11 @@ class TestZmqRepairWorker:
         fake_zmq = _make_fake_zmq()
         mock_ctx = MagicMock()
         mock_sock = MagicMock()
-        mock_sock.send.side_effect = real_zmq.ZMQError("send failed")
+        mock_sock.send.side_effect = fake_zmq.ZMQError("send failed")
         mock_ctx.socket.return_value = mock_sock
         fake_zmq.Context._instance = mock_ctx
         monkeypatch.setitem(sys.modules, "zmq", fake_zmq)
+        monkeypatch.setattr("repair_app.communication.zmq_client.zmq", fake_zmq)
         monkeypatch.setattr("repair_app.communication.zmq_client._ZMQ_AVAILABLE", True)
         worker = ZmqRepairWorker(b"fake data", timeout_ms=100)
         errors = []
@@ -1766,6 +1784,7 @@ class TestHealthCheckWorker:
         mock_ctx.socket.return_value = mock_sock
         fake_zmq.Context._instance = mock_ctx
         monkeypatch.setitem(sys.modules, "zmq", fake_zmq)
+        monkeypatch.setattr("repair_app.communication.zmq_client.zmq", fake_zmq)
         monkeypatch.setattr("repair_app.communication.zmq_client._ZMQ_AVAILABLE", True)
         worker = HealthCheckWorker()
         results = []
@@ -2131,7 +2150,7 @@ class TestRequestWorker:
         fake_zmq = _make_fake_zmq()
         mock_ctx = MagicMock()
         mock_sock = MagicMock()
-        mock_sock.send.side_effect = real_zmq.ZMQError("send failed")
+        mock_sock.send.side_effect = fake_zmq.ZMQError("send failed")
         mock_ctx.socket.return_value = mock_sock
         fake_zmq.Context._instance = mock_ctx
         monkeypatch.setitem(sys.modules, "zmq", fake_zmq)

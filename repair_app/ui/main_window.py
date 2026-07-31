@@ -145,6 +145,11 @@ class MainWindow(QMainWindow):
         self._morph_worker = None
         self._compute_thread = None
         self._compute_worker = None
+        self._load_thread = None
+        self._load_worker = None
+        self._report_thread = None
+        self._report_worker = None
+        self._pending_recover_state = {}
         self._pipeline_launcher = None  # MatlabBridgeLauncher 实例（跨计算复用）
         self._progress_subscriber = None  # ProgressSubscriber 实例（实时进度订阅）
         self._matlab_service = None  # MatlabService 实例（Phase 5：单入口点）
@@ -859,8 +864,8 @@ class MainWindow(QMainWindow):
         bg, border, fg = colors.get(state, colors["locked"])
         label.setStyleSheet(
             f"QLabel{{background:{bg};color:{fg};border:1px solid {border};"
-            "border-radius:12px;padding:9px 12px;font-size:13px;"
-            "font-weight:bold;}}"
+            f"border-radius:12px;padding:9px 12px;font-size:13px;"
+            f"font-weight:bold;}}"
         )
 
     def _refresh_morph_status(self) -> None:
@@ -995,7 +1000,7 @@ class MainWindow(QMainWindow):
         # P2-2: 路径规划结果检查（连续性/法向稳定/层正确性）
         self._inspect_path_result(waypoint_layers)
 
-        self._prog.setValue(100)
+        self._prog.setValue(85)  # 路径规划完成，等待形貌预测；全部完成后再设 100%
         self._set_busy(False)
         self._refresh_morph_status()
 
@@ -1251,12 +1256,15 @@ class MainWindow(QMainWindow):
     def _on_selection_changed(self, mask: np.ndarray) -> None:
         n_sel = int(np.sum(mask))
         self._lb_sel.setText(f"已选: {n_sel}")
+        # P2-8: 同步选区到 session，否则 _refresh_start_button_state 读取旧 mask
+        # 导致用户选区后"开始修复"按钮无法启用
+        self._session.selection.mask = mask
         if self._session.is_busy:
             return
         if self._session.repair_mode == MODE_ADDITIVE:
-            self._btn_start_repair.setEnabled(self._session.point_cloud.xyz is not None)
+            self._refresh_start_button_state()
         else:
-            self._btn_start_repair.setEnabled(n_sel >= 3)
+            self._refresh_start_button_state()
 
     def _on_material_changed(self, idx: int) -> None:
         db = _Coord.get_material_database()
@@ -1312,33 +1320,75 @@ class MainWindow(QMainWindow):
             self, "加载点云", "",
             "点云文件 (*.csv *.txt *.xyz *.asc);;所有文件 (*)"
         )
-        if fp:
-            try:
-                self._sb.showMessage(f"加载中: {os.path.basename(fp)}...")
-                xyz, normals = self._file_service.load_point_cloud(fp)
-                self._session.point_cloud.xyz = xyz
-                self._session.point_cloud.path = fp
-                if normals is not None:
-                    self._session.point_cloud.normals = normals
-                else:
-                    self._session.point_cloud.normals = self._est_normals(self._session.point_cloud.xyz)
-                self._reset_output()
-                pts_with_normals = np.hstack([self._session.point_cloud.xyz, self._session.point_cloud.normals])
-                self._selector.set_points(pts_with_normals)
-                self._lb_pts.setText(f"点数: {len(self._session.point_cloud.xyz):,}")
-                self._btn_start_repair.setEnabled(True)
-                proj_name = os.path.splitext(os.path.basename(fp))[0]
-                self._project_manager.new_project(proj_name)
-                self._lb_project.setText(f"项目: {proj_name}")
-                info(f"点云已加载: {os.path.basename(fp)} ({len(self._session.point_cloud.xyz):,} 点)")
-                self._sb.showMessage(f"已加载: {os.path.basename(fp)} ({len(self._session.point_cloud.xyz):,} 点)")
-                # Pipeline: 导入点云完成
-                _wfc_call(self,"set_step_done", 0)
-            except Exception as e:
-                _show_error(self, "加载失败", e)
-        else:
-            # 未选择文件：静默返回（演示数据已在启动时自动加载）
+        if not fp:
             self._sb.showMessage("已取消加载", 2000)
+            return
+        # P0-1: 异步加载点云（避免大文件阻塞 UI）
+        self._sb.showMessage(f"加载中: {os.path.basename(fp)}...")
+        if hasattr(self, "_lb_prog"):
+            self._lb_prog.setText(f"正在加载 {os.path.basename(fp)}...")
+            self._prog.setValue(10)
+        from repair_app.ui.workers import PointCloudLoadWorker
+        self._load_worker = PointCloudLoadWorker(fp, self._file_service)
+        self._load_thread = QThread()
+        self._load_worker.moveToThread(self._load_thread)
+        self._load_thread.started.connect(self._load_worker.run)
+        self._load_worker.progress.connect(self._on_load_progress)
+        self._load_worker.finished.connect(self._on_load_finished)
+        self._load_worker.failed.connect(self._on_load_failed)
+        self._load_thread.finished.connect(self._load_worker.deleteLater)
+        self._load_thread.finished.connect(self._load_thread.deleteLater)
+        self._load_thread.finished.connect(self._on_load_thread_finished)
+        self._load_thread.start()
+
+    @Slot(str)
+    def _on_load_progress(self, msg: str) -> None:
+        """点云加载进度反馈。"""
+        self._sb.showMessage(msg)
+        if hasattr(self, "_lb_prog"):
+            self._lb_prog.setText(msg)
+            self._prog.setValue(min(self._prog.value() + 20, 80))
+
+    @Slot(object, object, str)
+    def _on_load_finished(self, xyz, normals, fp: str) -> None:
+        """点云异步加载完成。"""
+        self._session.point_cloud.xyz = xyz
+        self._session.point_cloud.path = fp
+        self._session.point_cloud.normals = normals
+        self._reset_output()
+        pts_with_normals = np.hstack([xyz, normals])
+        self._selector.set_points(pts_with_normals)
+        self._lb_pts.setText(f"点数: {len(xyz):,}")
+        self._refresh_start_button_state()
+        proj_name = os.path.splitext(os.path.basename(fp))[0]
+        self._project_manager.new_project(proj_name)
+        self._lb_project.setText(f"项目: {proj_name}")
+        info(f"点云已加载: {os.path.basename(fp)} ({len(xyz):,} 点)")
+        self._sb.showMessage(f"已加载: {os.path.basename(fp)} ({len(xyz):,} 点)")
+        if hasattr(self, "_lb_prog"):
+            self._lb_prog.setText("✅ 点云已加载")
+            self._prog.setValue(0)
+        # Pipeline: 导入点云完成
+        _wfc_call(self, "set_step_done", 0)
+
+    @Slot(str, str, str)
+    def _on_load_failed(self, error_code: str, friendly: str, detail: str) -> None:
+        """点云异步加载失败。"""
+        log_error(f"点云加载失败 [{error_code}]: {friendly}\n{detail}")
+        if hasattr(self, "_lb_prog"):
+            self._lb_prog.setText("❌ 加载失败")
+            self._prog.setValue(0)
+        from repair_app.ui.dialogs import ErrorDialog
+        ErrorDialog.show(
+            self, title="加载失败", what=friendly, why="", how="",
+            log_text=detail,
+        )
+
+    @Slot()
+    def _on_load_thread_finished(self) -> None:
+        """点云加载线程结束清理。"""
+        self._load_thread = None
+        self._load_worker = None
 
     def _load_demo(self) -> None:
         pts, normals, _, _ = _Coord.generate_sample_defect(
@@ -1350,7 +1400,7 @@ class MainWindow(QMainWindow):
         pts_with_normals = np.hstack([self._session.point_cloud.xyz, self._session.point_cloud.normals])
         self._selector.set_points(pts_with_normals)
         self._lb_pts.setText(f"点数: {len(self._session.point_cloud.xyz):,}")
-        self._btn_start_repair.setEnabled(True)
+        self._refresh_start_button_state()
         info(f"演示数据已加载 ({len(self._session.point_cloud.xyz):,} 点)")
         self._sb.showMessage(f"演示数据已加载 ({len(self._session.point_cloud.xyz):,} 点)")
         # Pipeline: 导入点云完成
@@ -1586,7 +1636,6 @@ class MainWindow(QMainWindow):
             self._sb.showMessage("正在启动 MATLAB + Bridge（预计 60-120 秒，请耐心等待）...")
             self._prog.setValue(2)
             self._lb_prog.setText("正在启动 MATLAB + Bridge...（预计 1-2 分钟）")
-            QApplication.processEvents()
             try:
                 from repair_app.ui.dialogs import LoadingDialog
                 from repair_app.bridge.services.matlab_service import MatlabService
@@ -1621,12 +1670,14 @@ class MainWindow(QMainWindow):
                 self._prog.setValue(0)
                 self._lb_prog.setText("MATLAB 启动异常")
                 from repair_app.ui.dialogs import ErrorDialog
+                from repair_app.utils.error_manager import ErrorManager, ErrorCode
+                _fm = ErrorManager.get_friendly_message(exc, ErrorCode.MATLAB, "MATLAB 启动")
                 ErrorDialog.show(
                     self,
-                    title="MATLAB 启动异常",
-                    what="MATLAB 启动过程中发生错误。",
-                    why=f"错误详情：{exc}",
-                    how="请让管理员检查 MATLAB 环境后重试。",
+                    title=_fm.title,
+                    what=_fm.what or "MATLAB 启动过程中发生错误。",
+                    why=_fm.why,
+                    how=_fm.how or "请让管理员检查 MATLAB 环境后重试。",
                     exc=exc,
                 )
                 return
@@ -1686,7 +1737,14 @@ class MainWindow(QMainWindow):
             self._sb.showMessage("已发送取消请求，等待 MATLAB 到达安全检查点...")
             if hasattr(self, "_btn_cancel_repair"):
                 self._btn_cancel_repair.setEnabled(False)
-            controller.cancel_computation()
+            try:
+                controller.cancel_computation()
+            except Exception as exc:
+                log_error(f"取消计算失败: {exc}")
+                # 恢复按钮，允许重试
+                if hasattr(self, "_btn_cancel_repair"):
+                    self._btn_cancel_repair.setEnabled(True)
+                Toast.warning(self, f"取消失败，可重试：{exc}")
             return
 
         requested = False
@@ -1732,7 +1790,7 @@ class MainWindow(QMainWindow):
             self._prog.setValue(10)
             _wfc_call(self,"set_step_running", 1)   # 路径规划执行中
         elif "执行" in stage:
-            self._prog.setValue(30)
+            self._prog.setValue(50)
             _wfc_call(self,"set_step_done", 1)      # 路径规划完成
             _wfc_call(self,"set_step_running", 2)   # 形貌预测执行中
         elif "解析" in stage:
@@ -1803,21 +1861,41 @@ class MainWindow(QMainWindow):
             self._sb.showMessage("正在自动生成 PDF 报告...")
 
             # 自动生成报告（不弹窗，保存到桌面）
+            report_failed = False
             try:
                 self._auto_generate_report()
             except Exception as exc:
+                report_failed = True
                 log_error(f"自动报告生成失败: {exc}")
 
-            self._prog.setValue(100)
-            self._lb_prog.setText("✅ 一键计算完成")
-            self._sb.showMessage(
-                f"一键计算完成 · {len(waypoints)} 航点 · "
-                f"质量={metrics['estimated_mass_g']:.3f}g · "
-                f"均匀性={metrics['uniformity_score']:.2f}"
-            )
+            if report_failed:
+                # P2-1: 报告失败时不显示"完成"，明确告知用户报告缺失
+                self._prog.setValue(100)
+                self._lb_prog.setText("⚠ 计算完成，报告生成失败")
+                self._sb.showMessage(
+                    f"计算完成 · {len(waypoints)} 航点 · 报告生成失败，请查看日志"
+                )
+                try:
+                    from repair_app.ui.toast import Toast
+                    Toast.warning(
+                        self,
+                        "计算结果已保存，但 PDF 报告自动生成失败，"
+                        "可稍后在「输出交付」面板手动重新生成",
+                    )
+                except Exception:
+                    pass
+            else:
+                self._prog.setValue(100)
+                self._lb_prog.setText("✅ 一键计算完成")
+                self._sb.showMessage(
+                    f"一键计算完成 · {len(waypoints)} 航点 · "
+                    f"质量={metrics['estimated_mass_g']:.3f}g · "
+                    f"均匀性={metrics['uniformity_score']:.2f}"
+                )
             info(f"一键计算完成: {len(waypoints)} 航点, "
                  f"质量={metrics['estimated_mass_g']:.3f}g, "
-                 f"均匀性={metrics['uniformity_score']:.2f}")
+                 f"均匀性={metrics['uniformity_score']:.2f}, "
+                 f"report_failed={report_failed}")
             # Pipeline: 导出完成
             _wfc_call(self,"set_step_done", 4)
             self._set_busy(False)
@@ -1832,20 +1910,35 @@ class MainWindow(QMainWindow):
     @Slot(str, str, str)
     def _on_compute_failed(self, error_code: str, friendly: str, detail: str) -> None:
         """一键计算失败（结构化错误信号）。"""
+        # P0-12: 用户取消走 cancelled 语义，不弹错误对话框
+        if error_code == "CANCELLED":
+            self._on_compute_cancelled(friendly)
+            return
         self._set_busy(False)
         self._prog.setValue(0)
         self._lb_prog.setText("❌ 计算失败")
         self._sb.showMessage("一键计算失败")
-        log_error(f"一键计算失败 [{error_code}]: {friendly}\n{detail}")
         # 停止实时进度订阅
         self._stop_progress_subscriber()
         # Pipeline: 标记当前执行中的阶段为失败
         _wfc_call(self,"mark_running_as_failed")
-        # 显示结构化错误对话框（用户友好 + 可展开详情）
-        # friendly 已包含完整 What/Why/How（来自 _pack_error）
-        from repair_app.ui.dialogs import ErrorDialog
-        ErrorDialog.show(
-            self, title="一键计算失败", what=friendly, why="", how="",
+        # 清理线程引用，防止后续计算无法启动
+        self._compute_thread = None
+        self._compute_worker = None
+        # P1-31: 走 ErrorManager.handle 统一编排（日志聚合 + 策略调度 + 对话框）
+        # 转发模式：Worker 端 _pack_error 已记录日志并生成 friendly 文本，
+        # 此处仅做对话框显示，log_text 提供时跳过重复日志记录
+        try:
+            resolved_code = ErrorCode(error_code) if error_code else ErrorCode.UNKNOWN
+        except ValueError:
+            resolved_code = ErrorCode.UNKNOWN
+        ErrorManager.handle(
+            exc=None,
+            code=resolved_code,
+            context="一键计算",
+            parent=self,
+            show_dialog=True,
+            override_friendly=friendly,
             log_text=detail,
         )
 
@@ -1867,6 +1960,20 @@ class MainWindow(QMainWindow):
         # 计算线程结束后停止实时进度订阅
         self._stop_progress_subscriber()
 
+    def _refresh_start_button_state(self) -> None:
+        """统一刷新开始修复按钮状态（基于 session 状态）。
+
+        additive 模式仅需点云；subtractive 模式需点云 + 选择集。
+        """
+        has_cloud = self._session.point_cloud.xyz is not None
+        sel_mask = self._session.selection.mask
+        has_selection = sel_mask is not None and np.any(sel_mask)
+        mode = self._session.repair_mode
+        if mode == "additive":
+            self._btn_start_repair.setEnabled(has_cloud)
+        else:
+            self._btn_start_repair.setEnabled(has_cloud and has_selection)
+
     # ========== 实时可视化：ProgressSubscriber 信号处理 ==========
 
     @Slot(str)
@@ -1882,7 +1989,6 @@ class MainWindow(QMainWindow):
         self._sb.showMessage("正在启动 MATLAB + Bridge（预计 60-120 秒，请耐心等待）...")
         self._prog.setValue(2)
         self._lb_prog.setText("正在启动 MATLAB + Bridge...（预计 1-2 分钟）")
-        QApplication.processEvents()
 
     @Slot()
     def _on_matlab_startup_done(self) -> None:
@@ -1894,6 +2000,7 @@ class MainWindow(QMainWindow):
     @Slot(str, str)
     def _on_matlab_startup_failed(self, title: str, message: str) -> None:
         """MATLAB 启动失败（ComputeController 信号）。"""
+        self._set_busy(False)
         self._prog.setValue(0)
         self._lb_prog.setText("MATLAB 启动失败")
         from repair_app.ui.dialogs import ErrorDialog
@@ -1951,6 +2058,9 @@ class MainWindow(QMainWindow):
             # 更新 LayerPlayer 的总层数
             if total_layers > 0:
                 self._layer_player.set_total_layers(total_layers)
+                # 逐层进度反馈：50% → 65% 区间映射，避免进度条长时间停滞
+                layer_progress = min((layer_idx + 1) / total_layers, 1.0)
+                self._prog.setValue(50 + int(15 * layer_progress))
 
             # Merge path and mesh channels instead of letting a morphology
             # snapshot overwrite a previously received path layer.
@@ -2036,15 +2146,17 @@ class MainWindow(QMainWindow):
             log_error(f"逐层查看回放失败: {exc}")
 
     def _auto_generate_report(self) -> None:
-        """自动生成 PDF 报告到统一导出目录（不弹文件对话框）。"""
+        """自动生成 PDF 报告到统一导出目录（不弹文件对话框）。
+
+        P0-3: 报告生成移入后台线程，避免 matplotlib 渲染阻塞 UI。
+        """
         import datetime
-        # Pipeline 注：结果生成(3)的 running 状态由调用方设置（_finish_morphology 或 _on_compute_result）
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         proj_name = self._project_manager.current_name or "repair"
-        # 消除文件名中的非法字符
         safe_name = "".join(c for c in proj_name if c not in '\\/:*?"<>|')
         fp = str(self._path_manager.pdf_path(f"{safe_name}_report_{ts}"))
 
+        # 主线程预计算所有指标（访问 session/UI，快）
         sel_mask = self._session.selection.mask if self._session.selection.mask is not None else (
             self._selector.get_selection_mask() if self._selector else np.ones(len(self._session.point_cloud.xyz), dtype=bool)
         )
@@ -2070,37 +2182,77 @@ class MainWindow(QMainWindow):
             "预计加工时间": f"{path_metrics['estimated_time_s']:.1f} s",
             "可行性评分": f"{self._session.feas_result.score:.1%}" if self._session.feas_result else "—",
         }
-        # P2-4: 计算真实的 layers/statistics/quality 数据
         layers_data = self._compute_layer_data()
         statistics_data = self._compute_statistics_data(defect_metrics, path_metrics)
         quality_data = self._compute_quality_data()
-        # P4-5: 报告字段统一写入 Session.report（禁止重复同步）
-        self._session.report.scan_info = scan_info
-        self._session.report.parameters = self._collect_params()
-        self._session.report.results = results
-        self._session.report.layers = layers_data
-        self._session.report.statistics = statistics_data
-        self._session.report.quality = quality_data
-        # P4-5: 派生指标写入 Session.metrics（禁止重复计算）
-        self._session.metrics.defect = defect_metrics
-        self._session.metrics.path = path_metrics
-        self._session.metrics.layers = layers_data
-        self._session.metrics.statistics = statistics_data
-        self._session.metrics.quality = quality_data
-        ok = self._export_service.export_pdf_report(self._session, output_path=fp)
-        if ok:
-            info(f"报告已自动保存: {fp}")
-            self._sb.showMessage(f"修复完成 · 报告已保存: {fp}", 5000)
-            # Pipeline: 结果生成完成 → 导出就绪
-            _wfc_call(self,"set_step_done", 3)
-            _wfc_call(self,"set_step_running", 4)
-            self._lb_prog.setText("✅ 修复完成，可导出 G-code / 报告")
-            Toast.success(self, "修复完成：路径规划 → 形貌预测 → 报告均已生成，可导出交付")
-        else:
-            warning("PDF 报告自动生成失败")
-            _wfc_call(self,"mark_running_as_failed")
-            self._lb_prog.setText("⚠ 报告自动生成失败")
+
+        # 打包数据，交由 ReportWorker 在后台线程写入 session + 生成 PDF
+        report_data = {
+            "scan_info": scan_info,
+            "parameters": self._collect_params(),
+            "results": results,
+            "layers": layers_data,
+            "statistics": statistics_data,
+            "quality": quality_data,
+            "defect_metrics": defect_metrics,
+            "path_metrics": path_metrics,
+        }
+        from repair_app.ui.workers import ReportWorker
+        self._report_worker = ReportWorker(report_data, self._export_service, self._session, fp)
+        self._report_thread = QThread()
+        self._report_worker.moveToThread(self._report_thread)
+        self._report_thread.started.connect(self._report_worker.run)
+        self._report_worker.progress.connect(lambda msg: self._sb.showMessage(msg))
+        self._report_worker.finished.connect(self._on_report_finished)
+        self._report_worker.failed.connect(self._on_report_failed)
+        self._report_thread.finished.connect(self._report_worker.deleteLater)
+        self._report_thread.finished.connect(self._report_thread.deleteLater)
+        self._report_thread.finished.connect(self._on_report_thread_finished)
+        self._report_thread.start()
+
+    @Slot(str)
+    def _on_report_finished(self, fp: str) -> None:
+        """报告生成完成。"""
+        info(f"报告已自动保存: {fp}")
+        self._sb.showMessage(f"修复完成 · 报告已保存: {fp}", 5000)
+        _wfc_call(self, "set_step_done", 3)
+        _wfc_call(self, "set_step_running", 4)
+        self._lb_prog.setText("✅ 修复完成，可导出 G-code / 报告")
+        Toast.success(self, "修复完成：路径规划 → 形貌预测 → 报告均已生成，可导出交付")
+
+    @Slot(str, str, str)
+    def _on_report_failed(self, error_code: str, friendly: str, detail: str) -> None:
+        """报告生成失败。"""
+        log_error(f"报告生成失败 [{error_code}]: {friendly}\n{detail}")
+        _wfc_call(self, "mark_running_as_failed")
+        # P2-2: 复位 busy 与进度条，避免状态卡死；弹 ErrorDialog 提供详情与重试入口
+        self._set_busy(False)
+        self._prog.setValue(0)
+        self._lb_prog.setText("⚠ 报告自动生成失败")
+        self._sb.showMessage("报告生成失败")
+        try:
+            from repair_app.utils.error_manager import ErrorManager, ErrorCode
+            try:
+                resolved_code = ErrorCode(error_code) if error_code else ErrorCode.EXPORT
+            except ValueError:
+                resolved_code = ErrorCode.EXPORT
+            ErrorManager.handle(
+                exc=None,
+                code=resolved_code,
+                context="报告生成",
+                parent=self,
+                show_dialog=True,
+                override_friendly=friendly or "报告自动生成失败",
+                log_text=detail,
+            )
+        except Exception:
             Toast.error(self, "报告自动生成失败，请查看日志")
+
+    @Slot()
+    def _on_report_thread_finished(self) -> None:
+        """报告生成线程结束清理。"""
+        self._report_thread = None
+        self._report_worker = None
 
     # ====== 步骤①：路径规划 ======
     @Slot()
@@ -2488,7 +2640,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_lb_prog"):
             self._lb_prog.setText(f"正在导出 {exporter.display_name}...")
             self._prog.setValue(50)
-        QApplication.processEvents()
 
         try:
             result = ExporterRegistry.run(format_name, self, self._session, self._path_manager)
@@ -2644,21 +2795,50 @@ class MainWindow(QMainWindow):
     def _apply_recovered_state(self, state: dict) -> None:
         """应用恢复的会话状态。"""
         try:
-            # 恢复点云
+            # P0-4: 异步恢复点云（避免大文件阻塞 UI）
             pcd_path = state.get("point_cloud_path")
             if pcd_path and os.path.isfile(pcd_path):
-                xyz, normals = self._file_service.load_point_cloud(pcd_path)
-                self._session.point_cloud.xyz = xyz
-                self._session.point_cloud.path = pcd_path
-                self._session.point_cloud.normals = normals if normals is not None else self._est_normals(self._session.point_cloud.xyz)
-                pts_with_normals = np.hstack([self._session.point_cloud.xyz, self._session.point_cloud.normals])
-                self._selector.set_points(pts_with_normals)
-                self._lb_pts.setText(f"点数: {len(self._session.point_cloud.xyz):,}")
-                self._btn_start_repair.setEnabled(True)
-                proj_name = os.path.splitext(os.path.basename(pcd_path))[0]
-                self._project_manager.new_project(proj_name)
-                self._lb_project.setText(f"项目: {proj_name}")
-                info(f"已恢复点云: {pcd_path}")
+                self._sb.showMessage(f"正在恢复点云: {os.path.basename(pcd_path)}...")
+                self._pending_recover_state = state
+                from repair_app.ui.workers import PointCloudLoadWorker
+                self._load_worker = PointCloudLoadWorker(pcd_path, self._file_service)
+                self._load_thread = QThread()
+                self._load_worker.moveToThread(self._load_thread)
+                self._load_thread.started.connect(self._load_worker.run)
+                self._load_worker.progress.connect(lambda msg: self._sb.showMessage(msg))
+                self._load_worker.finished.connect(self._on_recover_load_finished)
+                self._load_worker.failed.connect(self._on_load_failed)
+                self._load_thread.finished.connect(self._load_worker.deleteLater)
+                self._load_thread.finished.connect(self._load_thread.deleteLater)
+                self._load_thread.finished.connect(self._on_load_thread_finished)
+                self._load_thread.start()
+            else:
+                # 无点云路径，直接恢复其他状态
+                self._apply_recovered_state_rest(state)
+        except Exception as exc:
+            log_error(f"恢复状态应用失败: {exc}")
+            Toast.error(self, "部分状态恢复失败，请查看日志")
+
+    @Slot(object, object, str)
+    def _on_recover_load_finished(self, xyz, normals, fp: str) -> None:
+        """恢复点云异步加载完成，继续恢复其他状态。"""
+        self._session.point_cloud.xyz = xyz
+        self._session.point_cloud.path = fp
+        self._session.point_cloud.normals = normals
+        pts_with_normals = np.hstack([xyz, normals])
+        self._selector.set_points(pts_with_normals)
+        self._lb_pts.setText(f"点数: {len(xyz):,}")
+        self._refresh_start_button_state()
+        proj_name = os.path.splitext(os.path.basename(fp))[0]
+        self._project_manager.new_project(proj_name)
+        self._lb_project.setText(f"项目: {proj_name}")
+        info(f"已恢复点云: {fp}")
+        state = getattr(self, "_pending_recover_state", {})
+        self._apply_recovered_state_rest(state)
+
+    def _apply_recovered_state_rest(self, state: dict) -> None:
+        """恢复非点云状态（模式、材料、参数）。"""
+        try:
             # 恢复模式
             mode = state.get("repair_mode", 1)
             if hasattr(self, "_rb_repair") and hasattr(self, "_rb_additive"):
@@ -2678,7 +2858,7 @@ class MainWindow(QMainWindow):
             self._auto_recovery.clear()
         except Exception as exc:
             log_error(f"恢复状态应用失败: {exc}")
-            Toast.error(self, f"部分状态恢复失败: {exc}")
+            Toast.error(self, "部分状态恢复失败，请查看日志")
 
     # ========== UI 接线：6 个 Backend 功能入口 ==========
 
@@ -2696,17 +2876,35 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_coord_transform(self) -> None:
         """UI 接线：坐标系变换（Backend: coordination_service.py）"""
-        points = getattr(self, '_point_cloud', None)
-        if points is None and self._selector is not None:
-            points = getattr(self._selector, '_points', None)
+        xyz = self._session.point_cloud.xyz
+        normals = self._session.point_cloud.normals
+        if xyz is None:
+            Toast.warning(self, "请先导入点云")
+            return
+        # 构造 (N,6) 数组供对话框使用
+        if normals is not None:
+            points = np.hstack([xyz, normals])
+        else:
+            points = xyz
         dlg = CoordinateSystemDialog(self, points=points)
         if dlg.exec() and dlg.transformed_points is not None:
-            # 应用变换后的点云
             try:
-                self._point_cloud = dlg.transformed_points
+                transformed = np.asarray(dlg.transformed_points)
+                # 更新 session（单一真相源）
+                self._session.point_cloud.xyz = transformed[:, :3]
+                if transformed.shape[1] >= 6:
+                    self._session.point_cloud.normals = transformed[:, 3:6]
+                # 刷新选择器
                 if self._selector is not None:
-                    self._selector.set_points(dlg.transformed_points)
-                self._sb.showMessage("坐标系变换已应用", 3000)
+                    self._selector.set_points(transformed)
+                # 刷新可视化
+                if hasattr(self, "_visualizer") and self._visualizer is not None:
+                    self._visualizer.set_data(
+                        substrate=self._session.point_cloud.xyz,
+                        defect_mask=None, repair=None, waypoints=None, layers=None,
+                    )
+                self._refresh_start_button_state()
+                Toast.success(self, "坐标系变换已应用")
             except Exception as exc:
                 _show_error(self, "变换应用失败", exc)
 
@@ -2968,6 +3166,8 @@ class MainWindow(QMainWindow):
             worker_threads=[
                 getattr(self, '_path_thread', None),
                 getattr(self, '_morph_thread', None),
+                getattr(self, '_load_thread', None),
+                getattr(self, '_report_thread', None),
             ],
             compute_controller=getattr(self, '_compute_controller', None),
             progress_subscriber=getattr(self, '_progress_subscriber', None),

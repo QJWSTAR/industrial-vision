@@ -131,6 +131,10 @@ class ComputeController(QObject):
         self._state_lock = threading.RLock()
         self._failure_emitted = False
         self._cancel_acknowledged = False
+        # P1-28: 跟踪 cancel 请求线程，cleanup 时 join 避免资源泄漏
+        self._cancel_thread: Optional[threading.Thread] = None
+        # P2-3: 跟踪 forced recovery 线程，cleanup 时 join 避免资源泄漏
+        self._recovery_thread: Optional[threading.Thread] = None
         self._forced_recovery_target = OperationState.FAILED
         self._last_heartbeat_monotonic = 0.0
         self._heartbeat_timeout_s = max(
@@ -212,24 +216,29 @@ class ComputeController(QObject):
                 OperationState.CANCELLED,
             }:
                 self._state = OperationState.IDLE
-        self._failure_emitted = False
-        self._cancel_acknowledged = False
+            # P2-4: _failure_emitted 与 _cancel_acknowledged 在同一锁内重置
+            self._failure_emitted = False
+            self._cancel_acknowledged = False
         self._transition(OperationState.STARTING)
         self.start_progress_subscription()
         self._progress_subscriber.set_operation_id(self._operation_id)
         self._last_heartbeat_monotonic = time.monotonic()
 
     def _emit_failure_once(self, code: str, friendly: str, detail: str) -> None:
-        if self._failure_emitted:
-            return
-        self._failure_emitted = True
+        # P2-4: 加锁保护 _failure_emitted 的读改写，避免多信号并发触发重复发射
+        with self._state_lock:
+            if self._failure_emitted:
+                return
+            self._failure_emitted = True
         self.computation_failed.emit(code, friendly, detail)
 
     # ---- 公共 API ----
 
     def is_busy(self) -> bool:
         """检查是否正在计算。"""
-        return self._busy
+        # P2-4: 加锁读取，避免与 _transition 的写入产生竞态
+        with self._state_lock:
+            return self._busy
 
     def start_computation(self, repair_mode: str = "", mode_additive: str = "",
                           mode_repairing: str = "") -> bool:
@@ -349,6 +358,12 @@ class ComputeController(QObject):
                     "MATLAB 不可用",
                     "软件无法启动 MATLAB 计算服务。",
                 )
+                # 清理失败的 MatlabService，避免 ZMQ socket 泄露
+                try:
+                    self._matlab_service.close()
+                except Exception:
+                    pass
+                self._matlab_service = None
                 return False
         except Exception as exc:
             self._transition(OperationState.FAILED)
@@ -357,13 +372,28 @@ class ComputeController(QObject):
                 "MATLAB 启动异常",
                 f"MATLAB 启动过程中发生错误：{exc}",
             )
+            # 清理失败的 MatlabService，避免 ZMQ socket 泄露
+            if self._matlab_service is not None:
+                try:
+                    self._matlab_service.close()
+                except Exception:
+                    pass
+                self._matlab_service = None
             return False
 
         self.matlab_startup_done.emit()
 
         # 9. 创建 Worker 和线程
         try:
-            self._start_worker(request_bytes)
+            # P1-25: _start_worker 返回 False 表示旧线程仍在运行，拒绝启动
+            if not self._start_worker(request_bytes):
+                self._transition(OperationState.FAILED)
+                self._emit_failure_once(
+                    ErrorCode.UNKNOWN.value,
+                    "上一次计算尚未结束，请稍候或点击取消后再试",
+                    "ComputeController._start_worker: previous thread still running",
+                )
+                return False
         except Exception as exc:
             self._transition(OperationState.FAILED)
             self._emit_failure_once(
@@ -441,7 +471,15 @@ class ComputeController(QObject):
 
         self._begin_operation()
         try:
-            self._start_worker(request_bytes)
+            # P1-25: _start_worker 返回 False 表示旧线程仍在运行，拒绝启动
+            if not self._start_worker(request_bytes):
+                self._transition(OperationState.FAILED)
+                self._emit_failure_once(
+                    ErrorCode.UNKNOWN.value,
+                    "上一次计算尚未结束，请稍候或点击取消后再试",
+                    "ComputeController._start_worker: previous thread still running",
+                )
+                return False
         except Exception as exc:
             self._transition(OperationState.FAILED)
             self._emit_failure_once(
@@ -495,11 +533,17 @@ class ComputeController(QObject):
             except Exception as exc:
                 self._cancel_response_received.emit(-1, str(exc))
 
-        threading.Thread(
+        # P1-28: 保存 cancel 线程引用，cleanup 时 join 避免线程泄漏
+        # 先清理上一次未退出的 cancel 线程（非阻塞，daemon 兜底）
+        prev = self._cancel_thread
+        if prev is not None and prev.is_alive():
+            prev.join(timeout=2.0)
+        self._cancel_thread = threading.Thread(
             target=_send_cancel,
             name="csam-cancel-request",
             daemon=True,
-        ).start()
+        )
+        self._cancel_thread.start()
 
     def cleanup(self) -> bool:
         """Application shutdown cleanup.
@@ -519,6 +563,20 @@ class ComputeController(QObject):
         if self._matlab_service is not None:
             try:
                 self._matlab_service.abort_active_request()
+            except Exception:
+                pass
+        # P1-28: join cancel 线程，避免关闭时 daemon 线程残留导致资源泄漏
+        cancel_t = self._cancel_thread
+        if cancel_t is not None and cancel_t.is_alive():
+            try:
+                cancel_t.join(timeout=2.0)
+            except Exception:
+                pass
+        # P2-3: join recovery 线程，避免关闭时 daemon 线程残留导致资源泄漏
+        recovery_t = self._recovery_thread
+        if recovery_t is not None and recovery_t.is_alive():
+            try:
+                recovery_t.join(timeout=2.0)
             except Exception:
                 pass
         thread = self._compute_thread
@@ -564,8 +622,9 @@ class ComputeController(QObject):
                 "ComputeController 线程未安全退出；保留 QObject 引用以避免销毁运行中的 QThread"
             )
         subscriber_stopped = self._progress_subscriber.stop()
-        self._busy = False
+        # P2-4: _busy 与 _state 在同一锁内更新，避免读取方看到不一致的中间状态
         with self._state_lock:
+            self._busy = False
             self._state = OperationState.IDLE
         return compute_stopped and subscriber_stopped
 
@@ -690,11 +749,14 @@ class ComputeController(QObject):
             except Exception as exc:
                 self._forced_recovery_finished.emit(False, str(exc))
 
-        threading.Thread(
+        recovery_thread = threading.Thread(
             target=_recover,
             name="csam-matlab-recovery",
             daemon=True,
-        ).start()
+        )
+        # P2-3: 跟踪恢复线程引用以便 cleanup 时 join，避免资源泄漏
+        self._recovery_thread = recovery_thread
+        recovery_thread.start()
 
     @Slot(bool, str)
     def _on_forced_recovery_finished(self, confirmed: bool, detail: str) -> None:
@@ -821,8 +883,13 @@ class ComputeController(QObject):
 
     # ---- 内部：Worker 管理 ----
 
-    def _start_worker(self, request_bytes: bytes) -> None:
-        """创建并启动 ComputePipelineWorker。"""
+    def _start_worker(self, request_bytes: bytes) -> bool:
+        """创建并启动 ComputePipelineWorker。
+
+        Returns:
+            True 表示 Worker 已启动；False 表示因上一次计算仍在进行而被拒绝
+            （P1-25：不阻塞 UI 等待旧线程退出，改为拒绝并提示用户）。
+        """
         # 防御性检查：确保前一个计算线程已完成
         previous_thread = self._compute_thread
         try:
@@ -832,11 +899,16 @@ class ComputeController(QObject):
         except RuntimeError:
             previous_running = False
         if previous_running:
-            logger.warning("ComputeController: 上一次计算线程仍在运行，强制清理")
-            previous_thread.requestInterruption()
-            previous_thread.quit()
-            if not previous_thread.wait(5000):
-                raise RuntimeError("上一次 MATLAB 计算线程未能安全退出")
+            # P1-25: 不再阻塞 UI 调用 wait(5000)，改为拒绝启动并提示用户
+            # 旧线程会在自身的 finished 回调中完成清理（_on_thread_finished）
+            logger.warning(
+                "ComputeController: 上一次计算线程仍在运行，拒绝启动新计算 "
+                "(operation_id=%s)", self._operation_id,
+            )
+            self.stage_changed.emit(
+                "上一次计算尚未结束，请稍候或点击取消后再试"
+            )
+            return False
         self._cleanup_worker(previous_thread)
 
         matlab_service = self._matlab_service
@@ -865,6 +937,7 @@ class ComputeController(QObject):
         logger.info(
             "ComputeController: Worker 已启动 (operation_id=%s)", self._operation_id
         )
+        return True
 
     def _cleanup_worker(self, expected_thread: Optional[QThread] = None) -> None:
         """清理 Worker 和线程引用。"""

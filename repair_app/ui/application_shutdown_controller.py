@@ -16,7 +16,11 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, List, Optional
+
+
+_logger = logging.getLogger("csam.shutdown")
 
 
 class ApplicationShutdownController:
@@ -74,16 +78,17 @@ class ApplicationShutdownController:
         if self._autosave_fn is not None:
             try:
                 self._autosave_fn()
-            except Exception:
-                pass  # 关闭时保存失败不应阻止退出
+            except Exception as exc:
+                # P2-5: 关键步骤失败需记录日志，用户数据丢失时有诊断依据
+                _logger.warning("关闭时自动保存失败: %s", exc)
 
     def _step_stop_timer(self) -> None:
         """步骤 2：停止自动保存定时器。"""
         if self._autosave_timer is not None and self._autosave_timer.isActive():
             try:
                 self._autosave_timer.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                _logger.warning("停止自动保存定时器失败: %s", exc)
 
     def _step_stop_worker_threads(self) -> None:
         """步骤 3：停止所有工作线程。
@@ -99,16 +104,16 @@ class ApplicationShutdownController:
                 if not thread.wait(self.THREAD_WAIT_MS):
                     thread.terminate()
                     thread.wait(self.THREAD_TERMINATE_WAIT_MS)
-            except Exception:
-                pass
+            except Exception as exc:
+                _logger.warning("停止工作线程失败: %s", exc)
 
     def _step_stop_compute_controller(self) -> None:
         """Stop the owner of the MATLAB worker and realtime subscriber."""
         if self._compute_controller is not None:
             try:
                 self._compute_controller.cleanup()
-            except Exception:
-                pass
+            except Exception as exc:
+                _logger.warning("ComputeController 清理失败: %s", exc)
 
     def _step_stop_progress_subscriber(self) -> None:
         """步骤 4：停止实时进度订阅器。"""
@@ -116,8 +121,8 @@ class ApplicationShutdownController:
             try:
                 if getattr(self._progress_subscriber, 'is_running', False):
                     self._progress_subscriber.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                _logger.warning("停止进度订阅器失败: %s", exc)
 
     def _step_stop_lifecycle(self) -> None:
         """步骤 5：关闭 MATLAB 生命周期管理器。"""
@@ -125,21 +130,22 @@ class ApplicationShutdownController:
             from repair_app.bridge.lifecycle_manager import MatlabLifecycleManager
             manager = MatlabLifecycleManager.get_instance()
             manager.stop()
-        except Exception:
-            pass
+        except Exception as exc:
+            # P2-5: MATLAB 进程停止失败可能导致 MATLAB 残留，需记录以便排查
+            _logger.warning("关闭 MATLAB 生命周期管理器失败: %s", exc)
 
     def _step_close_zmq(self) -> None:
         """步骤 6：关闭 ZMQ 客户端。"""
         if self._zmq_client is not None and hasattr(self._zmq_client, "close"):
             try:
                 self._zmq_client.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                _logger.warning("关闭 ZMQ 客户端失败: %s", exc)
 
     def _step_cleanup_visualizer(self) -> None:
         """步骤 7：清理可视化组件 matplotlib 资源。"""
         if self._visualizer is not None and hasattr(self._visualizer, "cleanup"):
             try:
                 self._visualizer.cleanup()
-            except Exception:
-                pass
+            except Exception as exc:
+                _logger.warning("清理可视化组件失败: %s", exc)

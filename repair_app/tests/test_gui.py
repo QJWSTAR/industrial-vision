@@ -52,6 +52,15 @@ def main_window(qapp, monkeypatch):
     from repair_app.ui.main_window import MainWindow
     mw = MainWindow()
     yield mw
+    # P2-9: 清理 ComputeController（含 ProgressSubscriber 线程），
+    # 否则 MainWindow.__init__ 启动的 ZMQ SUB 线程在进程退出时
+    # 触发 Windows access violation（4+ 个残留线程同时访问已释放的 ZMQ context）
+    compute_controller = getattr(mw, "_compute_controller", None)
+    if compute_controller is not None:
+        try:
+            compute_controller.cleanup()
+        except Exception:
+            pass
     # 清理 ZMQ client
     if hasattr(mw, "_zmq_client") and mw._zmq_client is not None:
         try:

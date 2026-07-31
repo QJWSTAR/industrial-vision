@@ -246,6 +246,13 @@ class TestMainWindowS3:
             assert hasattr(mw, "_visualizer"), "MainWindow 应有 _visualizer"
             assert hasattr(mw, "_zmq_client"), "MainWindow 应有 _zmq_client"
         finally:
+            # P2-9: 清理 ComputeController（含 ProgressSubscriber 线程），避免 access violation
+            cc = getattr(mw, "_compute_controller", None)
+            if cc is not None:
+                try:
+                    cc.cleanup()
+                except Exception:
+                    pass
             if mw._zmq_client is not None:
                 mw._zmq_client.close()
             mw.deleteLater()

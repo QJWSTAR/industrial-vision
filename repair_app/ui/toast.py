@@ -126,8 +126,12 @@ class Toast(QWidget):
             parent_rect = self._parent.rect()
             parent_global = self._parent.mapToGlobal(QPoint(0, 0))
         else:
-            screen = QApplication.primaryScreen().geometry()
-            parent_rect = screen
+            screen_obj = QApplication.primaryScreen()
+            if screen_obj is not None:
+                parent_rect = screen_obj.geometry()
+            else:
+                # 无显示器环境（CI/关闭中），回退到默认几何
+                parent_rect = QRect(0, 0, 1920, 1080)
             parent_global = QPoint(0, 0)
 
         # 堆叠：从下往上排列，每条间隔 8px
@@ -163,13 +167,22 @@ class Toast(QWidget):
         """重新排列剩余的 Toast（向上移动）。"""
         if self._parent is None:
             return
-        parent_rect = self._parent.rect()
-        parent_global = self._parent.mapToGlobal(QPoint(0, 0))
+        try:
+            parent_rect = self._parent.rect()
+            parent_global = self._parent.mapToGlobal(QPoint(0, 0))
+        except RuntimeError:
+            # 父窗口已被销毁（C++ 对象删除），清理无效引用
+            Toast._active_toasts = [t for t in Toast._active_toasts if t is not self]
+            return
         for i, toast in enumerate(Toast._active_toasts):
-            offset_y = 16 + i * (toast.height() + 8)
-            x = parent_global.x() + parent_rect.width() - toast.width() - 16
-            y = parent_global.y() + parent_rect.height() - toast.height() - offset_y
-            toast.move(x, y)
+            try:
+                offset_y = 16 + i * (toast.height() + 8)
+                x = parent_global.x() + parent_rect.width() - toast.width() - 16
+                y = parent_global.y() + parent_rect.height() - toast.height() - offset_y
+                toast.move(x, y)
+            except RuntimeError:
+                # 单个 toast 可能已被销毁，跳过
+                continue
 
     # ============================================================
     # 便捷类方法

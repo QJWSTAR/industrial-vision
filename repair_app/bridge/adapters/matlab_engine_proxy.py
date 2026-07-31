@@ -3,9 +3,11 @@
 封装 matlab.engine，提供与 MatlabAdapter._algorithm_fn 兼容的调用接口。
 
 连接策略（按优先级）：
-1. 若运行在 MATLAB pyenv 内（CSAM_BRIDGE_IN_MATLAB=1），直接 connect_matlab()
-   连接当前宿主会话，跳过 find_matlab 网络发现（避免循环回连与防火墙问题）
-2. 否则，按名称连接共享会话（find_matlab + connect_matlab(name)）
+1. 若运行在 MATLAB pyenv 内（CSAM_BRIDGE_IN_MATLAB=1），依次尝试：
+   a. connect_matlab() 无参数 — 连接当前宿主会话（最轻量）
+   b. connect_matlab(sharedName) — 按名称连接共享会话
+   c. start_matlab(background=True) — 启动后台引擎（最重，作为兜底）
+2. 外部模式：find_matlab + connect_matlab(name) 发现并连接共享会话
 3. 连接默认共享会话（connect_matlab() 无参数）
 4. 独立启动新引擎（仅强制 matlab 模式，耗时 30-60s）
 5. 全部失败则抛出异常，由上层降级到 Python 算法
@@ -35,6 +37,22 @@ logger = logging.getLogger("csam.bridge.matlab_engine")
 DEFAULT_SHARED_NAME = "matlab_bridge"
 
 
+def _safe_float(raw: dict, key: str, default: float) -> float:
+    """安全读取浮点数，避免 `or` 短路覆盖合法 0.0 值。
+
+    `float(raw.get(k, d) or d)` 当值为 0.0 时会被默认值覆盖（0.0 是 falsy）。
+    本函数仅在 key 缺失或值为 None 时使用 default，保留合法的 0.0。
+    """
+    val = raw.get(key, default)
+    return float(val) if val is not None else float(default)
+
+
+def _safe_int(raw: dict, key: str, default: int) -> int:
+    """安全读取整数，避免 `or` 短路覆盖合法 0 值。"""
+    val = raw.get(key, default)
+    return int(val) if val is not None else int(default)
+
+
 class MatlabEngineProxy:
     """matlab.engine 单例封装，符合 _algorithm_fn 签名。
 
@@ -62,6 +80,7 @@ class MatlabEngineProxy:
         call_timeout_s: float = 60.0,
         connect_retry: int = 3,
         connect_interval_s: float = 2.0,
+        pipeline_timeout_s: float = 180.0,
     ) -> None:
         # __init__ 可能因单例被多次调用，只初始化一次
         if getattr(self, "_initialized", False):
@@ -76,6 +95,9 @@ class MatlabEngineProxy:
         )
         self._algo_dir = os.path.abspath(self._algo_dir)
         self._call_timeout = call_timeout_s
+        # P1-11: 完整管线（路径规划+形貌预测）耗时远超单次调用，
+        # 分离 pipeline_timeout_s 避免真实工作负载误判超时
+        self._pipeline_timeout = pipeline_timeout_s
         self._connect_retry = connect_retry
         self._connect_interval = connect_interval_s
         self._connected = False
@@ -103,7 +125,10 @@ class MatlabEngineProxy:
         """连接到 MATLAB 引擎。
 
         策略优先级：
-        1. pyenv 宿主模式：直接 connect_matlab()（跳过 find_matlab）
+        1. pyenv 宿主模式（Python 运行在 MATLAB 进程内）：
+           a. connect_matlab() 无参数 — 连接当前宿主会话
+           b. connect_matlab(sharedName) — 按名称连接
+           c. start_matlab(background=True) — 后台新引擎（兜底）
         2. 外部模式：find_matlab + connect_matlab(name)
         3. 默认共享会话：connect_matlab() 无参数
         4. 独立启动：start_matlab()（仅强制模式）
@@ -119,19 +144,62 @@ class MatlabEngineProxy:
 
             last_err: Optional[Exception] = None
 
-            # ---- 策略 1：pyenv 宿主模式，直接连接当前 MATLAB 会话 ----
-            # Python 运行在 MATLAB 进程内（matlab_bridge_server.m 通过 pyenv 调用），
-            # 此时 find_matlab 网络发现不可靠且可能循环死锁。
-            # connect_matlab() 无参数会直接返回当前宿主会话的引用。
+            # ---- 策略 1：pyenv 宿主模式 ----
+            # Python 运行在 MATLAB 进程内（matlab_bridge_server.m 通过 pyenv 调用）。
+            # 依次尝试 connect_matlab() → connect_matlab(name) → start_matlab(background)
             if self._is_running_in_matlab():
+                # 1a. 无参数 connect_matlab：连接当前宿主会话
                 try:
-                    logger.info("pyenv 宿主模式：直接连接当前 MATLAB 会话")
+                    logger.info("pyenv 宿主模式：尝试连接当前 MATLAB 会话")
                     self._eng = me.connect_matlab()
                     self._connected = True
-                    logger.info("已连接宿主 MATLAB 会话（pyenv 模式）")
+                    logger.info("已连接当前 MATLAB 会话（pyenv 模式）")
                 except Exception as exc:
                     last_err = exc
-                    logger.warning("宿主会话连接失败: %s", exc)
+                    logger.debug("pyenv connect_matlab() 失败: %s", exc)
+
+                # 1b. 按名称连接共享会话
+                if not self._connected:
+                    try:
+                        logger.info(
+                            "pyenv 宿主模式：尝试连接共享会话 '%s'",
+                            self._shared_name,
+                        )
+                        self._eng = me.connect_matlab(self._shared_name)
+                        self._connected = True
+                        logger.info("已连接共享 MATLAB 会话（pyenv 模式）")
+                    except Exception as exc:
+                        last_err = exc
+                        logger.debug(
+                            "pyenv connect_matlab('%s') 失败: %s",
+                            self._shared_name, exc,
+                        )
+
+                # 1c. 兜底：启动后台引擎
+                if not self._connected:
+                    try:
+                        logger.info("pyenv 宿主模式：启动后台 MATLAB 引擎会话")
+                        future = me.start_matlab(background=True)
+                        # start_matlab(background=True) 返回 FutureResult，
+                        # 需调用 .result() 阻塞等待引擎就绪
+                        if hasattr(future, 'result') and not hasattr(future, 'addpath'):
+                            try:
+                                self._eng = future.result(timeout=self._call_timeout)
+                            except Exception as fut_exc:
+                                last_err = fut_exc
+                                logger.error(
+                                    "start_matlab 超时或失败 (%ds): %s",
+                                    self._call_timeout, fut_exc,
+                                )
+                                raise
+                        else:
+                            self._eng = future
+                        self._connected = True
+                        self._started_independently = True
+                        logger.info("已连接后台 MATLAB 引擎（pyenv 模式）")
+                    except Exception as exc:
+                        last_err = exc
+                        logger.warning("pyenv 后台引擎启动失败: %s", exc)
 
             # ---- 策略 2：外部模式，按名称查找共享会话 ----
             if not self._connected:
@@ -229,40 +297,60 @@ class MatlabEngineProxy:
         """断开 MATLAB 引擎连接，释放资源。
 
         用于 Bridge 关闭时清理单例状态，避免下次启动残留旧连接。
+
+        P1-8: 独立引擎的 quit() 可能永久阻塞（MATLAB 内部死锁），
+        用线程池加 10s 超时保护，超时后强制置 None 释放引用，
+        避免持有 RLock 导致整个 Bridge 死锁。
         """
         with self._lock:
             if self._eng is not None:
+                eng = self._eng
+                started_indep = self._started_independently
+                # 先重置状态，即使 quit() 阻塞也不影响后续连接
+                self._eng = None
+                self._connected = False
+                self._started_independently = False
+
+                if not started_indep:
+                    # 共享/pyenv 会话不退出 MATLAB 本身，仅释放引用
+                    logger.info("已释放 MATLAB 会话引用")
+                    return
+
+                # 独立引擎：quit() 可能阻塞，用线程池+超时保护
                 try:
-                    if self._started_independently:
-                        self._eng.quit()
-                        logger.info("独立启动的 MATLAB 引擎已退出")
-                    else:
-                        # 共享/pyenv 会话不退出 MATLAB 本身，仅释放引用
-                        self._eng = None
-                        logger.info("已释放 MATLAB 会话引用")
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                        future = ex.submit(eng.quit)
+                        try:
+                            future.result(timeout=10.0)
+                            logger.info("独立启动的 MATLAB 引擎已退出")
+                        except concurrent.futures.TimeoutError:
+                            logger.warning(
+                                "MATLAB eng.quit() 10s 未返回，强制释放引用"
+                                "（MATLAB 进程可能残留，由 launcher.stop 清理）"
+                            )
+                        except Exception as exc:
+                            logger.warning("MATLAB eng.quit() 异常: %s", exc)
                 except Exception as exc:
                     logger.warning("断开 MATLAB 引擎时异常: %s", exc)
-                finally:
-                    self._eng = None
-                    self._connected = False
-                    self._started_independently = False
 
     def recover(self) -> bool:
         """尝试从不健康状态恢复。
 
         Returns:
             True if recovery successful (engine is healthy again).
+            False if recovery failed (engine remains unhealthy). 调用方据此决定
+            是否降级或抛异常，本方法不主动抛出，遵守 `-> bool` 返回契约（P0-7）。
         """
         with self._lock:
             if not self._unhealthy:
                 return True
-
-        logger.info("尝试恢复 MATLAB 引擎...")
-        with self._lock:
+            # 在同一锁内完成状态重置，避免竞态窗口
             self._unhealthy = False
             self._connected = False
             self._eng = None
+            self._started_independently = False  # 重置标志，避免 disconnect() 误 quit 共享会话
 
+        logger.info("尝试恢复 MATLAB 引擎...")
         try:
             self._ensure_connected()
             with self._lock:
@@ -270,13 +358,18 @@ class MatlabEngineProxy:
                     self._unhealthy = False
                     logger.info("MATLAB 引擎恢复成功")
                     return True
+                else:
+                    self._unhealthy = True
         except Exception as exc:
             logger.error("MATLAB 引擎恢复失败: %s", exc)
             with self._lock:
                 self._unhealthy = True
+                self._connected = False
+                self._eng = None
 
-        from repair_app.bridge.communication.exceptions import MatlabRecoveryError
-        raise MatlabRecoveryError("MATLAB 引擎恢复失败")
+        # P0-7: 返回 False 而非抛异常，遵守返回契约。调用方（matlab_adapter）
+        # 已用 try/except 包裹 recover() 调用，可根据返回值决定降级策略。
+        return False
 
     @classmethod
     def reset_singleton(cls) -> None:
@@ -313,8 +406,12 @@ class MatlabEngineProxy:
         self._check_healthy()
         self._ensure_connected()
 
-        # 获取 MATLAB 函数引用
-        func = getattr(self._eng, func_name)
+        # 在锁内获取函数引用，防止 disconnect() 将 _eng 置 None 后 getattr 崩溃
+        with self._lock:
+            if self._eng is None:
+                from repair_app.bridge.communication.exceptions import EngineUnavailableError
+                raise EngineUnavailableError("MATLAB 引擎在调用前被断开")
+            func = getattr(self._eng, func_name)
 
         try:
             # background=True 返回 FutureResult
@@ -325,17 +422,31 @@ class MatlabEngineProxy:
 
             return result
         except concurrent.futures.TimeoutError:
-            # 超时：标记引擎不健康，断开连接
+            # 超时：标记引擎不健康，尝试取消 MATLAB 计算，然后断开连接
             with self._lock:
                 self._unhealthy = True
             logger.error(
                 "MATLAB %s 超时 (%.1fs)，引擎进入不健康状态",
                 func_name, self._call_timeout,
             )
+            # best-effort：注入 error 中断 MATLAB 端正在执行的计算（P0-8）。
+            # drawnow 只刷新图窗无法打断计算；error('csam_cancelled') 会抛出
+            # MATLAB 异常中止当前 feval，释放共享会话供下次调用使用。
+            # 用 background=True 避免本线程再次阻塞；失败仅记日志。
+            try:
+                eng = self._eng
+                if eng is not None:
+                    eng.eval(
+                        "error('csam_cancelled:MATLAB timeout interrupted');",
+                        nargout=0, background=True,
+                    )
+            except Exception as cancel_exc:
+                logger.debug("注入取消 error 失败（best-effort）: %s", cancel_exc)
             try:
                 self.disconnect()
-            except Exception:
-                pass
+            except Exception as disc_exc:
+                # P1-12: 不再静默吞没，至少记日志便于诊断状态不一致
+                logger.warning("超时清理中断开连接失败: %s", disc_exc)
             raise MatlabCallTimeoutError(
                 f"MATLAB {func_name} 超时 ({self._call_timeout}s)",
                 timeout_s=self._call_timeout,
@@ -343,14 +454,27 @@ class MatlabEngineProxy:
         except (MatlabEngineUnhealthyError, MatlabCallTimeoutError):
             raise
         except Exception as exc:
-            # 其他异常也可能是引擎崩溃
-            if "MATLAB Engine" in str(exc) or "connection" in str(exc).lower():
+            # P1-14: 用具体异常类型判定引擎连接丢失，避免字符串匹配跨版本不可靠。
+            # matlab.engine.EngineError / EngineConnectionError 在不同版本名称不一，
+            # 因此捕获连接类异常（ConnectionError/BrokenPipeError/OSError）+ EngineError。
+            is_engine_error = False
+            try:
+                import matlab.engine as _me
+                if isinstance(exc, _me.EngineError):
+                    is_engine_error = True
+            except Exception:
+                pass
+            if (
+                is_engine_error
+                or isinstance(exc, (ConnectionError, BrokenPipeError, OSError))
+            ):
                 with self._lock:
                     self._unhealthy = True
                 try:
                     self.disconnect()
-                except Exception:
-                    pass
+                except Exception as disc_exc:
+                    # P1-12: 不静默吞没，记日志便于诊断
+                    logger.warning("异常清理中断开连接失败: %s", disc_exc)
                 from repair_app.bridge.communication.exceptions import EngineUnavailableError
                 raise EngineUnavailableError(f"MATLAB 引擎连接丢失: {exc}") from exc
             raise
@@ -459,13 +583,20 @@ class MatlabEngineProxy:
         - 避免重复写 STL 文件（1 次而非 2 次）
         - 避免重复调用 run_path_planning（1 次而非 2 次）
         - 计算时间减少 30-50%
+
+        P1-11: 完整管线两阶段合计耗时远超单次调用 60s 默认超时，
+        临时切换为 pipeline_timeout（默认 180s），避免真实工作负载误判超时。
         """
         self._check_healthy()
 
         stl_path = self._write_xyz_as_stl(xyz)
         params = self._meta_to_profile_params(meta)
-        excel_path = str(meta.get("cfd_excel_path", ""))
+        # P1-16: str(None) 会得到 "None"，用 `or ""` 避免 None 污染
+        excel_path = str(meta.get("cfd_excel_path") or "")
 
+        # P1-11: 保存原始超时，完整管线期间切换为 pipeline_timeout
+        original_timeout = self._call_timeout
+        self._call_timeout = self._pipeline_timeout
         try:
             # ---- 阶段 1：路径规划 ----
             logger.info("MATLABPipeline 阶段 1/2：路径规划")
@@ -508,27 +639,45 @@ class MatlabEngineProxy:
             )
             return result
         finally:
+            # 恢复原始超时
+            self._call_timeout = original_timeout
             try:
                 os.remove(stl_path)
             except OSError:
                 pass
 
     @staticmethod
-    def _feed_rates_to_velocitylist(feed_rates: np.ndarray, default_speed: float):
+    def _feed_rates_to_velocitylist(feed_rates, default_speed: float):
         """将数值进给速度转为 MATLAB velocitylist string 数组。
 
         与 run_path_planning.m 中 velocity_to_numeric 互逆。
+        feed_rates 可能是 matlab.double、list 或 np.ndarray，
+        统一转为 np.float64 数组再做算术比较。
         """
         import matlab
 
-        n = len(feed_rates)
+        # 统一转为 numpy 数组，消除 matlab.double / list / ndarray 的类型差异
+        arr = np.asarray(feed_rates, dtype=np.float64).ravel()
+        # 某些 matlab.engine 版本中 asarray 会创建 object dtype 数组，
+        # 元素仍为 matlab.double 标量，无法直接参与算术运算。
+        # 检测到 object dtype 时回退到逐元素 float() 转换。
+        if arr.dtype == object:
+            flat = []
+            for item in feed_rates:
+                if hasattr(item, '__iter__'):
+                    flat.extend(float(x) for x in item)
+                else:
+                    flat.append(float(item))
+            arr = np.array(flat, dtype=np.float64).ravel()
+        n = len(arr)
         if n == 0:
             return matlab.string_array([])
         strings = []
-        for fr in feed_rates:
-            if abs(fr - default_speed * 0.6) < 1e-3:
+        for fr in arr:
+            fr_val = float(fr)
+            if abs(fr_val - default_speed * 0.6) < 1e-3:
                 strings.append("velocity_edge")
-            elif abs(fr - default_speed * 1.2) < 1e-3:
+            elif abs(fr_val - default_speed * 1.2) < 1e-3:
                 strings.append("velocity_link")
             else:
                 strings.append("velocity_infill")
@@ -590,7 +739,8 @@ class MatlabEngineProxy:
             meta.get("preview_max_triangles"), 1500.0
         )
         # request_id 用于 MATLAB 进度发布（ProgressPublisher）
-        base["request_id"] = str(meta.get("request_id", ""))
+        # P1-16: meta.get("request_id") 可能显式为 None，str(None)="None" 会污染 operation_id
+        base["request_id"] = str(meta.get("request_id") or "")
         return base
 
     @staticmethod
@@ -603,6 +753,15 @@ class MatlabEngineProxy:
             if val is None:
                 return np.zeros((0,), dtype=np.float32)
             arr = np.asarray(val, dtype=np.float64)
+            # 处理 object dtype（matlab.double 标量未被自动转换）
+            if arr.dtype == object:
+                flat = []
+                for item in val:
+                    if hasattr(item, '__iter__'):
+                        flat.extend(float(x) for x in item)
+                    else:
+                        flat.append(float(item))
+                arr = np.array(flat, dtype=np.float64)
             return arr.astype(np.float32)
 
         def to_list(val) -> list:
@@ -616,12 +775,12 @@ class MatlabEngineProxy:
             "mesh": to_np(raw.get("mesh", [])),
             "substrate_triangles": to_np(raw.get("substrate_triangles", [])),
             "layer_profiles": to_np(raw.get("layer_profiles", [])),
-            "uniformity": float(raw.get("uniformity", 0.78) or 0.78),
-            "estimated_mass_g": float(raw.get("estimated_mass_g", 0.0) or 0.0),
-            "estimated_time_s": float(raw.get("estimated_time_s", 0.0) or 0.0),
-            "predicted_volume_mm3": float(raw.get("predicted_volume_mm3", 0.0) or 0.0),
-            "compute_time_s": float(raw.get("compute_time_s", 0.0) or 0.0),
-            "waypoint_count": int(raw.get("waypoint_count", 0) or 0),
+            "uniformity": _safe_float(raw, "uniformity", 0.78),
+            "estimated_mass_g": _safe_float(raw, "estimated_mass_g", 0.0),
+            "estimated_time_s": _safe_float(raw, "estimated_time_s", 0.0),
+            "predicted_volume_mm3": _safe_float(raw, "predicted_volume_mm3", 0.0),
+            "compute_time_s": _safe_float(raw, "compute_time_s", 0.0),
+            "waypoint_count": _safe_int(raw, "waypoint_count", 0),
             "warnings": to_list(raw.get("warnings", [])),
         }
 
@@ -635,7 +794,7 @@ class MatlabEngineProxy:
                 "vy": to_np(pd_raw.get("vy", [])),
                 "vz": to_np(pd_raw.get("vz", [])),
                 "vcr": to_np(pd_raw.get("vcr", [])),
-                "dep_efficiency": float(pd_raw.get("dep_efficiency", 0.0) or 0.0),
+                "dep_efficiency": _safe_float(pd_raw, "dep_efficiency", 0.0),
                 "diameter": to_np(pd_raw.get("diameter", [])),
                 "temperature": to_np(pd_raw.get("temperature", [])),
             }
@@ -726,7 +885,8 @@ class MatlabEngineProxy:
             "link_path_free_dist": safe_float(meta.get("link_path_free_dist_mm"), 20.0),
             "resolution": safe_float(meta.get("obstacle_resolution_mm"), 2.0),
             "traversing_speed_mms": safe_float(meta.get("traversing_speed_mms"), 500.0),
-            "request_id": str(meta.get("request_id", "")),
+            # P1-16: 避免 str(None)="None" 污染 operation_id
+            "request_id": str(meta.get("request_id") or ""),
         }
 
     @staticmethod
@@ -741,21 +901,42 @@ class MatlabEngineProxy:
         feed_rates: matlab.double (M×1)
         layer_indices: matlab.double (M×1)
         """
-        pts = np.asarray(pointlist, dtype=np.float32)  # (M, 6) 或 (6, M)
-        feeds = np.asarray(feed_rates, dtype=np.float32).reshape(-1, 1)
-        layers = np.asarray(layer_indices, dtype=np.float32).reshape(-1, 1)
+        def _to_float_array(val):
+            arr = np.asarray(val, dtype=np.float32)
+            if arr.dtype == object:
+                # matlab.double 标量元素未被自动转换，手动展开
+                flat = []
+                for item in val:
+                    if hasattr(item, '__iter__'):
+                        flat.extend(float(x) for x in item)
+                    else:
+                        flat.append(float(item))
+                arr = np.array(flat, dtype=np.float32)
+            return arr
 
-        # matlab.double 转 numpy 后形状可能是 (M, 6) 或转置
+        pts = _to_float_array(pointlist)
+        feeds = _to_float_array(feed_rates).ravel()
+        layers = _to_float_array(layer_indices).ravel()
+
+        # 空数组快速返回 (0, 8)，避免 reshape 产生错误形状
+        if pts.size == 0:
+            return np.zeros((0, 8), dtype=np.float32)
+
+        # 统一为 2D (M, 6)
         if pts.ndim == 1:
-            pts = pts.reshape(1, -1)
+            # 1D 数组：重塑为 (M, 6)
+            if pts.size % 6 != 0:
+                pts = pts.reshape(-1, 3)
+                pts = np.hstack([pts, np.zeros((pts.shape[0], 3), dtype=np.float32)])
+            else:
+                pts = pts.reshape(-1, 6)
+        # matlab.double 列优先可能导致 (6, M) 而非 (M, 6)，需要转置
         if pts.shape[0] == 6 and pts.shape[1] != 6:
-            pts = pts.T  # MATLAB 列优先可能导致转置
+            pts = pts.T
 
         M = pts.shape[0]
-        if feeds.shape[0] != M:
-            feeds = feeds[:M].reshape(-1, 1) if feeds.size >= M else np.zeros((M, 1), dtype=np.float32)
-        if layers.shape[0] != M:
-            layers = layers[:M].reshape(-1, 1) if layers.size >= M else np.zeros((M, 1), dtype=np.float32)
+        feeds = feeds[:M].reshape(-1, 1) if feeds.size >= M else np.zeros((M, 1), dtype=np.float32)
+        layers = layers[:M].reshape(-1, 1) if layers.size >= M else np.zeros((M, 1), dtype=np.float32)
 
         # 组装 (M, 8): x, y, z, nx, ny, nz, feed_rate, layer_index
         waypoints = np.hstack([pts, feeds, layers])

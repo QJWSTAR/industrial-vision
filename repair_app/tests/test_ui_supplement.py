@@ -695,6 +695,8 @@ class TestParameterPresetDialog:
         (preset_dir / "to_delete.json").write_text(json.dumps({"v": 1}), encoding="utf-8")
         dlg = ParameterPresetDialog()
         dlg._lst_presets.setCurrentRow(0)
+        # P2-9: _on_delete 有二次点击确认逻辑，第一次点击仅标记待删除，第二次才实际删除
+        dlg._on_delete()
         dlg._on_delete()
         assert not (preset_dir / "to_delete.json").exists()
         _cleanup_widget(dlg, qapp)

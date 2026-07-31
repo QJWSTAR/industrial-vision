@@ -7,6 +7,7 @@ repair_serialization.py — 冷喷涂缺陷修复软件 Protobuf 序列化工具
 from __future__ import annotations
 
 import time, json, os
+import logging
 from typing import Optional, Tuple, Dict, Any, List
 
 import numpy as np
@@ -33,6 +34,8 @@ from repair_app.communication.repair_protocol_pb2 import (  # type: ignore[impor
 # Independent of application version (see config.py:APP_VERSION).
 CLIENT_VERSION = "0.2.0"
 MAX_ARRAY_LENGTH_WARN = 1_000_000
+
+_logger = logging.getLogger("csam.serialization")
 
 
 # ================================================================
@@ -512,8 +515,9 @@ def parse_progress_message(data: bytes) -> Dict[str, Any]:
         envelope.ParseFromString(data)
         if envelope.schema_version >= 3 and envelope.operation_id:
             return parse_progress_envelope(envelope)
-    except Exception:
-        pass
+    except Exception as exc:
+        # P2-6: 回退到 v2 是设计内行为，但仍需记录以便诊断数据损坏
+        _logger.debug("v3 progress envelope 解析失败，回退 v2: %s", exc)
 
     legacy = ProgressUpdate()
     legacy.ParseFromString(data)
@@ -822,15 +826,19 @@ def self_test() -> bool:
 
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("repair_serialization v2.1 自检")
-    print("=" * 60)
+    # P2-6: 改用 ASCII 文本与 logger，避免 Windows cp936 控制台触发 UnicodeEncodeError
+    _logger.info("=" * 60)
+    _logger.info("repair_serialization v2.1 自检")
+    _logger.info("=" * 60)
     try:
         ok = self_test()
-        print(f"\n✅ 全部通过 —— v2.1 协议往返精度无损（含冷喷涂+路径规划参数 + ParticleDistribution + MaterialParams）")
+        _logger.info(
+            "全部通过 -- v2.1 协议往返精度无损 "
+            "(含冷喷涂+路径规划参数 + ParticleDistribution + MaterialParams)"
+        )
     except AssertionError as e:
-        print(f"\n❌ 自检失败: {e}")
+        _logger.error("自检失败: %s", e)
         raise
     except ImportError as e:
-        print(f"\n⚠️  导入失败: {e}")
-        print("   请确认 repair_protocol_pb2.py 已编译")
+        _logger.error("导入失败: %s", e)
+        _logger.error("   请确认 repair_protocol_pb2.py 已编译")

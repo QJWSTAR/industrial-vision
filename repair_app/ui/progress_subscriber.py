@@ -225,8 +225,9 @@ class ProgressSubscriberWorker(QObject):
             envelope.ParseFromString(data)
             if envelope.schema_version >= 3 and envelope.operation_id:
                 return parse_progress_envelope(envelope)
-        except Exception:
-            pass
+        except Exception as exc:
+            # P2-6: 回退到 v2 是设计内行为，但仍需记录以便诊断数据损坏
+            logger.debug("v3 progress envelope 解析失败，回退 v2: %s", exc)
 
         legacy = ProgressUpdate()
         legacy.ParseFromString(data)

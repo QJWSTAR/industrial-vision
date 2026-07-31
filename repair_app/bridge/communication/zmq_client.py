@@ -37,7 +37,7 @@ except ImportError:
 from .config import BridgeConfig
 from .exceptions import (
     BridgeError,
-    ConnectionError,
+    BridgeConnectionError,
     ConnectionTimeoutError,
     EngineUnavailableError,
     SerializationError,
@@ -139,6 +139,7 @@ class _HealthWorker(QThread):
             hb = Serializer.build_health_check()
             sock.send(Serializer.serialize_health(hb))
             if self.isInterruptionRequested():
+                self.result_ready.emit(False, "健康检查被中断", 0.0)
                 return
             if sock.poll(self._config.health_check_timeout_ms, zmq.POLLIN):
                 resp_bytes = sock.recv()
@@ -321,7 +322,12 @@ class BridgeClient:
         return False
 
     # ---- 阻塞请求（任务7 Phase 1） ----
-    def request_blocking(self, request_bytes: bytes, timeout_ms: int = 600000) -> bytes:
+    def request_blocking(
+        self,
+        request_bytes: bytes,
+        timeout_ms: int = 600000,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> bytes:
         """阻塞请求：在调用线程中直接发送 ZMQ 请求并等待响应。
 
         用于 ComputePipelineWorker 等已在 QThread 中的调用者。
@@ -329,12 +335,16 @@ class BridgeClient:
         Args:
             request_bytes: 序列化后的 protobuf 请求字节
             timeout_ms: 超时（毫秒），默认 600s
+            is_cancelled: 可选取消检查回调（P0-12）。poll 循环每次迭代调用，
+                返回 True 时立即关闭 socket 并抛出 MatlabCallCancelledError，
+                让 600s 长计算期间的取消按钮真正生效。
 
         Returns:
             原始响应字节
 
         Raises:
             BridgeError: 超时、连接失败、序列化错误等
+            MatlabCallCancelledError: is_cancelled 回调返回 True
         """
         if self._closed:
             raise ShutdownError("客户端已关闭")
@@ -355,6 +365,13 @@ class BridgeClient:
             poll_interval = self._config.poll_interval_ms
             elapsed = 0
             while elapsed < timeout_ms:
+                # P0-12: 在 poll 循环中检查外部取消标志（QThread.isInterruptionRequested）
+                if is_cancelled is not None and is_cancelled():
+                    logger.info("请求被用户取消（is_cancelled 回调返回 True）")
+                    from repair_app.bridge.communication.exceptions import (
+                        MatlabCallCancelledError,
+                    )
+                    raise MatlabCallCancelledError("MATLAB 计算被用户取消")
                 if sock.poll(poll_interval, zmq.POLLIN):
                     reply = sock.recv()
                     return reply

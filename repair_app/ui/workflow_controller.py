@@ -190,8 +190,8 @@ class WorkflowController(QObject):
         bg, border, fg = colors.get(state, colors["locked"])
         label.setStyleSheet(
             f"QLabel{{background:{bg};color:{fg};border:1px solid {border};"
-            "border-radius:12px;padding:9px 12px;font-size:13px;"
-            "font-weight:bold;}}"
+            f"border-radius:12px;padding:9px 12px;font-size:13px;"
+            f"font-weight:bold;}}"
         )
 
     def update_step_button_style(

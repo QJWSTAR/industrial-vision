@@ -417,10 +417,12 @@ class TestModeAndSelection:
             _session=session,
             _lb_sel=MagicMock(),
             _btn_start_repair=MagicMock(),
+            _refresh_start_button_state=MagicMock(),
         )
         mask = np.zeros(5, dtype=bool)
         MainWindow._on_selection_changed(stub, mask)
-        stub._btn_start_repair.setEnabled.assert_called_with(True)
+        # Phase 3: _on_selection_changed 委托给 _refresh_start_button_state 统一刷新
+        stub._refresh_start_button_state.assert_called_once()
 
     def test_on_selection_changed_repairing_with_enough_points(self):
         """修复模式 + 选区 >=3 点时启用按钮。"""
@@ -430,10 +432,11 @@ class TestModeAndSelection:
             _session=session,
             _lb_sel=MagicMock(),
             _btn_start_repair=MagicMock(),
+            _refresh_start_button_state=MagicMock(),
         )
         mask = np.array([True, True, True, False, False])
         MainWindow._on_selection_changed(stub, mask)
-        stub._btn_start_repair.setEnabled.assert_called_with(True)
+        stub._refresh_start_button_state.assert_called_once()
 
     def test_on_selection_changed_repairing_insufficient_points(self):
         """修复模式 + 选区 <3 点时禁用按钮。"""
@@ -443,10 +446,11 @@ class TestModeAndSelection:
             _session=session,
             _lb_sel=MagicMock(),
             _btn_start_repair=MagicMock(),
+            _refresh_start_button_state=MagicMock(),
         )
         mask = np.array([True, False, False, False, False])
         MainWindow._on_selection_changed(stub, mask)
-        stub._btn_start_repair.setEnabled.assert_called_with(False)
+        stub._refresh_start_button_state.assert_called_once()
 
     def test_on_material_changed_updates_label(self, monkeypatch):
         """_on_material_changed 更新材料信息标签 + 临界速度字段。"""
@@ -597,7 +601,7 @@ class TestComputeSlots:
             _pipeline=MagicMock(),
         )
         MainWindow._on_compute_stage(stub, "执行计算")
-        stub._prog.setValue.assert_called_with(30)
+        stub._prog.setValue.assert_called_with(50)
 
     def test_on_compute_stage_parse(self):
         """_on_compute_stage '解析' 分支。"""
@@ -749,6 +753,7 @@ class TestProgressSlots:
             _session=session,
             _layer_player=MagicMock(),
             _visualizer=MagicMock(),
+            _prog=MagicMock(),
         )
         waypoints = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
         parsed = {
@@ -2179,16 +2184,22 @@ class TestDialogEntries:
         mw.deleteLater()
 
     def test_on_coord_transform_no_points(self, monkeypatch):
-        """无点云时仍打开对话框。"""
+        """无点云时通过 Toast 提示而非打开对话框。"""
         mock_dlg = MagicMock()
         mock_dlg.exec.return_value = 0
         mock_dlg.transformed_points = None
         monkeypatch.setattr(_mw_mod, "CoordinateSystemDialog", lambda *a, **kw: mock_dlg)
+        toast_called = []
+        monkeypatch.setattr(_mw_mod.Toast, "warning", lambda *a, **kw: toast_called.append(kw))
         mw = _make_main_window_new()
         mw._selector = None
         mw._sb = MagicMock()
+        mw._session = _make_session_with_cloud(0)  # xyz=None
+        mw._session.point_cloud.xyz = None
         mw._on_coord_transform()
-        mock_dlg.exec.assert_called_once()
+        # 无点云时应通过 Toast 提示，不打开对话框
+        assert len(toast_called) == 1
+        mock_dlg.exec.assert_not_called()
         mw.deleteLater()
 
     def test_on_coord_transform_applies(self, monkeypatch):
@@ -2201,6 +2212,8 @@ class TestDialogEntries:
         mw = _make_main_window_new()
         mw._selector = MagicMock()
         mw._sb = MagicMock()
+        mw._session = _make_session_with_cloud(5)
+        mw._refresh_start_button_state = MagicMock()
         mw._on_coord_transform()
         mw._selector.set_points.assert_called_once_with(new_points)
         mw.deleteLater()
@@ -2218,6 +2231,7 @@ class TestDialogEntries:
         mw._selector = MagicMock()
         mw._selector.set_points.side_effect = RuntimeError("boom")
         mw._sb = MagicMock()
+        mw._session = _make_session_with_cloud(5)
         mw._on_coord_transform()
         assert "变换应用失败" in show_error_called[0]
         mw.deleteLater()
@@ -2629,6 +2643,7 @@ class TestLoadDemoAndLoad:
         monkeypatch.setattr(mw_mod, "info", lambda *a, **kw: None)
         mw = _make_main_window_new()
         mw._session = RepairSession()
+        mw._session.repair_mode = "additive"
         mw._selector = MagicMock()
         mw._lb_pts = MagicMock()
         mw._btn_start_repair = MagicMock()
@@ -2656,7 +2671,7 @@ class TestLoadDemoAndLoad:
         qapp.processEvents()
 
     def test_on_load_success(self, qapp, monkeypatch):
-        """成功加载点云文件。"""
+        """成功加载点云文件（通过 _on_load_finished 验证异步加载完成后的处理）。"""
         import repair_app.ui.main_window as mw_mod
         monkeypatch.setattr(mw_mod, "_show_error", lambda *a, **kw: None)
         monkeypatch.setattr(mw_mod, "info", lambda *a, **kw: None)
@@ -2664,9 +2679,6 @@ class TestLoadDemoAndLoad:
         xyz = np.zeros((10, 3), dtype=np.float32)
         normals = np.zeros((10, 3), dtype=np.float32)
         normals[:, 2] = 1.0
-        from repair_app.service.file_service import FileService
-        monkeypatch.setattr(FileService, "load_point_cloud", lambda self, fp: (xyz, normals))
-        monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **kw: ("/test.xyz", ""))
 
         mw._session = RepairSession()
         mw._sb = MagicMock()
@@ -2678,9 +2690,10 @@ class TestLoadDemoAndLoad:
         mw._pipeline = MagicMock()
         mw._reset_output = MagicMock()
         mw._est_normals = MagicMock(return_value=normals)
-        mw._file_service = FileService()  # _on_load uses self._file_service
+        mw._refresh_start_button_state = MagicMock()
 
-        mw._on_load()
+        # P0-1: _on_load 现在是异步加载，直接测试 _on_load_finished 回调
+        mw._on_load_finished(xyz, normals, "/test.xyz")
         assert mw._session.point_cloud.xyz is not None
         mw._reset_output.assert_called_once()
         mw._selector.set_points.assert_called_once()
@@ -2688,12 +2701,13 @@ class TestLoadDemoAndLoad:
         qapp.processEvents()
 
     def test_auto_generate_report_success(self, qapp, monkeypatch):
-        """_auto_generate_report 成功生成报告。"""
+        """P0-3: _auto_generate_report 异步启动 ReportWorker；通过 _on_report_finished 验证成功路径。"""
         import repair_app.ui.main_window as mw_mod
         # Mock ExportService
         from repair_app.service import ExportService
         monkeypatch.setattr(ExportService, "export_pdf_report", lambda self, session, output_path: True)
         monkeypatch.setattr(mw_mod.Toast, "success", lambda *a, **kw: None)
+        monkeypatch.setattr(mw_mod, "info", lambda *a, **kw: None)
 
         mw = _make_main_window_new()
         mw._session = RepairSession()
@@ -2716,6 +2730,7 @@ class TestLoadDemoAndLoad:
         mw._lb_prog = MagicMock()
         mw._pipeline = MagicMock()
         mw._export_service = ExportService()
+        mw._workflow_controller = MagicMock()
         mw._cs_fields = {k: MagicMock(value=MagicMock(return_value=500.0)) for k in [
             "particle_velocity", "critical_velocity", "nozzle_diameter",
             "spray_angle", "standoff_distance", "particle_size",
@@ -2729,17 +2744,26 @@ class TestLoadDemoAndLoad:
         mw._sp_depth = MagicMock()
         mw._sp_depth.value.return_value = 1.0
 
+        # P0-3: _auto_generate_report 现在异步启动 ReportWorker
         mw._auto_generate_report()
+        # 验证 worker 和 thread 已创建
+        assert mw._report_worker is not None
+        assert mw._report_thread is not None
+        # 等待异步线程完成
+        mw._report_thread.wait(5000)
+        qapp.processEvents()
+        # 验证成功回调（_on_report_finished）被触发后 showMessage 被调用
         mw._sb.showMessage.assert_called()
         mw.deleteLater()
         qapp.processEvents()
 
     def test_auto_generate_report_failure(self, qapp, monkeypatch):
-        """_auto_generate_report 报告生成失败。"""
+        """P0-3: _auto_generate_report 异步失败通过 _on_report_failed 回调验证。"""
         import repair_app.ui.main_window as mw_mod
         from repair_app.service import ExportService
         monkeypatch.setattr(ExportService, "export_pdf_report", lambda self, session, output_path: False)
         monkeypatch.setattr(mw_mod.Toast, "error", lambda *a, **kw: None)
+        monkeypatch.setattr(mw_mod, "log_error", lambda *a, **kw: None)
 
         mw = _make_main_window_new()
         mw._session = RepairSession()
@@ -2776,6 +2800,9 @@ class TestLoadDemoAndLoad:
         mw._sp_depth.value.return_value = 1.0
 
         mw._auto_generate_report()
+        # 等待异步线程完成
+        mw._report_thread.wait(5000)
+        qapp.processEvents()
         mw._workflow_controller.mark_running_as_failed.assert_called_once()
         mw.deleteLater()
         qapp.processEvents()
@@ -3483,6 +3510,7 @@ class TestCollectAndApply:
 
         mw = _make_main_window_new()
         mw._session = RepairSession()
+        mw._session.repair_mode = "additive"
         mw._file_service = FileService()
         mw._selector = MagicMock()
         mw._lb_pts = MagicMock()
@@ -3500,10 +3528,33 @@ class TestCollectAndApply:
 
         state = {"point_cloud_path": str(pcd_path), "repair_mode": 1, "material_index": 0, "params": {}}
         mw._apply_recovered_state(state)
+        # P2-8: _apply_recovered_state 现在异步加载点云，需等待 QThread 完成
+        load_thread = getattr(mw, "_load_thread", None)
+        if load_thread is not None:
+            load_thread.wait(5000)
+        # P2-9: 处理所有 queued 信号（_on_recover_load_finished 等），
+        # 确保测试断言前异步回调已执行
+        for _ in range(10):
+            qapp.processEvents()
         mw._selector.set_points.assert_called_once()
         mw._btn_start_repair.setEnabled.assert_called_with(True)
+        # P2-9: 清理异步加载线程，避免 worker 进程崩溃
+        load_thread = getattr(mw, "_load_thread", None)
+        if load_thread is not None:
+            try:
+                load_thread.quit()
+                load_thread.wait(1000)
+            except Exception:
+                pass
+        load_worker = getattr(mw, "_load_worker", None)
+        if load_worker is not None:
+            try:
+                load_worker.deleteLater()
+            except Exception:
+                pass
         mw.deleteLater()
-        qapp.processEvents()
+        for _ in range(5):
+            qapp.processEvents()
 
     def test_apply_recovered_state_no_point_cloud(self, qapp, monkeypatch):
         """无点云路径时跳过点云恢复。"""

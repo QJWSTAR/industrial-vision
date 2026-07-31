@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QFont, QIcon
 
 from repair_app.utils.logger_config import error as log_error, info as log_info
+from repair_app.ui.toast import Toast
 from repair_app.config import schema_loader as _schema
 from repair_app.utils.error_manager import ErrorCode, ErrorManager
 from repair_app.ui.theme_manager import ThemeManager
@@ -150,7 +151,7 @@ class ErrorDialog(QDialog):
         frame = QFrame()
         frame.setStyleSheet(
             f"QFrame{{background:{p.bg_panel}; border-left:3px solid {color}; "
-            "border-radius:3px;}}"
+            f"border-radius:3px;}}"
         )
         fl = QVBoxLayout(frame)
         fl.setContentsMargins(10, 6, 10, 6)
@@ -182,18 +183,20 @@ class ErrorDialog(QDialog):
         exc: Optional[Exception] = None,
         code: Optional[ErrorCode] = None,
         context: str = "",
+        log_text: str = "",
     ) -> None:
         """便捷调用：自动生成日志文本并弹出对话框。
 
         优先使用 ErrorManager.handle 统一编排（log → friendly → detail → dialog）。
         若显式传了 what/why/how，则跳过 ErrorManager 自动分类，直接使用传入的文案。
+        若显式传了 log_text，则直接使用；否则从 exc 自动生成 traceback 文本。
         """
         # 路径 A：显式传 what/why/how，直接用（向后兼容旧调用）
         if what or why or how:
-            log_text = ""
-            if exc is not None:
+            if not log_text and exc is not None:
                 log_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-                log_error(f"[ErrorDialog] {title}: {exc}\n{log_text}")
+            if log_text:
+                log_error(f"[ErrorDialog] {title}: {exc or log_text}")
             dlg = ErrorDialog(parent, title=title, what=what, why=why, how=how, log_text=log_text)
             dlg.exec()
             return
@@ -204,7 +207,7 @@ class ErrorDialog(QDialog):
             return
 
         # 路径 C：无异常对象，直接弹出（仅传文案时）
-        dlg = ErrorDialog(parent, title=title, what=what, why=why, how=how)
+        dlg = ErrorDialog(parent, title=title, what=what, why=why, how=how, log_text=log_text)
         dlg.exec()
 
 
@@ -384,6 +387,11 @@ class LoadingDialog(QDialog):
         self._result_ok = False
         self._result_msg = "用户取消了 MATLAB 启动"
         log_info("用户取消了 MATLAB 启动等待")
+        # 停止后台 worker，防止线程泄漏和 "QThread destroyed while running" 崩溃
+        worker = getattr(self, "_worker", None)
+        if worker is not None:
+            worker.requestInterruption()
+            worker.wait(3000)  # 最多等 3 秒
         self.reject()
 
     def _on_timeout(self) -> None:
@@ -539,7 +547,7 @@ class RobotExportDialog(QDialog):
 
     def _on_export(self) -> None:
         if self._waypoints is None or len(self._waypoints) == 0:
-            QMessageBox.warning(self, "无法导出", "请先完成路径规划生成航点。")
+            Toast.warning(self, "请先完成路径规划生成航点。")
             return
         default_ext = ".krl" if self._cb_type.currentData() == "kuka" else ".mod"
         fp, _ = QFileDialog.getSaveFileName(
@@ -560,14 +568,15 @@ class RobotExportDialog(QDialog):
             )
             exporter.export(self._waypoints, output_path=fp)
             self._result_path = fp
-            QMessageBox.information(self, "导出成功", f"机器人轨迹已导出到：\n{fp}")
+            Toast.success(self, f"机器人轨迹已导出到：\n{fp}")
             self.accept()
         except Exception as exc:
+            _fm = ErrorManager.get_friendly_message(exc, ErrorCode.EXPORT, "机器人轨迹导出")
             ErrorDialog.show(
-                self, title="机器人轨迹导出失败",
-                what="无法生成机器人轨迹文件。",
-                why=f"错误详情：{exc}",
-                how="1. 确认航点数据有效\n2. 检查输出路径是否有写入权限\n3. 重试",
+                self, title=_fm.title,
+                what=_fm.what or "无法生成机器人轨迹文件。",
+                why=_fm.why,
+                how=_fm.how or "1. 确认航点数据有效\n2. 检查输出路径是否有写入权限\n3. 重试",
                 exc=exc,
             )
 
@@ -706,8 +715,8 @@ class CalibrationDialog(QDialog):
             )
             ts = wz.save()
             corr = wz.get_correction_factors("STEEL_316L")
-            QMessageBox.information(
-                self, "标定完成",
+            Toast.success(
+                self,
                 f"标定记录已保存（时间戳：{ts}）。\n\n"
                 f"修正系数：\n"
                 f"  宽度修正：{corr['width']:.3f}\n"
@@ -716,11 +725,12 @@ class CalibrationDialog(QDialog):
             )
             self.accept()
         except Exception as exc:
+            _fm = ErrorManager.get_friendly_message(exc, ErrorCode.FILE, "标定")
             ErrorDialog.show(
-                self, title="标定失败",
-                what="无法保存标定记录。",
-                why=f"错误详情：{exc}",
-                how="1. 检查参数是否合理\n2. 确认 config 目录可写\n3. 重试",
+                self, title=_fm.title,
+                what=_fm.what or "无法保存标定记录。",
+                why=_fm.why,
+                how=_fm.how or "1. 检查参数是否合理\n2. 确认 config 目录可写\n3. 重试",
                 exc=exc,
             )
 
@@ -852,7 +862,7 @@ class CoordinateSystemDialog(QDialog):
 
     def _on_apply(self) -> None:
         if self._points is None or len(self._points) == 0:
-            QMessageBox.warning(self, "无法变换", "请先加载点云。")
+            Toast.warning(self, "请先加载点云。")
             return
         try:
             import numpy as np
@@ -885,17 +895,18 @@ class CoordinateSystemDialog(QDialog):
             pts[:, 1] += self._sp_ty.value()
             pts[:, 2] += self._sp_tz.value()
             self._transformed = pts
-            QMessageBox.information(
-                self, "变换完成",
+            Toast.success(
+                self,
                 f"坐标系变换已完成。\n变换后点数：{len(pts)}",
             )
             self.accept()
         except Exception as exc:
+            _fm = ErrorManager.get_friendly_message(exc, ErrorCode.MESH, "坐标系变换")
             ErrorDialog.show(
-                self, title="变换失败",
-                what="坐标系变换过程中发生错误。",
-                why=f"错误详情：{exc}",
-                how="1. 确认点云数据有效\n2. 检查变换参数\n3. 重试",
+                self, title=_fm.title,
+                what=_fm.what or "坐标系变换过程中发生错误。",
+                why=_fm.why,
+                how=_fm.how or "1. 确认点云数据有效\n2. 检查变换参数\n3. 重试",
                 exc=exc,
             )
 
@@ -922,6 +933,7 @@ class ParameterPresetDialog(QDialog):
         self.setMinimumWidth(520)
         self._current_params = current_params or {}
         self._result_params = None
+        self._pending_delete_item: str | None = None
 
         p = ThemeManager.get_palette()
 
@@ -1019,50 +1031,58 @@ class ParameterPresetDialog(QDialog):
         import os, json
         name = self._le_name.text().strip()
         if not name:
-            QMessageBox.warning(self, "名称为空", "请输入预设名称。")
+            Toast.warning(self, "请输入预设名称。")
             return
         fp = os.path.join(self._get_preset_dir(), f"{name}.json")
         try:
             with open(fp, "w", encoding="utf-8") as f:
                 json.dump(self._current_params, f, indent=2, ensure_ascii=False)
-            QMessageBox.information(self, "保存成功", f"预设 '{name}' 已保存。")
+            Toast.success(self, f"预设 '{name}' 已保存。")
             self._refresh_list()
         except Exception as exc:
-            ErrorDialog.show(self, title="保存失败", what="无法保存预设。",
-                             why=f"错误详情：{exc}", how="检查目录权限后重试。", exc=exc)
+            _fm = ErrorManager.get_friendly_message(exc, ErrorCode.FILE, "保存预设")
+            ErrorDialog.show(self, title=_fm.title, what=_fm.what or "无法保存预设。",
+                             why=_fm.why, how=_fm.how or "检查目录权限后重试。", exc=exc)
 
     def _on_load(self) -> None:
         import os, json
         item = self._lst_presets.currentItem()
         if not item:
-            QMessageBox.warning(self, "未选择", "请先选择一个预设。")
+            Toast.warning(self, "请先选择一个预设。")
             return
         fp = os.path.join(self._get_preset_dir(), f"{item.text()}.json")
         try:
             with open(fp, "r", encoding="utf-8") as f:
                 self._result_params = json.load(f)
-            QMessageBox.information(self, "加载成功", f"预设 '{item.text()}' 已加载，点击关闭应用参数。")
+            Toast.success(self, f"预设 '{item.text()}' 已加载，点击关闭应用参数。")
             self.accept()
         except Exception as exc:
-            ErrorDialog.show(self, title="加载失败", what="无法加载预设。",
-                             why=f"错误详情：{exc}", how="检查文件是否损坏。", exc=exc)
+            _fm = ErrorManager.get_friendly_message(exc, ErrorCode.FILE, "加载预设")
+            ErrorDialog.show(self, title=_fm.title, what=_fm.what or "无法加载预设。",
+                             why=_fm.why, how=_fm.how or "检查文件是否损坏。", exc=exc)
 
     def _on_delete(self) -> None:
         import os
         item = self._lst_presets.currentItem()
         if not item:
-            QMessageBox.warning(self, "未选择", "请先选择一个预设。")
+            Toast.warning(self, "请先选择一个预设。")
             return
-        ret = QMessageBox.question(self, "确认删除", f"确定删除预设 '{item.text()}' 吗？")
-        if ret != QMessageBox.StandardButton.Yes:
+        item_text = item.text()
+        # 二次点击确认（非阻塞，替代 QMessageBox.question）
+        if self._pending_delete_item != item_text:
+            self._pending_delete_item = item_text
+            Toast.warning(self, f"再次点击「删除」以确认移除预设「{item_text}」")
             return
-        fp = os.path.join(self._get_preset_dir(), f"{item.text()}.json")
+        self._pending_delete_item = None
+        fp = os.path.join(self._get_preset_dir(), f"{item_text}.json")
         try:
             os.remove(fp)
             self._refresh_list()
+            Toast.success(self, f"预设「{item_text}」已删除")
         except Exception as exc:
-            ErrorDialog.show(self, title="删除失败", what="无法删除预设。",
-                             why=f"错误详情：{exc}", how="检查文件权限。", exc=exc)
+            _fm = ErrorManager.get_friendly_message(exc, ErrorCode.FILE, "删除预设")
+            ErrorDialog.show(self, title=_fm.title, what=_fm.what or "无法删除预设。",
+                             why=_fm.why, how=_fm.how or "检查文件权限。", exc=exc)
 
     @property
     def result_params(self):
@@ -1150,7 +1170,7 @@ class BatchValidationDialog(QDialog):
         import json
         text = self._txt.toPlainText().strip()
         if not text:
-            QMessageBox.warning(self, "输入为空", "请输入至少一组参数。")
+            Toast.warning(self, "请输入至少一组参数。")
             return
         try:
             # 尝试解析为 JSON（单个 dict 或 list）
@@ -1181,7 +1201,7 @@ class BatchValidationDialog(QDialog):
                     param_sets.append(params)
 
         if not param_sets:
-            QMessageBox.warning(self, "无有效参数", "未解析到任何参数组合。")
+            Toast.warning(self, "未解析到任何参数组合。")
             return
 
         results = []
@@ -1475,8 +1495,8 @@ class LicenseActivationDialog(QDialog):
                 f"color:{p.success}; font-size:13px; font-weight:bold;"
             )
             self._lb_status.setText(f"✅ {msg}\n请重启软件以应用新 License。")
-            QMessageBox.information(
-                self, "激活成功",
+            Toast.success(
+                self,
                 f"License 已成功安装。\n\n{msg}\n\n请重启软件以完成激活。",
             )
         else:

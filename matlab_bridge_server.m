@@ -52,6 +52,9 @@ function matlab_bridge_server(address)
     end
     if exist(venvPython, 'file')
         pyenv('Version', venvPython);
+    else
+        fprintf('WARNING: venv not found. Using system Python.\n');
+        fprintf('If import fails, run: python -m venv venv && venv\\Scripts\\pip install -e .\n');
     end
     pe = pyenv;
     fprintf('MATLAB Python env: %s (%s)\n', pe.Version, pe.ExecutionMode);

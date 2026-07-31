@@ -84,6 +84,9 @@ class BridgeServer:
         self._ctx = zmq.Context()
         self._sock = self._ctx.socket(zmq.REP)
         self._sock.setsockopt(zmq.LINGER, 0)
+        # 设置收发超时，防止 send/recv 永久阻塞导致 stop() 无法退出
+        self._sock.setsockopt(zmq.RCVTIMEO, 100)   # 100ms 与 poll 一致
+        self._sock.setsockopt(zmq.SNDTIMEO, 5000)   # 5s 发送超时
         self._sock.bind(self._address)
         self._running = True
         logger.info("Bridge server listening at %s", self._address)
@@ -141,8 +144,18 @@ class BridgeServer:
         )
 
     def stop(self) -> None:
-        """请求停止（非阻塞，供外部调用）。"""
+        """请求停止（非阻塞，供外部调用）。
+
+        设置 _running=False 后，若 serve() 正阻塞在 send 上，
+        通过关闭 socket 强制中断阻塞调用。
+        """
         self._running = False
+        # 强制关闭 socket 中断可能阻塞的 send/recv
+        if self._sock is not None:
+            try:
+                self._sock.close(linger=0)
+            except Exception:
+                pass
 
     # ---- 消息分发 ----
     def _dispatch(self, data: bytes) -> bytes:

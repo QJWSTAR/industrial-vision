@@ -22,6 +22,24 @@ from pathlib import Path
 from typing import Optional, Callable
 
 from repair_app.software.path_manager import PathManager
+from repair_app.utils.path_sanitizer import PathSanitizer
+
+
+# 项目根目录（用于路径脱敏，与 error_manager 保持一致）
+_PROJECT_ROOT = os.path.normpath(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+
+
+def _sanitize_path_text(text: str) -> str:
+    """P1-34: 脱敏文本中的敏感路径（用户主目录、项目路径、临时目录）。
+
+    崩溃报告可能包含用户全名、项目路径等敏感信息，
+    写入报告文件前必须脱敏，避免泄露给技术支持或日志聚合系统。
+    """
+    if not text:
+        return text
+    return PathSanitizer.sanitize(text, project_root=_PROJECT_ROOT) or text
 
 
 def _safe_get_version() -> str:
@@ -97,7 +115,8 @@ class ExceptionReporter:
         lines.append(f"  版本: {_safe_get_version()}")
         lines.append(f"  Python: {sys.version.split()[0]}")
         lines.append(f"  平台: {platform.platform()}")
-        lines.append(f"  可执行文件: {sys.executable}")
+        # P1-34: 脱敏可执行文件路径（可能含用户名，如 C:\Users\<user>\venv\...）
+        lines.append(f"  可执行文件: {_sanitize_path_text(sys.executable)}")
         lines.append("")
         lines.append("[License 状态]")
         lines.append(f"  {_safe_get_license_info()}")
@@ -107,13 +126,15 @@ class ExceptionReporter:
         lines.append("")
         if context:
             lines.append("[上下文]")
-            lines.append(f"  {context}")
+            lines.append(f"  {_sanitize_path_text(context)}")
             lines.append("")
         lines.append("[用户数据目录]")
-        lines.append(f"  {self._pm.root}")
+        # P1-34: 脱敏用户数据目录路径（可能含用户名）
+        lines.append(f"  {_sanitize_path_text(str(self._pm.root))}")
         lines.append("")
         lines.append("[Traceback]")
-        lines.append(tb_text)
+        # P1-34: 脱敏 traceback 中的文件路径（含用户全名/项目路径）
+        lines.append(_sanitize_path_text(tb_text))
         lines.append("")
         lines.append("=" * 70)
         lines.append("请将此报告发送给技术支持以协助诊断问题。")
@@ -144,8 +165,10 @@ class ExceptionReporter:
             "",
         ]
         if context:
-            lines += ["[上下文]", f"  {context}", ""]
-        lines += ["[错误描述]", message, "", "=" * 70]
+            # P1-34: 脱敏上下文中的路径
+            lines += ["[上下文]", f"  {_sanitize_path_text(context)}", ""]
+        # P1-34: 脱敏错误描述中的路径
+        lines += ["[错误描述]", _sanitize_path_text(message), "", "=" * 70]
         try:
             report_path.write_text("\n".join(lines), encoding="utf-8")
         except Exception:

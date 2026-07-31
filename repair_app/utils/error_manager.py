@@ -423,11 +423,13 @@ class ErrorManager:
     @classmethod
     def handle(
         cls,
-        exc: BaseException,
+        exc: Optional[BaseException] = None,
         code: Optional[ErrorCode] = None,
         context: str = "",
         parent: Any = None,
         show_dialog: bool = True,
+        override_friendly: Optional[str] = None,
+        log_text: str = "",
     ) -> tuple[ErrorCode, str]:
         """统一异常处理入口（核心 API）。
 
@@ -439,28 +441,54 @@ class ErrorManager:
           5. recover：返回恢复策略
           6. continue：用户确认后继续
 
+        支持两种模式：
+          - 标准模式：传入 exc，自动分类、生成友好消息、记录日志、显示对话框
+          - 转发模式（P1-31）：跨线程信号传递场景，Worker 端已通过 _pack_error
+            记录日志并生成友好消息，接收方传入 override_friendly + log_text + code，
+            跳过重复日志记录与自动分类，仅做对话框显示与策略调度。
+
         Args:
-            exc: 异常对象
-            code: 错误分类（None 则自动分类）
+            exc: 异常对象（转发模式可为 None）
+            code: 错误分类（None 则自动分类；转发模式必填）
             context: 操作上下文（如"路径规划"）
             parent: 父窗口（用于显示对话框）
             show_dialog: 是否显示 GUI 对话框（False 仅记录日志）
+            override_friendly: 转发模式下 Worker 已生成的友好消息文本
+                （含 What/Why/How），跳过模板生成
+            log_text: 转发模式下 Worker 已生成的 traceback 文本；
+                提供时跳过 LogManager.log_error 避免重复日志（P1-31 日志聚合）
 
         Returns:
             (ErrorCode, traceback_text)
         """
         # 1. 分类
-        resolved_code = cls.classify(exc, code, context)
+        if code is not None:
+            resolved_code = code
+        elif exc is not None:
+            resolved_code = cls.classify(exc, code, context)
+        else:
+            resolved_code = ErrorCode.UNKNOWN
 
-        # 2. 记录日志（带完整 traceback）
-        tb_text = LogManager.log_error(exc, resolved_code, context)
+        # 2. 记录日志
+        # 转发模式：log_text 已提供，Worker 端 _pack_error 已记录，跳过避免重复日志
+        if log_text:
+            tb_text = log_text
+        elif exc is not None:
+            tb_text = LogManager.log_error(exc, resolved_code, context)
+        else:
+            tb_text = ""
 
-        # 3. 生成友好消息
-        friendly = cls.get_friendly_message(exc, resolved_code, context)
-
-        # 4. 显示对话框（若需要）
-        if show_dialog:
-            cls._show_dialog(parent, friendly, tb_text, exc)
+        # 3. 生成友好消息 + 4. 显示对话框
+        if override_friendly is not None:
+            # 转发模式：使用 Worker 已生成的友好消息文本
+            if show_dialog:
+                cls._show_dialog_override(parent, override_friendly, tb_text, context)
+        else:
+            # 标准模式：从 exc 生成 FriendlyMessage
+            if exc is not None:
+                friendly = cls.get_friendly_message(exc, resolved_code, context)
+                if show_dialog:
+                    cls._show_dialog(parent, friendly, tb_text, exc)
 
         return resolved_code, tb_text
 
@@ -491,6 +519,42 @@ class ErrorManager:
                     f"[ErrorManager] {friendly.title}: {friendly.what}",
                     file=sys.stderr,
                 )
+
+    @classmethod
+    def _show_dialog_override(
+        cls,
+        parent: Any,
+        friendly_text: str,
+        tb_text: str,
+        context: str = "",
+    ) -> None:
+        """转发模式对话框显示（P1-31）。
+
+        与 _show_dialog 的区别：
+        - 入参是已组合的 friendly_text（Worker 端 _pack_error 生成）而非 FriendlyMessage
+        - friendly_text 首行即标题，整体作为 what 字段展示
+        - tb_text 作为 log_text 传入折叠区，不暴露给用户主视图
+        """
+        try:
+            from repair_app.ui.dialogs import ErrorDialog
+            # 标题优先取 friendly_text 首行（_pack_error 组合时首行是 friendly.title）
+            title = f"{context}失败" if context else "操作失败"
+            if friendly_text:
+                first_line = friendly_text.split("\n", 1)[0].strip()
+                if first_line:
+                    title = first_line
+            ErrorDialog.show(
+                parent=parent,
+                title=title,
+                what=friendly_text,
+                why="",
+                how="",
+                log_text=tb_text,
+            )
+        except Exception as dialog_exc:
+            _log_error(f"[ErrorManager] ErrorDialog 显示失败: {dialog_exc}")
+            if sys.stderr is not None:
+                print(f"[ErrorManager] {friendly_text}", file=sys.stderr)
 
     # ============================================================
     # 装饰器 API
@@ -579,13 +643,17 @@ class ErrorManager:
             try:
                 # 先调用前一个钩子（exception_reporter 生成报告 + crash_handler 写日志）
                 prev_excepthook(exc_type, exc_value, exc_tb)
-            except Exception:
-                pass
+            except Exception as hook_exc:
+                # P1-33: 钩子自身失败时至少保证 stderr 兜底输出，不静默吞没
+                if sys.stderr is not None:
+                    print(f"[ErrorManager prev_excepthook] {hook_exc}", file=sys.stderr)
             # 再显示用户友好对话框（主线程才能操作 GUI）
             try:
                 cls.handle(exc_value, context="未捕获异常（主线程）", show_dialog=show_dialog)
-            except Exception:
-                pass
+            except Exception as hook_exc:
+                # P1-33: 钩子自身失败时至少保证 stderr 兜底输出，不静默吞没
+                if sys.stderr is not None:
+                    print(f"[ErrorManager main_thread_hook] {hook_exc}", file=sys.stderr)
 
         sys.excepthook = main_thread_hook
 
@@ -601,8 +669,10 @@ class ErrorManager:
                     context=f"未捕获异常（子线程 {args.thread.name}）",
                     show_dialog=False,
                 )
-            except Exception:
-                pass
+            except Exception as hook_exc:
+                # P1-33: 钩子自身失败时至少保证 stderr 兜底输出，不静默吞没
+                if sys.stderr is not None:
+                    print(f"[ErrorManager thread_hook] {hook_exc}", file=sys.stderr)
 
         # Python 3.8+ 支持 threading.excepthook
         if hasattr(threading, "excepthook"):

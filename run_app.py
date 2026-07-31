@@ -83,21 +83,19 @@ def main():
         # Release Mode: License 校验通过
         _log_release_mode_banner(status)
     else:
-        # Release Mode: License 校验失败，拒绝启动
-        warning(f"License 验证失败，软件拒绝启动: {status.message}")
-        QMessageBox.critical(
-            None,
-            "License 无效 — 无法启动软件",
-            f"软件无法启动，因为 License 验证失败。\n\n"
-            f"错误详情：{status.message}\n\n"
-            "请按以下步骤解决：\n"
-            "1. 确认 config 目录下存在 license.key 文件\n"
-            "2. 确认 license.key 未被篡改或损坏\n"
-            "3. 确认本机机器码与 License 中记录的一致\n"
-            "4. 确认 License 未过期\n\n"
-            "如需帮助，请联系管理员重新签发 License 文件。",
-        )
-        sys.exit(1)
+        # Release Mode: License 校验失败，提供激活选项而非直接退出
+        warning(f"License 验证失败: {status.message}")
+        from repair_app.ui.dialogs import LicenseActivationDialog
+        dlg = LicenseActivationDialog(None)
+        dlg.exec()
+        # 用户关闭对话框后，重新验证（可能已导入新 license.key）
+        status = license_mgr.verify_runtime()
+        if status.valid:
+            info("License 激活成功")
+            _log_release_mode_banner(status)
+        else:
+            warning(f"License 仍未激活，软件退出: {status.message}")
+            sys.exit(1)
 
     # 创建主窗口
     window = MainWindow()

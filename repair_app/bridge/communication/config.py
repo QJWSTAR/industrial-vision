@@ -16,23 +16,31 @@ from repair_app.platform.transport import get_zmq_address_from_env
 from repair_app.utils.logger_config import warning
 
 
-def _env_int(key: str, schema_key: str) -> int:
-    """优先读环境变量，缺失时回退到 schema 默认值。"""
+def _env_int(key: str, schema_key: str, fallback: int = 0) -> int:
+    """优先读环境变量，缺失时回退到 schema 默认值，schema 异常时回退到 fallback。"""
     val = os.environ.get(key)
     if val is not None:
         try:
             return int(val)
         except ValueError as exc:
             warning(f"环境变量 {key}='{val}' 无法转为 int，回退 schema 默认值: {exc}")
-    return int(_schema.get_network_value(schema_key))
+    try:
+        return int(_schema.get_network_value(schema_key))
+    except Exception as exc:
+        warning(f"读取 schema '{schema_key}' 失败，使用 fallback={fallback}: {exc}")
+        return fallback
 
 
-def _env_str(key: str, schema_key: str) -> str:
-    """优先读环境变量，缺失时回退到 schema 默认值。"""
+def _env_str(key: str, schema_key: str, fallback: str = "") -> str:
+    """优先读环境变量，缺失时回退到 schema 默认值，schema 异常时回退到 fallback。"""
     val = os.environ.get(key)
     if val is not None:
         return val
-    return str(_schema.get_network_value(schema_key))
+    try:
+        return str(_schema.get_network_value(schema_key))
+    except Exception as exc:
+        warning(f"读取 schema '{schema_key}' 失败，使用 fallback='{fallback}': {exc}")
+        return fallback
 
 
 @dataclass(frozen=True)
@@ -107,5 +115,32 @@ class BridgeConfig:
         return cls()
 
 
-# 全局默认配置单例（业务层通过 MatlabService.config 访问）
-DEFAULT_CONFIG = BridgeConfig.from_env()
+# 全局默认配置单例（惰性初始化，避免模块加载时 schema 异常导致级联导入失败）
+_DEFAULT_CONFIG: Optional[BridgeConfig] = None
+
+
+def get_default_config() -> BridgeConfig:
+    """获取全局默认配置（惰性初始化）。"""
+    global _DEFAULT_CONFIG
+    if _DEFAULT_CONFIG is None:
+        try:
+            _DEFAULT_CONFIG = BridgeConfig.from_env()
+        except Exception as exc:
+            warning(f"BridgeConfig 初始化失败，使用空配置: {exc}")
+            _DEFAULT_CONFIG = BridgeConfig(
+                address="tcp://127.0.0.1:5555",
+            )
+    return _DEFAULT_CONFIG
+
+
+# 向后兼容：保留 DEFAULT_CONFIG 属性访问
+class _ConfigProxy:
+    """惰性代理，首次访问属性时初始化 DEFAULT_CONFIG。"""
+    def __getattr__(self, name):
+        return getattr(get_default_config(), name)
+
+    def __repr__(self):
+        return repr(get_default_config())
+
+
+DEFAULT_CONFIG = _ConfigProxy()

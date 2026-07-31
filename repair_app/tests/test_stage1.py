@@ -268,6 +268,13 @@ class TestUIStructure:
             assert hasattr(mw, "_visualizer") or hasattr(mw, "_defect_selector"), \
                 "MainWindow 应有可视化或选区组件"
         finally:
+            # P2-9: 清理 ComputeController（含 ProgressSubscriber 线程），避免 access violation
+            cc = getattr(mw, "_compute_controller", None)
+            if cc is not None:
+                try:
+                    cc.cleanup()
+                except Exception:
+                    pass
             if hasattr(mw, "_zmq_client") and mw._zmq_client is not None:
                 mw._zmq_client.close()
             mw.deleteLater()

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -123,11 +124,12 @@ class MatlabLifecycleManager(QObject):
 
     @classmethod
     def reset_singleton(cls) -> None:
-        """重置单例（测试用）。"""
+        """重置单例（测试用）。先取出引用再释放锁，避免 stop() 阻塞其他线程。"""
         with cls._singleton_lock:
-            if cls._singleton is not None:
-                cls._singleton.stop()
+            instance = cls._singleton
             cls._singleton = None
+        if instance is not None:
+            instance.stop()
 
     # ------------------------------------------------------------------
     # 属性
@@ -211,6 +213,9 @@ class MatlabLifecycleManager(QObject):
         self._enabled = True
 
         with self._state_lock:
+            # 已就绪则直接返回，避免不必要的状态转换和 UI 闪烁
+            if self._status == LifecycleStatus.READY:
+                return True
             if self._is_starting:
                 logger.warning("Lifecycle 已在启动中，跳过重复调用")
                 return self.is_ready
@@ -388,7 +393,7 @@ class MatlabLifecycleManager(QObject):
             logger.warning("看门狗轮询异常: %s", exc)
 
     def _try_restart(self) -> bool:
-        """尝试重启 MATLAB + Bridge。"""
+        """尝试重启 MATLAB + Bridge（在后台线程执行，避免阻塞主线程）。"""
         if self._launcher.restart_count >= self.MAX_AUTO_RESTARTS:
             self._set_status(
                 LifecycleStatus.FAILED,
@@ -401,26 +406,32 @@ class MatlabLifecycleManager(QObject):
             f"正在重启 MATLAB（第 {self._launcher.restart_count + 1} 次）...",
         )
 
-        ok = self._launcher.restart(timeout=self.STARTUP_TIMEOUT_S)
-        if ok:
-            version = self._launcher.matlab_version or "unknown"
-            self._set_status(
-                LifecycleStatus.READY,
-                f"MATLAB {version} 已重启成功",
-            )
-            return True
-        else:
-            if self._launcher.restart_count >= self.MAX_AUTO_RESTARTS:
+        def _do_restart():
+            """后台线程执行重启，通过信号回传结果。"""
+            ok = self._launcher.restart(timeout=self.STARTUP_TIMEOUT_S)
+            if ok:
+                version = self._launcher.matlab_version or "unknown"
                 self._set_status(
-                    LifecycleStatus.FAILED,
-                    "重启次数耗尽，MATLAB 不可用",
+                    LifecycleStatus.READY,
+                    f"MATLAB {version} 已重启成功",
                 )
             else:
-                self._set_status(
-                    LifecycleStatus.CRASHED,
-                    "重启失败，将再次尝试",
-                )
-            return False
+                if self._launcher.restart_count >= self.MAX_AUTO_RESTARTS:
+                    self._set_status(
+                        LifecycleStatus.FAILED,
+                        "重启次数耗尽，MATLAB 不可用",
+                    )
+                else:
+                    self._set_status(
+                        LifecycleStatus.CRASHED,
+                        "重启失败，将再次尝试",
+                    )
+
+        # 在后台线程执行，避免 MATLAB 启动（30-60s）阻塞 Qt 主线程
+        import threading
+        t = threading.Thread(target=_do_restart, daemon=True)
+        t.start()
+        return True
 
     # ------------------------------------------------------------------
     # 计算状态标记
@@ -453,11 +464,32 @@ class MatlabLifecycleManager(QObject):
             version = self._launcher.matlab_version or "unknown"
             self._set_status(LifecycleStatus.READY, f"MATLAB {version} 已就绪")
         except Exception:
-            # 异常：进入 RECOVERING 状态
-            self._set_status(
-                LifecycleStatus.RECOVERING,
-                "计算异常，MATLAB 需要恢复",
+            # 区分异常类型：仅引擎级异常才进入 RECOVERING
+            # 临时网络错误（BridgeError 子类如 ConnectionTimeoutError）保持 READY
+            from repair_app.bridge.communication.exceptions import (
+                EngineUnavailableError,
+                MatlabEngineUnhealthyError,
+                EngineCrashError,
+                MatlabCallTimeoutError,
             )
+            if isinstance(exc := sys.exc_info()[1], (
+                EngineUnavailableError,
+                MatlabEngineUnhealthyError,
+                EngineCrashError,
+                # P1-15: 超时意味着引擎已不健康，进入 RECOVERING 而非错误恢复 READY
+                MatlabCallTimeoutError,
+            )):
+                self._set_status(
+                    LifecycleStatus.RECOVERING,
+                    "引擎异常，MATLAB 需要恢复",
+                )
+            else:
+                # 临时错误：恢复 READY 状态，下次可重试
+                version = self._launcher.matlab_version or "unknown"
+                self._set_status(
+                    LifecycleStatus.READY,
+                    f"MATLAB {version} 已就绪（上次计算异常但引擎健康）",
+                )
             raise
 
     def mark_busy(self) -> None:

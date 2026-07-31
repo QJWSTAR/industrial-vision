@@ -108,6 +108,13 @@ def main_window(qapp, monkeypatch):
     mw = MainWindow()
     yield mw
 
+    # P2-9: 清理 ComputeController（含 ProgressSubscriber 线程），避免 access violation
+    compute_controller = getattr(mw, "_compute_controller", None)
+    if compute_controller is not None:
+        try:
+            compute_controller.cleanup()
+        except Exception:
+            pass
     # 清理 ZMQ client
     if hasattr(mw, "_zmq_client") and mw._zmq_client is not None:
         try:
