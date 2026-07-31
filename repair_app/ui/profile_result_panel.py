@@ -223,8 +223,11 @@ class ProfileResultPanel(QWidget):
                 try:
                     fig.clear()
                     plt.close(fig)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    import logging
+                    logging.getLogger("csam.ui.profile_result_panel").warning(
+                        "清理 matplotlib fig 失败: %s", exc
+                    )
                 setattr(self, f"_fig_{name}", None)
             canvas = getattr(self, f"_canvas_{name}", None)
             if canvas is not None:

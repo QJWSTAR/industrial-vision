@@ -20,6 +20,17 @@ from repair_app.config import schema_loader
 
 logger = logging.getLogger("csam.bridge.control")
 
+# ============================================================
+# 模块常量（避免 Magic Number 散落）
+# ============================================================
+CONTROL_SCHEMA_VERSION = 3  # ControlRequest/ControlResponse 协议版本
+DEFAULT_TERMINAL_HISTORY_LIMIT = 128  # 终结操作历史记录上限
+MIN_TERMINAL_HISTORY_LIMIT = 8  # 终结操作历史记录下限
+CONTROL_POLL_INTERVAL_MS = 100  # 控制 socket poll 间隔
+CONTROL_SERVER_START_WAIT_S = 2.0  # 控制服务启动等待
+CONTROL_SERVER_STOP_WAIT_S = 2.0  # 控制服务停止等待
+MIN_THREAD_JOIN_TIMEOUT_S = 0.1  # 线程 join 最小超时
+
 
 @dataclass
 class _OperationRecord:
@@ -32,11 +43,11 @@ class _OperationRecord:
 class OperationRegistry:
     """Thread-safe operation and cooperative-cancel registry."""
 
-    def __init__(self, terminal_history_limit: int = 128) -> None:
+    def __init__(self, terminal_history_limit: int = DEFAULT_TERMINAL_HISTORY_LIMIT) -> None:
         self._lock = threading.RLock()
         self._active: dict[str, _OperationRecord] = {}
         self._terminal: "OrderedDict[str, str]" = OrderedDict()
-        self._terminal_history_limit = max(8, int(terminal_history_limit))
+        self._terminal_history_limit = max(MIN_TERMINAL_HISTORY_LIMIT, int(terminal_history_limit))
 
     def begin(self, operation_id: str) -> None:
         operation_id = str(operation_id)
@@ -152,7 +163,7 @@ class CancellationControlServer:
     def is_running(self) -> bool:
         return bool(self._enabled and self._thread and self._thread.is_alive())
 
-    def start(self, wait_s: float = 2.0) -> bool:
+    def start(self, wait_s: float = CONTROL_SERVER_START_WAIT_S) -> bool:
         if self.is_running:
             return True
         self._stop_event.clear()
@@ -171,11 +182,11 @@ class CancellationControlServer:
             )
         return self._enabled
 
-    def stop(self, wait_s: float = 2.0) -> bool:
+    def stop(self, wait_s: float = CONTROL_SERVER_STOP_WAIT_S) -> bool:
         self._stop_event.set()
         thread = self._thread
         if thread is not None and thread.is_alive():
-            thread.join(timeout=max(0.1, wait_s))
+            thread.join(timeout=max(MIN_THREAD_JOIN_TIMEOUT_S, wait_s))
             if thread.is_alive():
                 logger.error(
                     "取消控制线程未在 %.1fs 内退出；保留线程状态以防重复绑定",
@@ -201,7 +212,7 @@ class CancellationControlServer:
             logger.info("取消控制服务已绑定: %s", self._address)
 
             while not self._stop_event.is_set():
-                if not sock.poll(100, zmq.POLLIN):
+                if not sock.poll(CONTROL_POLL_INTERVAL_MS, zmq.POLLIN):
                     continue
                 data = sock.recv()
                 sock.send(self._handle_request(data))
@@ -217,8 +228,11 @@ class CancellationControlServer:
                     sock.close(0)
                 if ctx is not None:
                     ctx.term()
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging
+                logging.getLogger("csam.bridge.operation_control").debug(
+                    "ZMQ 清理失败: %s", exc
+                )
 
     @staticmethod
     def _handle_request(data: bytes) -> bytes:
@@ -229,14 +243,14 @@ class CancellationControlServer:
             ControlStatus,
         )
 
-        response = ControlResponse(schema_version=3)
+        response = ControlResponse(schema_version=CONTROL_SCHEMA_VERSION)
         try:
             request = ControlRequest()
             request.ParseFromString(data)
             response.operation_id = request.operation_id
             response.request_id = request.request_id
             if (
-                request.schema_version != 3
+                request.schema_version != CONTROL_SCHEMA_VERSION
                 or request.command != ControlCommand.CONTROL_CANCEL_REQUEST
                 or not request.operation_id
             ):
@@ -281,7 +295,7 @@ def request_cancel(
     )
     req_id = request_id or str(uuid.uuid4())
     request = ControlRequest(
-        schema_version=3,
+        schema_version=CONTROL_SCHEMA_VERSION,
         command=ControlCommand.CONTROL_CANCEL_REQUEST,
         operation_id=str(operation_id),
         request_id=req_id,

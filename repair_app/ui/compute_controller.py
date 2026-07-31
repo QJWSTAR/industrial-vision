@@ -36,6 +36,18 @@ logger = logging.getLogger("csam.ui.compute")
 _PROGRESS_ADDRESS = schema_loader.get_network_value("zmq_progress_address")
 _CONTROL_ADDRESS = schema_loader.get_network_value("zmq_control_address")
 
+# ============================================================
+# 模块常量（避免 Magic Number 散落）
+# ============================================================
+DEFAULT_MATLAB_TIMEOUT_S = 600.0  # MATLAB 默认超时 10 分钟
+LIVENESS_CHECK_INTERVAL_MS = 1000  # 存活检查定时器间隔
+CANCEL_REQUEST_RETRY_COUNT = 3  # 取消请求重试次数
+CANCEL_RETRY_INTERVAL_S = 0.2  # 取消重试间隔
+CANCEL_THREAD_JOIN_TIMEOUT_S = 2.0  # cancel 线程 join 超时
+RECOVERY_THREAD_JOIN_TIMEOUT_S = 2.0  # recovery 线程 join 超时
+COMPUTE_THREAD_STOP_TIMEOUT_MS = 5000  # 计算线程停止等待
+NORMAL_ESTIMATION_K_NEIGHBORS = 30  # 法向量估计 k 邻居数
+
 
 class OperationState(str, Enum):
     IDLE = "IDLE"
@@ -107,7 +119,7 @@ class ComputeController(QObject):
         request_builder: Optional[Callable[..., bytes]] = None,
         selector=None,
         zmq_address: str = "",
-        matlab_timeout: float = 600.0,
+        matlab_timeout: float = DEFAULT_MATLAB_TIMEOUT_S,
     ) -> None:
         super().__init__(parent)
         self._project_root = project_root or os.path.dirname(
@@ -147,7 +159,7 @@ class ComputeController(QObject):
             schema_loader.get_network_value("cancel_completion_timeout_ms")
         )
         self._liveness_timer = QTimer(self)
-        self._liveness_timer.setInterval(1000)
+        self._liveness_timer.setInterval(LIVENESS_CHECK_INTERVAL_MS)
         self._liveness_timer.timeout.connect(self._check_liveness)
         self._cancel_completion_timer = QTimer(self)
         self._cancel_completion_timer.setSingleShot(True)
@@ -361,8 +373,8 @@ class ComputeController(QObject):
                 # 清理失败的 MatlabService，避免 ZMQ socket 泄露
                 try:
                     self._matlab_service.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("清理 MatlabService 失败: %s", exc)
                 self._matlab_service = None
                 return False
         except Exception as exc:
@@ -376,8 +388,8 @@ class ComputeController(QObject):
             if self._matlab_service is not None:
                 try:
                     self._matlab_service.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("清理 MatlabService 失败: %s", exc)
                 self._matlab_service = None
             return False
 
@@ -514,7 +526,7 @@ class ComputeController(QObject):
 
                 cancel_request_id = str(uuid.uuid4())
                 response = None
-                for attempt in range(3):
+                for attempt in range(CANCEL_REQUEST_RETRY_COUNT):
                     response = request_cancel(
                         operation_id,
                         address=str(_CONTROL_ADDRESS),
@@ -523,10 +535,10 @@ class ComputeController(QObject):
                     if (
                         response.status
                         != ControlStatus.CONTROL_OPERATION_NOT_FOUND
-                        or attempt == 2
+                        or attempt == CANCEL_REQUEST_RETRY_COUNT - 1
                     ):
                         break
-                    time.sleep(0.2)
+                    time.sleep(CANCEL_RETRY_INTERVAL_S)
                 self._cancel_response_received.emit(
                     int(response.status), str(response.message)
                 )
@@ -537,7 +549,7 @@ class ComputeController(QObject):
         # 先清理上一次未退出的 cancel 线程（非阻塞，daemon 兜底）
         prev = self._cancel_thread
         if prev is not None and prev.is_alive():
-            prev.join(timeout=2.0)
+            prev.join(timeout=CANCEL_THREAD_JOIN_TIMEOUT_S)
         self._cancel_thread = threading.Thread(
             target=_send_cancel,
             name="csam-cancel-request",
@@ -563,22 +575,22 @@ class ComputeController(QObject):
         if self._matlab_service is not None:
             try:
                 self._matlab_service.abort_active_request()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("cleanup abort_active_request 失败: %s", exc)
         # P1-28: join cancel 线程，避免关闭时 daemon 线程残留导致资源泄漏
         cancel_t = self._cancel_thread
         if cancel_t is not None and cancel_t.is_alive():
             try:
-                cancel_t.join(timeout=2.0)
-            except Exception:
-                pass
+                cancel_t.join(timeout=CANCEL_THREAD_JOIN_TIMEOUT_S)
+            except Exception as exc:
+                logger.warning("cleanup join cancel_thread 失败: %s", exc)
         # P2-3: join recovery 线程，避免关闭时 daemon 线程残留导致资源泄漏
         recovery_t = self._recovery_thread
         if recovery_t is not None and recovery_t.is_alive():
             try:
-                recovery_t.join(timeout=2.0)
-            except Exception:
-                pass
+                recovery_t.join(timeout=RECOVERY_THREAD_JOIN_TIMEOUT_S)
+            except Exception as exc:
+                logger.warning("cleanup join recovery_thread 失败: %s", exc)
         thread = self._compute_thread
         compute_stopped = True
         try:
@@ -588,7 +600,7 @@ class ComputeController(QObject):
         if thread_running:
             thread.requestInterruption()
             thread.quit()
-            compute_stopped = thread.wait(5000)
+            compute_stopped = thread.wait(COMPUTE_THREAD_STOP_TIMEOUT_MS)
             if not compute_stopped:
                 # The cooperative request has already been sent and the
                 # client-side ZMQ wait aborted.  As an application-shutdown
@@ -611,9 +623,9 @@ class ComputeController(QObject):
                 if self._matlab_service is not None:
                     try:
                         self._matlab_service.abort_active_request()
-                    except Exception:
-                        pass
-                compute_stopped = thread.wait(5000)
+                    except Exception as exc:
+                        logger.warning("强制停止 abort_active_request 失败: %s", exc)
+                compute_stopped = thread.wait(COMPUTE_THREAD_STOP_TIMEOUT_MS)
 
         if compute_stopped:
             self._cleanup_worker(thread)
@@ -763,8 +775,8 @@ class ComputeController(QObject):
         if self._matlab_service is not None:
             try:
                 self._matlab_service.abort_active_request()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("forced_recovery abort 失败: %s", exc)
 
         if confirmed and self._forced_recovery_target == OperationState.CANCELLED:
             if self.state == OperationState.CANCELLING:
@@ -839,7 +851,7 @@ class ComputeController(QObject):
         request_normals = (
             normals[sel_mask]
             if normals is not None
-            else _Coord.estimate_normals(request_xyz, k=30)
+            else _Coord.estimate_normals(request_xyz, k=NORMAL_ESTIMATION_K_NEIGHBORS)
         )
 
         material = str(params.get("material", "")).strip()

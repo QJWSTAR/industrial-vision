@@ -77,6 +77,8 @@ class MatlabBridgeLauncher:
     RESTART_DELAY_S = float(_schema.get_network_value("launcher_restart_delay_sec"))
     STOP_TIMEOUT_S = int(_schema.get_network_value("launcher_stop_timeout_sec"))
     KILL_TIMEOUT_S = int(_schema.get_network_value("launcher_kill_timeout_sec"))
+    # stdout 读取线程 join 超时（防止测试 teardown 后 daemon 线程残留导致 logging 死锁）
+    STDOUT_THREAD_JOIN_TIMEOUT_S = 2.0
 
     def __init__(
         self,
@@ -309,8 +311,8 @@ class MatlabBridgeLauncher:
                     self._kill_matlab_by_port()
                     try:
                         self._force_kill_os(pid)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("强制清理 MATLAB 进程失败 (pid=%s): %s", pid, exc)
                 else:
                     logger.info("MATLAB 进程已退出，端口已释放")
                     self._process = None
@@ -356,6 +358,17 @@ class MatlabBridgeLauncher:
         finally:
             with self._stop_lock:
                 self._stopping = False
+            # P5-1: join stdout 读取线程，防止 daemon 线程在测试 teardown 后
+            # 仍尝试写入已关闭的日志，触发 logging 死锁（测试崩溃根因）
+            t = self._stdout_thread
+            if t is not None and t.is_alive():
+                t.join(timeout=self.STDOUT_THREAD_JOIN_TIMEOUT_S)
+                if t.is_alive():
+                    logger.warning(
+                        "stdout 读取线程 %ds 未退出（可能仍在阻塞 readline）",
+                        self.STDOUT_THREAD_JOIN_TIMEOUT_S,
+                    )
+            self._stdout_thread = None
 
     # ------------------------------------------------------------------
     # 崩溃检测与重启
@@ -457,8 +470,8 @@ class MatlabBridgeLauncher:
                     if text:
                         self._stdout_lines.append(text)
                         logger.debug("[MATLAB stdout] %s", text)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("stdout 行解码失败: %s", exc)
         except Exception as exc:
             logger.debug("stdout 读取线程退出: %s", exc)
 

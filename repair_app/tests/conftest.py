@@ -86,15 +86,24 @@ def qapp():
 # 触发死锁（表现为组合运行时卡在 ZMQ/Worker 线程测试）。
 #
 # 修复：session 开始时移除所有 loguru sink（包括默认 stderr sink）。
-# 文件日志（如需）应由 setup_logging() 以 enqueue=True 添加。
-# 测试中不需要控制台日志输出。
+# 并 hook logger.add，测试中任何 setup_logging 调用都使用 enqueue=True。
 # ============================================================
 @pytest.fixture(autouse=True, scope="session")
 def _disable_loguru_console_sink():
-    """移除 loguru 默认 stderr sink，避免 pytest 捕获与多线程日志死锁。"""
+    """移除 loguru 默认 stderr sink，避免 pytest 捕获与多线程日志死锁。
+
+    同时 hook logger.add，强制所有新 sink 使用 enqueue=True，
+    防止测试中 setup_logging() 添加非线程安全 sink。
+    """
     try:
         from loguru import logger
         logger.remove()
+        # hook add 方法，强制 enqueue=True（线程安全）
+        _orig_add = logger.add
+        def _safe_add(sink, *args, **kwargs):
+            kwargs.setdefault("enqueue", True)
+            return _orig_add(sink, *args, **kwargs)
+        logger.add = _safe_add
     except ImportError:
         pass
     yield
@@ -249,9 +258,36 @@ def mock_license_expired(tmp_license_dir: str, monkeypatch):
 # 覆盖率配置（pytest-cov）
 # ============================================================
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """自动为慢测试添加 slow marker。"""
+    """自动为慢测试添加 slow marker，并默认 deselect stress/performance/slow。
+
+    策略：
+    1. stress/performance 文件自动加 slow marker
+    2. 默认运行（无 -m 指定）时 deselect 所有 slow 测试
+    3. 用户可通过 `pytest -m slow` 显式运行慢测试
+    """
     slow_marker = pytest.mark.slow
     for item in items:
         # stress / performance 类自动标记为 slow
         if any(mark.name in ("stress", "performance") for mark in item.iter_markers()):
             item.add_marker(slow_marker)
+
+    # 检测命令行是否显式指定了 -m（marker 过滤）
+    # 若未指定，默认 deselect slow 测试以加速开发循环
+    has_explicit_marker = (
+        "-m" in config.invocation_params.args
+        or "--marker" in config.invocation_params.args
+        or any("-m" in str(arg) for arg in config.invocation_params.args)
+    )
+
+    if not has_explicit_marker:
+        # 默认 deselect slow 测试（保留在报告中但不执行）
+        selected = []
+        deselected = []
+        for item in items:
+            if item.get_closest_marker("slow") is not None:
+                deselected.append(item)
+            else:
+                selected.append(item)
+        if deselected:
+            config.hook.pytest_deselected(items=deselected)
+            items[:] = selected

@@ -27,6 +27,20 @@ from repair_app.ui.worker_base import BaseWorker
 
 logger = logging.getLogger("csam.ui.workers")
 
+# ============================================================
+# 模块常量（避免 Magic Number 散落）
+# ============================================================
+PATH_PLANNING_DEFAULT_TIMEOUT_S = 300.0  # 路径规划默认超时 5 分钟
+MORPHOLOGY_DEFAULT_TIMEOUT_S = 600.0  # 形貌预测默认超时 10 分钟
+POINT_CLOUD_LOAD_TIMEOUT_S = 120.0  # 点云加载默认超时 2 分钟
+EXPORT_DEFAULT_TIMEOUT_S = 180.0  # 导出默认超时 3 分钟
+REPORT_DEFAULT_TIMEOUT_S = 120.0  # 报告生成默认超时 2 分钟
+DEFAULT_ZMQ_TIMEOUT_S = 600.0  # ZMQ 计算管线默认超时 10 分钟
+NORMAL_ESTIMATION_K_NEIGHBORS = 30  # 法向量估计 k 邻居数
+MOCK_POINT_DENSITY_RATIO = 0.4  # mock 点云密度系数
+MOCK_POINT_MAX_COUNT = 5000  # mock 点云最大数量上限
+MOCK_HEIGHT_NOISE_STD = 0.3  # mock 高度噪声标准差
+
 
 def _validated_cloud_selection(
     session: RepairSession,
@@ -85,7 +99,7 @@ class PathPlanningWorker(BaseWorker):
         params: dict,
         n_layers: int,
         buffer_mm: float,
-        timeout_s: float | None = 300.0,  # P3-1: 5 分钟总超时
+        timeout_s: float | None = PATH_PLANNING_DEFAULT_TIMEOUT_S,  # P3-1: 5 分钟总超时
     ) -> None:
         super().__init__(timeout_s=timeout_s)
         self._session = session  # P4-4: 共享 Session，只读不写
@@ -140,7 +154,7 @@ class MorphologyWorker(BaseWorker):
         params: dict,
         n_layers: int,
         seed: int,
-        timeout_s: float | None = 600.0,  # P3-1: 10 分钟总超时
+        timeout_s: float | None = MORPHOLOGY_DEFAULT_TIMEOUT_S,  # P3-1: 10 分钟总超时
     ) -> None:
         super().__init__(timeout_s=timeout_s)
         self._session = session  # P4-4: 共享 Session，只读不写
@@ -166,12 +180,12 @@ class MorphologyWorker(BaseWorker):
                 raise ValueError("n_layers must be positive")
             # P2-3: mock 兜底数据（明确标记，仅用于算法失败时的 fallback）
             base = xyz[defect_mask]
-            n_pts = min(int(np.sum(defect_mask) * 0.4), 5000)
+            n_pts = min(int(np.sum(defect_mask) * MOCK_POINT_DENSITY_RATIO), MOCK_POINT_MAX_COUNT)
             rng = np.random.default_rng(self._seed + 1)
             z_base = np.max(base[:, 2])
             repair = np.column_stack([
                 rng.uniform(np.min(base[:, :2], axis=0), np.max(base[:, :2], axis=0), (n_pts, 2)),
-                z_base + np.abs(rng.normal(0, 0.3, n_pts)),
+                z_base + np.abs(rng.normal(0, MOCK_HEIGHT_NOISE_STD, n_pts)),
             ])
 
             base_pts = np.vstack([xyz, repair])
@@ -229,7 +243,7 @@ class ComputePipelineWorker(BaseWorker):
         matlab_service,  # MatlabService 实例
         request_bytes: bytes,
         operation_id: str = "",
-        zmq_timeout: float = 600.0,
+        zmq_timeout: float = DEFAULT_ZMQ_TIMEOUT_S,
     ) -> None:
         super().__init__(timeout_s=None)
         self._matlab_service = matlab_service
@@ -298,11 +312,11 @@ class PointCloudLoadWorker(BaseWorker):
         self,
         file_path: str,
         file_service: Any,
-        timeout_s: float | None = 120.0,
+        timeout_s: float | None = POINT_CLOUD_LOAD_TIMEOUT_S,
     ) -> None:
         super().__init__(timeout_s=timeout_s)
-        self._file_path = file_path
         self._file_service = file_service
+        self._file_path = file_path
 
     @Slot()
     def run(self) -> None:
@@ -315,7 +329,7 @@ class PointCloudLoadWorker(BaseWorker):
             if normals is None:
                 self.progress.emit("正在估计法向量...")
                 from repair_app.core.coordination_system import CoordinateSystem
-                normals = CoordinateSystem.estimate_normals(xyz, k=30)
+                normals = CoordinateSystem.estimate_normals(xyz, k=NORMAL_ESTIMATION_K_NEIGHBORS)
             if self.check_interruption():
                 return
             self.finished.emit(xyz, normals, self._file_path)
@@ -339,7 +353,7 @@ class ExportWorker(BaseWorker):
         session: RepairSession,
         output_path: str,
         config: dict,
-        timeout_s: float | None = 180.0,
+        timeout_s: float | None = EXPORT_DEFAULT_TIMEOUT_S,
     ) -> None:
         super().__init__(timeout_s=timeout_s)
         self._exporter = exporter
@@ -378,7 +392,7 @@ class ReportWorker(BaseWorker):
         export_service: Any,
         session: RepairSession,
         output_path: str,
-        timeout_s: float | None = 120.0,
+        timeout_s: float | None = REPORT_DEFAULT_TIMEOUT_S,
     ) -> None:
         super().__init__(timeout_s=timeout_s)
         self._report_data = report_data

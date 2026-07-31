@@ -20,6 +20,27 @@ from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QApplication, QGraph
 
 from repair_app.ui.theme_manager import ThemeManager
 
+# ============================================================
+# 模块常量（避免 Magic Number 散落）
+# ============================================================
+TOAST_WIDTH_PX = 360  # Toast 固定宽度
+TOAST_FADE_IN_MS = 200  # 淡入动画时长
+TOAST_FADE_OUT_MS = 300  # 淡出动画时长
+TOAST_MARGIN_PX = 16  # 与父窗口边缘的距离
+TOAST_STACK_GAP_PX = 8  # 堆叠时间隔
+TOAST_INFO_DEFAULT_MS = 3000  # info 默认显示时长
+TOAST_SUCCESS_DEFAULT_MS = 3000  # success 默认显示时长
+TOAST_WARNING_DEFAULT_MS = 4000  # warning 默认显示时长
+TOAST_ERROR_DEFAULT_MS = 5000  # error 默认显示时长
+TOAST_LAYOUT_MARGIN_H = 16  # 布局左右内边距
+TOAST_LAYOUT_MARGIN_V = 10  # 布局上下内边距
+TOAST_LAYOUT_SPACING = 4  # 布局间距
+TOAST_FALLBACK_SCREEN_W = 1920  # 无显示器时回退宽度
+TOAST_FALLBACK_SCREEN_H = 1080  # 无显示器时回退高度
+TOAST_LABEL_FONT_SIZE_PX = 13  # 标签字号
+TOAST_BORDER_RADIUS_PX = 4  # 圆角半径
+TOAST_LEFT_BORDER_WIDTH_PX = 3  # 左侧色条宽度
+
 
 class Toast(QWidget):
     """非模态浮层提示。
@@ -48,7 +69,7 @@ class Toast(QWidget):
         parent: Optional[QWidget],
         message: str,
         level: str = "info",
-        duration: int = 3000,
+        duration: int = TOAST_INFO_DEFAULT_MS,
     ) -> None:
         super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -69,14 +90,17 @@ class Toast(QWidget):
 
         # 布局
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 10, 16, 10)
-        layout.setSpacing(4)
+        layout.setContentsMargins(
+            TOAST_LAYOUT_MARGIN_H, TOAST_LAYOUT_MARGIN_V,
+            TOAST_LAYOUT_MARGIN_H, TOAST_LAYOUT_MARGIN_V,
+        )
+        layout.setSpacing(TOAST_LAYOUT_SPACING)
 
         # 消息标签
         label = QLabel(f"{icon}  {message}")
         label.setStyleSheet(f"""
             color:{p.text_primary};
-            font-size:13px;
+            font-size:{TOAST_LABEL_FONT_SIZE_PX}px;
             font-weight:500;
             background:transparent;
         """)
@@ -87,12 +111,12 @@ class Toast(QWidget):
             QWidget#Toast {{
                 background:{p.bg_panel};
                 border:1px solid {p.border_default};
-                border-left:3px solid {accent_color};
-                border-radius:4px;
+                border-left:{TOAST_LEFT_BORDER_WIDTH_PX}px solid {accent_color};
+                border-radius:{TOAST_BORDER_RADIUS_PX}px;
             }}
         """)
         self.setObjectName("Toast")
-        self.setFixedWidth(360)
+        self.setFixedWidth(TOAST_WIDTH_PX)
         self.adjustSize()
 
         # 淡入动画
@@ -100,13 +124,13 @@ class Toast(QWidget):
         self._opacity.setOpacity(0.0)
         self.setGraphicsEffect(self._opacity)
         self._fade_in = QPropertyAnimation(self._opacity, b"opacity", self)
-        self._fade_in.setDuration(200)
+        self._fade_in.setDuration(TOAST_FADE_IN_MS)
         self._fade_in.setStartValue(0.0)
         self._fade_in.setEndValue(1.0)
 
         # 淡出动画
         self._fade_out = QPropertyAnimation(self._opacity, b"opacity", self)
-        self._fade_out.setDuration(300)
+        self._fade_out.setDuration(TOAST_FADE_OUT_MS)
         self._fade_out.setStartValue(1.0)
         self._fade_out.setEndValue(0.0)
         self._fade_out.finished.connect(self.close)
@@ -131,12 +155,12 @@ class Toast(QWidget):
                 parent_rect = screen_obj.geometry()
             else:
                 # 无显示器环境（CI/关闭中），回退到默认几何
-                parent_rect = QRect(0, 0, 1920, 1080)
+                parent_rect = QRect(0, 0, TOAST_FALLBACK_SCREEN_W, TOAST_FALLBACK_SCREEN_H)
             parent_global = QPoint(0, 0)
 
-        # 堆叠：从下往上排列，每条间隔 8px
-        offset_y = 16 + len(Toast._active_toasts) * (self.height() + 8)
-        x = parent_global.x() + parent_rect.width() - self.width() - 16
+        # 堆叠：从下往上排列，每条间隔 TOAST_STACK_GAP_PX
+        offset_y = TOAST_MARGIN_PX + len(Toast._active_toasts) * (self.height() + TOAST_STACK_GAP_PX)
+        x = parent_global.x() + parent_rect.width() - self.width() - TOAST_MARGIN_PX
         y = parent_global.y() + parent_rect.height() - self.height() - offset_y
         self.move(x, y)
 
@@ -176,8 +200,8 @@ class Toast(QWidget):
             return
         for i, toast in enumerate(Toast._active_toasts):
             try:
-                offset_y = 16 + i * (toast.height() + 8)
-                x = parent_global.x() + parent_rect.width() - toast.width() - 16
+                offset_y = TOAST_MARGIN_PX + i * (toast.height() + TOAST_STACK_GAP_PX)
+                x = parent_global.x() + parent_rect.width() - toast.width() - TOAST_MARGIN_PX
                 y = parent_global.y() + parent_rect.height() - toast.height() - offset_y
                 toast.move(x, y)
             except RuntimeError:
@@ -189,25 +213,25 @@ class Toast(QWidget):
     # ============================================================
 
     @classmethod
-    def info(cls, parent: Optional[QWidget], message: str, duration: int = 3000) -> "Toast":
+    def info(cls, parent: Optional[QWidget], message: str, duration: int = TOAST_INFO_DEFAULT_MS) -> "Toast":
         toast = cls(parent, message, "info", duration)
         toast.show_toast()
         return toast
 
     @classmethod
-    def success(cls, parent: Optional[QWidget], message: str, duration: int = 3000) -> "Toast":
+    def success(cls, parent: Optional[QWidget], message: str, duration: int = TOAST_SUCCESS_DEFAULT_MS) -> "Toast":
         toast = cls(parent, message, "success", duration)
         toast.show_toast()
         return toast
 
     @classmethod
-    def warning(cls, parent: Optional[QWidget], message: str, duration: int = 4000) -> "Toast":
+    def warning(cls, parent: Optional[QWidget], message: str, duration: int = TOAST_WARNING_DEFAULT_MS) -> "Toast":
         toast = cls(parent, message, "warning", duration)
         toast.show_toast()
         return toast
 
     @classmethod
-    def error(cls, parent: Optional[QWidget], message: str, duration: int = 5000) -> "Toast":
+    def error(cls, parent: Optional[QWidget], message: str, duration: int = TOAST_ERROR_DEFAULT_MS) -> "Toast":
         toast = cls(parent, message, "error", duration)
         toast.show_toast()
         return toast

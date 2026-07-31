@@ -621,8 +621,12 @@ class RepairVisualizer(QWidget):
                     combined[:, 2].max() + z_range * margin,
                 )
                 self._canvas.draw_idle()
-        except Exception:
-            pass
+        except Exception as exc:
+            # P3-7: 绘图异常需记录，避免掩盖真实 bug
+            import logging
+            logging.getLogger("csam.ui.repair_visualizer").warning(
+                "update_view 绘图失败: %s", exc
+            )
 
     def cleanup(self) -> None:
         """清理 matplotlib 资源，防止 Figure 内存泄漏。
@@ -635,16 +639,22 @@ class RepairVisualizer(QWidget):
         if hasattr(self, "_fig") and self._fig is not None:
             try:
                 self._fig.clf()
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging
+                logging.getLogger("csam.ui.repair_visualizer").debug(
+                    "fig.clf 失败: %s", exc
+                )
             self._fig = None
         if hasattr(self, "_ax") and self._ax is not None:
             self._ax = None
         if hasattr(self, "_canvas") and self._canvas is not None:
             try:
                 self._canvas.deleteLater()
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging
+                logging.getLogger("csam.ui.repair_visualizer").debug(
+                    "canvas.deleteLater 失败: %s", exc
+                )
             self._canvas = None
 
     def _destroy_anim_timer(self) -> None:
@@ -674,5 +684,9 @@ class RepairVisualizer(QWidget):
             else:
                 self._ax.set_axis_off()
             self._canvas.draw_idle()
-        except Exception:
-            pass
+        except Exception as exc:
+            # P3-7: 切换坐标轴异常需记录，避免掩盖真实 bug
+            import logging
+            logging.getLogger("csam.ui.repair_visualizer").warning(
+                "toggle_axes 失败: %s", exc
+            )

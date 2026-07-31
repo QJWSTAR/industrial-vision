@@ -12,8 +12,12 @@ import gc
 import unittest
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+# 整个模块标记为 stress+slow，默认不运行
+pytestmark = [pytest.mark.stress, pytest.mark.slow]
 
 
 class TestStressPathPlanning(unittest.TestCase):

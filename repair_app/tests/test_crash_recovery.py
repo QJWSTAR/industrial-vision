@@ -429,24 +429,38 @@ class TestMainWindowCheckRecovery:
         assert apply_calls == []
 
     def test_applies_state_when_user_yes(self, pm, monkeypatch):
+        """P3-1: 有恢复文件时自动应用状态（非阻塞，无需用户确认）。"""
         ar = AutoRecovery(pm)
         ar.save(_sample_state())
         stub, apply_calls = self._make_stub(ar)
-        monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.Yes)
+        # Mock Toast.info 避免依赖真实 GUI（新流程用 Toast 替代 QMessageBox）
+        from repair_app.ui import main_window as mw_mod
+        toast_calls: list = []
+        monkeypatch.setattr(mw_mod.Toast, "info", lambda *a, **kw: toast_calls.append(kw.get("text", "") or (a[1] if len(a) > 1 else "")))
 
         MainWindow._check_recovery(stub)
         assert len(apply_calls) == 1
         assert apply_calls[0]["point_cloud_path"] == "/data/sample.xyz"
+        # Toast 通知应被调用
+        assert len(toast_calls) == 1
 
     def test_clears_when_user_no(self, pm, monkeypatch):
+        """P3-1: 新流程为自动恢复，无 No 分支；pending 状态保留（不再清除）。
+
+        旧流程 QMessageBox.question 返回 No 时清除 pending；
+        新流程自动应用 state，不再弹窗，pending 状态由后续 save/clear 管理。
+        """
         ar = AutoRecovery(pm)
         ar.save(_sample_state())
         stub, apply_calls = self._make_stub(ar)
-        monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.No)
+        from repair_app.ui import main_window as mw_mod
+        monkeypatch.setattr(mw_mod.Toast, "info", lambda *a, **kw: None)
 
         MainWindow._check_recovery(stub)
-        assert apply_calls == []  # 未应用
-        assert not ar.has_pending_recovery  # 已清除
+        # 新流程自动应用 state
+        assert len(apply_calls) == 1
+        # pending 状态保留（自动恢复不再清除文件，由后续 save/clear 管理）
+        assert ar.has_pending_recovery
 
     def test_skips_when_state_empty(self, pm, monkeypatch):
         """state 为空字典（falsy）时应提前返回，不弹窗。"""
@@ -462,21 +476,23 @@ class TestMainWindowCheckRecovery:
         assert apply_calls == []
 
     def test_reads_saved_at_into_prompt(self, pm, monkeypatch):
-        """弹窗文案应包含自动保存时间戳。"""
+        """P3-1: Toast 通知文案应包含恢复提示。"""
         ar = AutoRecovery(pm)
         ar.save(_sample_state())
         stub, _ = self._make_stub(ar)
         captured: dict = {}
 
-        def _capture(parent, title, text, *a, **kw):
-            captured["text"] = text
-            return QMessageBox.No
+        from repair_app.ui import main_window as mw_mod
 
-        monkeypatch.setattr(QMessageBox, "question", _capture)
+        def _capture(*a, **kw):
+            # Toast.info(self, text) — text 是第二个位置参数
+            captured["text"] = a[1] if len(a) > 1 else kw.get("text", "")
+
+        monkeypatch.setattr(mw_mod.Toast, "info", _capture)
         MainWindow._check_recovery(stub)
-        # 文案应包含自动保存时间戳与恢复提示
-        assert "自动保存" in captured["text"]
-        assert "恢复" in captured["text"]
+        # 新流程文案包含"已自动恢复"
+        assert "自动恢复" in captured["text"]
+        assert "点云" in captured["text"]
 
     def test_swallows_internal_exception(self, monkeypatch):
         """_auto_recovery 访问异常时不应传播（外层 try 兜底）。"""

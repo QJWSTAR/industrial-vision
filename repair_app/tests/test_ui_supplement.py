@@ -30,7 +30,7 @@ import numpy as np
 import pytest
 
 from PySide6.QtCore import QPoint
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox, QPushButton
 
 
 # ============================================================
@@ -1540,3 +1540,98 @@ class TestProfileResultPanel:
         panel._render_empty(ax, "测试消息")
         plt.close(fig)
         _cleanup_widget(panel, qapp)
+
+
+# ============================================================
+# 14. dialogs.py — LicenseActivationDialog
+# ============================================================
+@pytest.mark.gui
+class TestLicenseActivationDialog:
+    """LicenseActivationDialog 测试。"""
+
+    def test_construction(self, qapp):
+        """构造对话框并验证基本组件。"""
+        from repair_app.ui.dialogs import LicenseActivationDialog
+        dlg = LicenseActivationDialog()
+        assert dlg.windowTitle() == "License 激活"
+        assert dlg.findChild(QLineEdit) is not None  # 机器码输入框
+        # 按钮通过文本查找（findChild 按 objectName 查找，按钮未设置 objectName）
+        buttons = dlg.findChildren(QPushButton)
+        button_texts = [b.text() for b in buttons]
+        assert "复制机器码" in button_texts
+        assert "选择并导入 license.key..." in button_texts
+        _cleanup_widget(dlg, qapp)
+
+    def test_on_copy_machine_id(self, qapp, monkeypatch):
+        """复制机器码到剪贴板。"""
+        from repair_app.ui.dialogs import LicenseActivationDialog
+        mock_clipboard = MagicMock()
+        monkeypatch.setattr(QApplication, "clipboard", lambda: mock_clipboard)
+        dlg = LicenseActivationDialog()
+        dlg._on_copy_machine_id()
+        mock_clipboard.setText.assert_called_once()
+        assert "复制" in dlg._lb_status.text()
+        _cleanup_widget(dlg, qapp)
+
+    def test_on_import_license_success(self, qapp, monkeypatch, tmp_path):
+        """导入 License 文件成功路径。"""
+        from repair_app.ui.dialogs import LicenseActivationDialog
+        import repair_app.utils.license_manager as lm_mod
+        import repair_app.ui.dialogs as dialogs_mod
+        # Mock QFileDialog 返回测试文件路径
+        license_path = tmp_path / "license.key"
+        license_path.write_text('{"test": true}', encoding="utf-8")
+        monkeypatch.setattr(
+            QFileDialog, "getOpenFileName",
+            lambda *a, **kw: (str(license_path), ""),
+        )
+        # Mock install_license 返回成功（_on_import_license 内部 import 自 license_manager）
+        monkeypatch.setattr(
+            lm_mod, "install_license",
+            lambda p: (True, "激活成功"),
+        )
+        # Mock Toast 避免依赖父窗口
+        monkeypatch.setattr(dialogs_mod.Toast, "success", lambda *a, **kw: None)
+        dlg = LicenseActivationDialog()
+        dlg._on_import_license()
+        status_text = dlg._lb_status.text()
+        assert "成功" in status_text or "✅" in status_text
+        _cleanup_widget(dlg, qapp)
+
+    def test_on_import_license_failure(self, qapp, monkeypatch, tmp_path):
+        """导入 License 文件失败路径。"""
+        from repair_app.ui.dialogs import LicenseActivationDialog
+        import repair_app.utils.license_manager as lm_mod
+        license_path = tmp_path / "license.key"
+        license_path.write_text('{"test": true}', encoding="utf-8")
+        monkeypatch.setattr(
+            QFileDialog, "getOpenFileName",
+            lambda *a, **kw: (str(license_path), ""),
+        )
+        # Mock install_license 返回失败
+        monkeypatch.setattr(
+            lm_mod, "install_license",
+            lambda p: (False, "License 文件格式错误"),
+        )
+        dlg = LicenseActivationDialog()
+        dlg._on_import_license()
+        status_text = dlg._lb_status.text()
+        assert "错误" in status_text or "❌" in status_text
+        _cleanup_widget(dlg, qapp)
+
+    def test_on_import_license_cancelled(self, qapp, monkeypatch):
+        """用户取消选择文件时不调用 install_license。"""
+        from repair_app.ui.dialogs import LicenseActivationDialog
+        import repair_app.utils.license_manager as lm_mod
+        # Mock QFileDialog 返回空字符串（用户取消）
+        monkeypatch.setattr(
+            QFileDialog, "getOpenFileName",
+            lambda *a, **kw: ("", ""),
+        )
+        install_called = MagicMock()
+        monkeypatch.setattr(lm_mod, "install_license", install_called)
+        dlg = LicenseActivationDialog()
+        dlg._on_import_license()
+        install_called.assert_not_called()
+        assert dlg._lb_status.text() == ""
+        _cleanup_widget(dlg, qapp)

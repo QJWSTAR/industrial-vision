@@ -154,8 +154,11 @@ class BridgeServer:
         if self._sock is not None:
             try:
                 self._sock.close(linger=0)
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging
+                logging.getLogger("csam.bridge.zmq_server").debug(
+                    "ZMQ socket close 失败: %s", exc
+                )
 
     # ---- 消息分发 ----
     def _dispatch(self, data: bytes) -> bytes:

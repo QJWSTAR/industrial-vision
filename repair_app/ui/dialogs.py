@@ -23,6 +23,70 @@ from repair_app.config import schema_loader as _schema
 from repair_app.utils.error_manager import ErrorCode, ErrorManager
 from repair_app.ui.theme_manager import ThemeManager
 
+# ============================================================
+# 模块常量（避免 Magic Number 散落）
+# ============================================================
+# 对话框最小宽度
+DIALOG_MIN_WIDTH_ERROR = 520  # ErrorDialog
+DIALOG_MIN_WIDTH_LOADING = 460  # LoadingDialog
+DIALOG_MIN_WIDTH_ROBOT = 420  # RobotExportDialog
+DIALOG_MIN_WIDTH_CALIBRATION = 520  # CalibrationDialog
+DIALOG_MIN_WIDTH_COORD = 420  # CoordinateSystemDialog
+DIALOG_MIN_WIDTH_PRESET = 520  # ParameterPresetDialog
+DIALOG_MIN_WIDTH_BATCH = 560  # BatchValidationDialog
+DIALOG_MIN_WIDTH_VALIDATOR = 560  # ParameterValidatorDialog
+DIALOG_MIN_WIDTH_LICENSE = 480  # LicenseActivationDialog
+DIALOG_FIXED_HEIGHT_LICENSE = 340  # LicenseActivationDialog 固定高度
+
+# 通用布局参数
+DIALOG_LAYOUT_MARGIN_H = 20  # 对话框左右内边距
+DIALOG_LAYOUT_MARGIN_V_TOP = 18  # 对话框上内边距
+DIALOG_LAYOUT_MARGIN_V_BOTTOM = 16  # 对话框下内边距
+DIALOG_LAYOUT_SPACING = 12  # 对话框主布局间距
+DIALOG_LAYOUT_SPACING_TIGHT = 10  # 紧凑布局间距
+GRID_LAYOUT_SPACING = 6  # 网格布局间距
+
+# 按钮
+DIALOG_BTN_MIN_WIDTH = 90  # 普通按钮最小宽度
+DIALOG_BTN_MIN_WIDTH_MEDIUM = 100  # 中等按钮最小宽度
+DIALOG_BTN_MIN_WIDTH_LONG = 120  # 较长按钮最小宽度
+DIALOG_BTN_MIN_WIDTH_EXTRALONG = 130  # 长按钮最小宽度
+DIALOG_BTN_MIN_WIDTH_CALIBRATION_SAVE = 160  # 标定保存按钮
+DIALOG_BTN_PADDING_H = 16  # 按钮左右内边距
+DIALOG_BTN_PADDING_V = 8  # 按钮上下内边距
+
+# 字号
+DIALOG_TITLE_FONT_SIZE_PX = 15  # 对话框标题字号
+DIALOG_H1_FONT_SIZE_PX = 16  # 一级标题字号（ErrorDialog 标题）
+DIALOG_DESC_FONT_SIZE_PX = 12  # 描述文字字号
+DIALOG_LABEL_FONT_SIZE_PX = 11  # 小标签字号
+DIALOG_LOG_FONT_SIZE_PX = 11  # 日志字号
+DIALOG_ICON_FONT_SIZE_PX = 28  # 图标字号
+
+# 颜色 / 圆角
+DIALOG_BORDER_RADIUS_PX = 4  # 圆角半径
+DIALOG_LEFT_BORDER_WIDTH_PX = 3  # 左侧色条宽度
+DIALOG_GROUP_BOX_MARGIN_TOP_PX = 8  # GroupBox 顶部外边距
+DIALOG_GROUP_BOX_PADDING_TOP_PX = 8  # GroupBox 顶部内边距
+DIALOG_GROUP_BOX_PADDING_TOP_LICENSE_PX = 12  # License GroupBox 顶部内边距
+
+# 计时器
+LOADING_DIALOG_TICK_MS = 1000  # LoadingDialog 倒计时定时器间隔
+
+# 日志 / 列表
+DIALOG_LOG_VIEW_MAX_HEIGHT_PX = 160  # 日志视图最大高度
+PRESET_LIST_MIN_HEIGHT_PX = 160  # 预设列表最小高度
+BATCH_INPUT_MIN_HEIGHT_PX = 180  # 批量输入区最小高度
+BATCH_RESULT_MIN_HEIGHT_PX = 120  # 批量结果区最小高度
+VALIDATOR_RESULT_MIN_HEIGHT_PX = 280  # 校验器结果区最小高度
+
+# 进度条
+LOADING_PROG_MIN_HEIGHT_PX = 22  # LoadingDialog 进度条最小高度
+
+# SpinBox
+CALIBRATION_SPIN_MIN_WIDTH_PX = 100  # 标定对话框 SpinBox 最小宽度
+LICENSE_IMPORT_BTN_MIN_HEIGHT_PX = 36  # License 导入按钮最小高度
+
 
 # ============================================================
 # MF-4: 统一 Error Dialog（ErrorCode 驱动）
@@ -67,22 +131,25 @@ class ErrorDialog(QDialog):
                 how = friendly.how
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(DIALOG_MIN_WIDTH_ERROR)
         self.setModal(True)
 
         p = ThemeManager.get_palette()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(
+            DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_TOP,
+            DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_BOTTOM,
+        )
+        layout.setSpacing(DIALOG_LAYOUT_SPACING)
 
         # 标题行（图标 + 标题）
         head = QHBoxLayout()
         icon_lb = QLabel("⚠")
-        icon_lb.setStyleSheet(f"font-size:28px; color:{p.error};")
+        icon_lb.setStyleSheet(f"font-size:{DIALOG_ICON_FONT_SIZE_PX}px; color:{p.error};")
         head.addWidget(icon_lb)
         title_lb = QLabel(title)
-        title_lb.setStyleSheet(f"font-size:16px; font-weight:bold; color:{p.error_bg};")
+        title_lb.setStyleSheet(f"font-size:{DIALOG_H1_FONT_SIZE_PX}px; font-weight:bold; color:{p.error_bg};")
         head.addWidget(title_lb)
         head.addStretch()
         layout.addLayout(head)
@@ -118,10 +185,10 @@ class ErrorDialog(QDialog):
             self._log_view.setPlainText(log_text)
             self._log_view.setStyleSheet(
                 f"QTextEdit{{background:{p.bg_input}; color:{p.accent_pale}; "
-                "font-family:Consolas, 'Courier New', monospace; font-size:11px; "
-                "border:none;}"
+                f"font-family:Consolas, 'Courier New', monospace; font-size:{DIALOG_LOG_FONT_SIZE_PX}px; "
+                "border:none;}}"
             )
-            self._log_view.setMaximumHeight(160)
+            self._log_view.setMaximumHeight(DIALOG_LOG_VIEW_MAX_HEIGHT_PX)
             self._log_view.setVisible(False)
             log_layout.addWidget(self._log_view)
 
@@ -134,10 +201,10 @@ class ErrorDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         close_btn = QPushButton("知道了")
-        close_btn.setMinimumWidth(90)
+        close_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH)
         close_btn.setStyleSheet(
             f"QPushButton{{background:{p.border_strong}; color:{p.text_primary}; border:none;"
-            "border-radius:4px; padding:8px 16px; font-weight:bold;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px; font-weight:bold;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         close_btn.clicked.connect(self.accept)
@@ -150,17 +217,17 @@ class ErrorDialog(QDialog):
         p = ThemeManager.get_palette()
         frame = QFrame()
         frame.setStyleSheet(
-            f"QFrame{{background:{p.bg_panel}; border-left:3px solid {color}; "
+            f"QFrame{{background:{p.bg_panel}; border-left:{DIALOG_LEFT_BORDER_WIDTH_PX}px solid {color}; "
             f"border-radius:3px;}}"
         )
         fl = QVBoxLayout(frame)
         fl.setContentsMargins(10, 6, 10, 6)
         fl.setSpacing(2)
         h = QLabel(heading)
-        h.setStyleSheet(f"color:{color}; font-size:11px; font-weight:bold;")
+        h.setStyleSheet(f"color:{color}; font-size:{DIALOG_LABEL_FONT_SIZE_PX}px; font-weight:bold;")
         fl.addWidget(h)
         b = QLabel(body)
-        b.setStyleSheet(f"color:{p.text_body}; font-size:12px;")
+        b.setStyleSheet(f"color:{p.text_body}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
         b.setWordWrap(True)
         fl.addWidget(b)
         return frame
@@ -280,7 +347,7 @@ class LoadingDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(DIALOG_MIN_WIDTH_LOADING)
         self.setModal(True)
         self._cancelled = False
         # 从 schema 读取默认超时（network_parameters.matlab_loading_timeout_sec）
@@ -293,17 +360,20 @@ class LoadingDialog(QDialog):
         p = ThemeManager.get_palette()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(
+            DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_TOP,
+            DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_BOTTOM,
+        )
+        layout.setSpacing(DIALOG_LAYOUT_SPACING)
 
         # 标题
         title_lb = QLabel("🔧 正在启动 MATLAB + Bridge 服务")
-        title_lb.setStyleSheet(f"font-size:15px; font-weight:bold; color:{p.text_body};")
+        title_lb.setStyleSheet(f"font-size:{DIALOG_TITLE_FONT_SIZE_PX}px; font-weight:bold; color:{p.text_body};")
         layout.addWidget(title_lb)
 
         # 状态文字
         self._status_lb = QLabel("正在检测 MATLAB 安装并启动桥接服务...\n预计需要 60-120 秒，请耐心等待。")
-        self._status_lb.setStyleSheet(f"color:{p.text_muted}; font-size:12px;")
+        self._status_lb.setStyleSheet(f"color:{p.text_muted}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
         self._status_lb.setWordWrap(True)
         layout.addWidget(self._status_lb)
 
@@ -311,23 +381,23 @@ class LoadingDialog(QDialog):
         self._prog = QProgressBar()
         self._prog.setMinimum(0)
         self._prog.setMaximum(0)  # 不确定模式（滚动动画）
-        self._prog.setMinimumHeight(22)
+        self._prog.setMinimumHeight(LOADING_PROG_MIN_HEIGHT_PX)
         self._prog.setTextVisible(False)
         layout.addWidget(self._prog)
 
         # 倒计时
         self._countdown_lb = QLabel(f"剩余等待时间：{timeout_sec} 秒")
-        self._countdown_lb.setStyleSheet(f"color:{p.text_disabled}; font-size:11px;")
+        self._countdown_lb.setStyleSheet(f"color:{p.text_disabled}; font-size:{DIALOG_LABEL_FONT_SIZE_PX}px;")
         layout.addWidget(self._countdown_lb)
 
         # 取消按钮
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         self._cancel_btn = QPushButton("取消")
-        self._cancel_btn.setMinimumWidth(90)
+        self._cancel_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH)
         self._cancel_btn.setStyleSheet(
             f"QPushButton{{background:{p.border_strong}; color:{p.text_primary}; border:none;"
-            "border-radius:4px; padding:8px 16px;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         self._cancel_btn.clicked.connect(self._on_cancel)
@@ -355,7 +425,7 @@ class LoadingDialog(QDialog):
         self._worker.finished_ok.connect(self._on_worker_ok)
         self._worker.finished_msg.connect(self._on_worker_msg)
         self._worker.start()
-        self._timer.start(1000)
+        self._timer.start(LOADING_DIALOG_TICK_MS)
 
     def _on_tick(self) -> None:
         self._elapsed += 1
@@ -387,11 +457,11 @@ class LoadingDialog(QDialog):
         self._result_ok = False
         self._result_msg = "用户取消了 MATLAB 启动"
         log_info("用户取消了 MATLAB 启动等待")
-        # 停止后台 worker，防止线程泄漏和 "QThread destroyed while running" 崩溃
+        # P3-5: 停止后台 worker，非阻塞方式（requestInterruption 后立即 reject）
+        # worker 作为 daemon 线程会在后台自行退出，避免 UI 阻塞最多 3 秒
         worker = getattr(self, "_worker", None)
         if worker is not None:
             worker.requestInterruption()
-            worker.wait(3000)  # 最多等 3 秒
         self.reject()
 
     def _on_timeout(self) -> None:
@@ -427,22 +497,25 @@ class RobotExportDialog(QDialog):
     def __init__(self, parent=None, waypoints=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("导出工业机器人轨迹")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(DIALOG_MIN_WIDTH_ROBOT)
         self._waypoints = waypoints
         self._result_path = ""
 
         p = ThemeManager.get_palette()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(
+            DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_TOP,
+            DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_BOTTOM,
+        )
+        layout.setSpacing(DIALOG_LAYOUT_SPACING)
 
         title = QLabel("🤖 工业机器人轨迹导出")
-        title.setStyleSheet(f"font-size:15px; font-weight:bold; color:{p.text_body};")
+        title.setStyleSheet(f"font-size:{DIALOG_TITLE_FONT_SIZE_PX}px; font-weight:bold; color:{p.text_body};")
         layout.addWidget(title)
 
         desc = QLabel("将修复航点转换为 KUKA KRL 或 ABB Rapid 机器人指令文件。")
-        desc.setStyleSheet(f"color:{p.text_muted}; font-size:12px;")
+        desc.setStyleSheet(f"color:{p.text_muted}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
@@ -515,19 +588,19 @@ class RobotExportDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         export_btn = QPushButton("导出")
-        export_btn.setMinimumWidth(90)
+        export_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH)
         export_btn.setStyleSheet(
             f"QPushButton{{background:{p.accent}; color:#FFFFFF; border:none;"
-            "border-radius:4px; padding:8px 16px; font-weight:bold;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px; font-weight:bold;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         export_btn.clicked.connect(self._on_export)
         btn_row.addWidget(export_btn)
         cancel_btn = QPushButton("取消")
-        cancel_btn.setMinimumWidth(90)
+        cancel_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH)
         cancel_btn.setStyleSheet(
             f"QPushButton{{background:{p.border_strong}; color:{p.text_primary}; border:none;"
-            "border-radius:4px; padding:8px 16px;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         cancel_btn.clicked.connect(self.reject)
@@ -540,10 +613,10 @@ class RobotExportDialog(QDialog):
         p = ThemeManager.get_palette()
         if self._waypoints is not None and len(self._waypoints) > 0:
             self._lb_wp.setText(f"✓ 已加载 {len(self._waypoints)} 个航点")
-            self._lb_wp.setStyleSheet(f"color:{p.success}; font-size:12px;")
+            self._lb_wp.setStyleSheet(f"color:{p.success}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
         else:
             self._lb_wp.setText("⚠ 未加载航点，请先完成路径规划")
-            self._lb_wp.setStyleSheet(f"color:{p.warning}; font-size:12px;")
+            self._lb_wp.setStyleSheet(f"color:{p.warning}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
 
     def _on_export(self) -> None:
         if self._waypoints is None or len(self._waypoints) == 0:
@@ -598,28 +671,31 @@ class CalibrationDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("单道沉积标定向导")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(DIALOG_MIN_WIDTH_CALIBRATION)
         self._wizard = None
 
         p = ThemeManager.get_palette()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(10)
+        layout.setContentsMargins(
+            DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_TOP,
+            DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_BOTTOM,
+        )
+        layout.setSpacing(DIALOG_LAYOUT_SPACING_TIGHT)
 
         title = QLabel("🎯 单道沉积标定向导")
-        title.setStyleSheet(f"font-size:15px; font-weight:bold; color:{p.text_body};")
+        title.setStyleSheet(f"font-size:{DIALOG_TITLE_FONT_SIZE_PX}px; font-weight:bold; color:{p.text_body};")
         layout.addWidget(title)
 
         desc = QLabel("通过实际单道喷涂测量结果，计算宽度/高度/效率修正系数，用于提高后续形貌预测精度。")
-        desc.setStyleSheet(f"color:{p.text_muted}; font-size:12px;")
+        desc.setStyleSheet(f"color:{p.text_muted}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
         # Step 1: 标定参数（全部从 schema process_parameters 读取，消除双源冲突）
         grp1 = QGroupBox("步骤 1：设置标定参数")
         g1 = QGridLayout(grp1)
-        g1.setSpacing(6)
+        g1.setSpacing(GRID_LAYOUT_SPACING)
         _p = lambda k: _schema.get_process_param(k)
         self._sp_nozzle = self._add_param(g1, 0, "喷嘴直径 (mm):",
             _p("nozzle_diameter_mm")["default"], _p("nozzle_diameter_mm")["min"],
@@ -647,7 +723,7 @@ class CalibrationDialog(QDialog):
         # Step 2: 测量结果（从 schema ui_parameters 读取范围）
         grp2 = QGroupBox("步骤 2：录入测量结果")
         g2 = QGridLayout(grp2)
-        g2.setSpacing(6)
+        g2.setSpacing(GRID_LAYOUT_SPACING)
         _mw = _schema.get_ui_param("calib_measured_width_mm")
         _mh = _schema.get_ui_param("calib_measured_height_mm")
         _me = _schema.get_ui_param("calib_measured_efficiency")
@@ -663,26 +739,26 @@ class CalibrationDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         save_btn = QPushButton("计算修正系数并保存")
-        save_btn.setMinimumWidth(160)
+        save_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH_CALIBRATION_SAVE)
         save_btn.setStyleSheet(
             f"QPushButton{{background:{p.accent}; color:#FFFFFF; border:none;"
-            "border-radius:4px; padding:8px 16px; font-weight:bold;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px; font-weight:bold;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         save_btn.clicked.connect(self._on_save)
         btn_row.addWidget(save_btn)
         close_btn = QPushButton("关闭")
-        close_btn.setMinimumWidth(90)
+        close_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH)
         close_btn.setStyleSheet(
             f"QPushButton{{background:{p.border_strong}; color:{p.text_primary}; border:none;"
-            "border-radius:4px; padding:8px 16px;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         close_btn.clicked.connect(self.reject)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
 
-        self.setStyleSheet(f"QDialog{{background:{p.bg_hover};}} QLabel{{color:{p.text_body};}} QGroupBox{{color:{p.text_secondary}; border:1px solid {p.border_strong}; border-radius:4px; margin-top:8px; padding-top:8px;}}")
+        self.setStyleSheet(f"QDialog{{background:{p.bg_hover};}} QLabel{{color:{p.text_body};}} QGroupBox{{color:{p.text_secondary}; border:1px solid {p.border_strong}; border-radius:{DIALOG_BORDER_RADIUS_PX}px; margin-top:{DIALOG_GROUP_BOX_MARGIN_TOP_PX}px; padding-top:{DIALOG_GROUP_BOX_PADDING_TOP_PX}px;}}")
 
     def _add_param(self, grid, row, label, default, lo, hi, step):
         grid.addWidget(QLabel(label), row, 0)
@@ -690,7 +766,7 @@ class CalibrationDialog(QDialog):
         sp.setRange(lo, hi)
         sp.setValue(default)
         sp.setSingleStep(step)
-        sp.setMinimumWidth(100)
+        sp.setMinimumWidth(CALIBRATION_SPIN_MIN_WIDTH_PX)
         grid.addWidget(sp, row, 1)
         return sp
 
@@ -748,22 +824,22 @@ class CoordinateSystemDialog(QDialog):
     def __init__(self, parent=None, points=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("坐标系变换")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(DIALOG_MIN_WIDTH_COORD)
         self._points = points
         self._transformed = None
 
         p = ThemeManager.get_palette()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_TOP, DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_BOTTOM)
+        layout.setSpacing(DIALOG_LAYOUT_SPACING)
 
         title = QLabel("📐 坐标系变换")
-        title.setStyleSheet(f"font-size:15px; font-weight:bold; color:{p.text_body};")
+        title.setStyleSheet(f"font-size:{DIALOG_TITLE_FONT_SIZE_PX}px; font-weight:bold; color:{p.text_body};")
         layout.addWidget(title)
 
         desc = QLabel("将点云从测量坐标系变换到加工坐标系。支持平移、旋转、缩放。")
-        desc.setStyleSheet(f"color:{p.text_muted}; font-size:12px;")
+        desc.setStyleSheet(f"color:{p.text_muted}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
@@ -830,35 +906,35 @@ class CoordinateSystemDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         apply_btn = QPushButton("应用变换")
-        apply_btn.setMinimumWidth(120)
+        apply_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH_LONG)
         apply_btn.setStyleSheet(
             f"QPushButton{{background:{p.accent}; color:#FFFFFF; border:none;"
-            "border-radius:4px; padding:8px 16px; font-weight:bold;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px; font-weight:bold;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         apply_btn.clicked.connect(self._on_apply)
         btn_row.addWidget(apply_btn)
         close_btn = QPushButton("关闭")
-        close_btn.setMinimumWidth(90)
+        close_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH)
         close_btn.setStyleSheet(
             f"QPushButton{{background:{p.border_strong}; color:{p.text_primary}; border:none;"
-            "border-radius:4px; padding:8px 16px;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         close_btn.clicked.connect(self.reject)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
 
-        self.setStyleSheet(f"QDialog{{background:{p.bg_hover};}} QLabel{{color:{p.text_body};}} QGroupBox{{color:{p.text_secondary}; border:1px solid {p.border_strong}; border-radius:4px; margin-top:8px; padding-top:8px;}}")
+        self.setStyleSheet(f"QDialog{{background:{p.bg_hover};}} QLabel{{color:{p.text_body};}} QGroupBox{{color:{p.text_secondary}; border:1px solid {p.border_strong}; border-radius:{DIALOG_BORDER_RADIUS_PX}px; margin-top:{DIALOG_GROUP_BOX_MARGIN_TOP_PX}px; padding-top:{DIALOG_GROUP_BOX_PADDING_TOP_PX}px;}}")
 
     def _update_status(self) -> None:
         p = ThemeManager.get_palette()
         if self._points is not None and len(self._points) > 0:
             self._lb_pc.setText(f"✓ 已加载 {len(self._points)} 个点")
-            self._lb_pc.setStyleSheet(f"color:{p.success}; font-size:12px;")
+            self._lb_pc.setStyleSheet(f"color:{p.success}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
         else:
             self._lb_pc.setText("⚠ 未加载点云，请先加载点云文件")
-            self._lb_pc.setStyleSheet(f"color:{p.warning}; font-size:12px;")
+            self._lb_pc.setStyleSheet(f"color:{p.warning}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
 
     def _on_apply(self) -> None:
         if self._points is None or len(self._points) == 0:
@@ -930,7 +1006,7 @@ class ParameterPresetDialog(QDialog):
     def __init__(self, parent=None, current_params=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("参数预设管理")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(DIALOG_MIN_WIDTH_PRESET)
         self._current_params = current_params or {}
         self._result_params = None
         self._pending_delete_item: str | None = None
@@ -938,15 +1014,15 @@ class ParameterPresetDialog(QDialog):
         p = ThemeManager.get_palette()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_TOP, DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_BOTTOM)
+        layout.setSpacing(DIALOG_LAYOUT_SPACING)
 
         title = QLabel("⚙️ 参数预设管理")
-        title.setStyleSheet(f"font-size:15px; font-weight:bold; color:{p.text_body};")
+        title.setStyleSheet(f"font-size:{DIALOG_TITLE_FONT_SIZE_PX}px; font-weight:bold; color:{p.text_body};")
         layout.addWidget(title)
 
         desc = QLabel("保存当前参数组合为预设，方便下次快速加载。适合不同材料/工艺的常用配置。")
-        desc.setStyleSheet(f"color:{p.text_muted}; font-size:12px;")
+        desc.setStyleSheet(f"color:{p.text_muted}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
@@ -954,7 +1030,7 @@ class ParameterPresetDialog(QDialog):
         grp_list = QGroupBox("已保存的预设")
         gl = QVBoxLayout(grp_list)
         self._lst_presets = QListWidget()
-        self._lst_presets.setMinimumHeight(160)
+        self._lst_presets.setMinimumHeight(PRESET_LIST_MIN_HEIGHT_PX)
         self._lst_presets.setStyleSheet(f"QListWidget{{background:{p.bg_panel}; color:{p.text_body}; border:1px solid {p.border_strong};}}")
         self._lst_presets.itemDoubleClicked.connect(self._on_load)
         gl.addWidget(self._lst_presets)
@@ -971,7 +1047,7 @@ class ParameterPresetDialog(QDialog):
         save_btn = QPushButton("保存当前参数")
         save_btn.setStyleSheet(
             f"QPushButton{{background:{p.accent}; color:#FFFFFF; border:none;"
-            "border-radius:4px; padding:6px 12px;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:6px 12px;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         save_btn.clicked.connect(self._on_save)
@@ -981,36 +1057,36 @@ class ParameterPresetDialog(QDialog):
         # 按钮
         btn_row = QHBoxLayout()
         load_btn = QPushButton("加载选中")
-        load_btn.setMinimumWidth(100)
+        load_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH_MEDIUM)
         load_btn.setStyleSheet(
             f"QPushButton{{background:{p.success}; color:#FFFFFF; border:none;"
-            "border-radius:4px; padding:8px 16px; font-weight:bold;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px; font-weight:bold;}}"
             f"QPushButton:hover{{background:{p.success};}}"
         )
         load_btn.clicked.connect(self._on_load)
         btn_row.addWidget(load_btn)
         del_btn = QPushButton("删除选中")
-        del_btn.setMinimumWidth(100)
+        del_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH_MEDIUM)
         del_btn.setStyleSheet(
             f"QPushButton{{background:{p.error}; color:#FFFFFF; border:none;"
-            "border-radius:4px; padding:8px 16px;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px;}}"
             f"QPushButton:hover{{background:{p.error};}}"
         )
         del_btn.clicked.connect(self._on_delete)
         btn_row.addWidget(del_btn)
         btn_row.addStretch()
         close_btn = QPushButton("关闭")
-        close_btn.setMinimumWidth(90)
+        close_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH)
         close_btn.setStyleSheet(
             f"QPushButton{{background:{p.border_strong}; color:{p.text_primary}; border:none;"
-            "border-radius:4px; padding:8px 16px;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         close_btn.clicked.connect(self.reject)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
 
-        self.setStyleSheet(f"QDialog{{background:{p.bg_hover};}} QLabel{{color:{p.text_body};}} QGroupBox{{color:{p.text_secondary}; border:1px solid {p.border_strong}; border-radius:4px; margin-top:8px; padding-top:8px;}}")
+        self.setStyleSheet(f"QDialog{{background:{p.bg_hover};}} QLabel{{color:{p.text_body};}} QGroupBox{{color:{p.text_secondary}; border:1px solid {p.border_strong}; border-radius:{DIALOG_BORDER_RADIUS_PX}px; margin-top:{DIALOG_GROUP_BOX_MARGIN_TOP_PX}px; padding-top:{DIALOG_GROUP_BOX_PADDING_TOP_PX}px;}}")
 
     def _get_preset_dir(self) -> str:
         import os
@@ -1102,21 +1178,21 @@ class BatchValidationDialog(QDialog):
     def __init__(self, parent=None, base_params=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("批量验证")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(DIALOG_MIN_WIDTH_BATCH)
         self._base_params = base_params or {}
 
         p = ThemeManager.get_palette()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_TOP, DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_BOTTOM)
+        layout.setSpacing(DIALOG_LAYOUT_SPACING)
 
         title = QLabel("🔬 批量验证")
-        title.setStyleSheet(f"font-size:15px; font-weight:bold; color:{p.text_body};")
+        title.setStyleSheet(f"font-size:{DIALOG_TITLE_FONT_SIZE_PX}px; font-weight:bold; color:{p.text_body};")
         layout.addWidget(title)
 
         desc = QLabel("对多组参数批量执行可行性检查，对比不同参数组合的可行性结果。\n每行一组参数，格式：particle_velocity=500, gas_temperature=800, ...")
-        desc.setStyleSheet(f"color:{p.text_muted}; font-size:12px;")
+        desc.setStyleSheet(f"color:{p.text_muted}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
@@ -1124,8 +1200,8 @@ class BatchValidationDialog(QDialog):
         grp = QGroupBox("参数组合（每行一组）")
         gv = QVBoxLayout(grp)
         self._txt = QTextEdit()
-        self._txt.setMinimumHeight(180)
-        self._txt.setStyleSheet(f"QTextEdit{{background:{p.bg_panel}; color:{p.text_body}; border:1px solid {p.border_strong}; font-family:Consolas, monospace; font-size:12px;}}")
+        self._txt.setMinimumHeight(BATCH_INPUT_MIN_HEIGHT_PX)
+        self._txt.setStyleSheet(f"QTextEdit{{background:{p.bg_panel}; color:{p.text_body}; border:1px solid {p.border_strong}; font-family:Consolas, monospace; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;}}")
         # 预填基础参数
         if self._base_params:
             import json
@@ -1136,8 +1212,8 @@ class BatchValidationDialog(QDialog):
         # 结果输出区
         self._txt_result = QTextEdit()
         self._txt_result.setReadOnly(True)
-        self._txt_result.setMinimumHeight(120)
-        self._txt_result.setStyleSheet(f"QTextEdit{{background:{p.bg_input}; color:{p.success}; border:1px solid {p.border_strong}; font-family:Consolas, monospace; font-size:11px;}}")
+        self._txt_result.setMinimumHeight(BATCH_RESULT_MIN_HEIGHT_PX)
+        self._txt_result.setStyleSheet(f"QTextEdit{{background:{p.bg_input}; color:{p.success}; border:1px solid {p.border_strong}; font-family:Consolas, monospace; font-size:{DIALOG_LABEL_FONT_SIZE_PX}px;}}")
         self._txt_result.setPlaceholderText("验证结果将显示在这里...")
         layout.addWidget(self._txt_result)
 
@@ -1145,26 +1221,26 @@ class BatchValidationDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         run_btn = QPushButton("运行批量验证")
-        run_btn.setMinimumWidth(130)
+        run_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH_EXTRALONG)
         run_btn.setStyleSheet(
             f"QPushButton{{background:{p.accent}; color:#FFFFFF; border:none;"
-            "border-radius:4px; padding:8px 16px; font-weight:bold;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px; font-weight:bold;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         run_btn.clicked.connect(self._on_run)
         btn_row.addWidget(run_btn)
         close_btn = QPushButton("关闭")
-        close_btn.setMinimumWidth(90)
+        close_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH)
         close_btn.setStyleSheet(
             f"QPushButton{{background:{p.border_strong}; color:{p.text_primary}; border:none;"
-            "border-radius:4px; padding:8px 16px;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         close_btn.clicked.connect(self.reject)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
 
-        self.setStyleSheet(f"QDialog{{background:{p.bg_hover};}} QLabel{{color:{p.text_body};}} QGroupBox{{color:{p.text_secondary}; border:1px solid {p.border_strong}; border-radius:4px; margin-top:8px; padding-top:8px;}}")
+        self.setStyleSheet(f"QDialog{{background:{p.bg_hover};}} QLabel{{color:{p.text_body};}} QGroupBox{{color:{p.text_secondary}; border:1px solid {p.border_strong}; border-radius:{DIALOG_BORDER_RADIUS_PX}px; margin-top:{DIALOG_GROUP_BOX_MARGIN_TOP_PX}px; padding-top:{DIALOG_GROUP_BOX_PADDING_TOP_PX}px;}}")
 
     def _on_run(self) -> None:
         import json
@@ -1248,48 +1324,48 @@ class ParameterValidatorDialog(QDialog):
     def __init__(self, parent=None, current_params=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("参数校验器")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(DIALOG_MIN_WIDTH_VALIDATOR)
         self._current_params = current_params or {}
 
         p = ThemeManager.get_palette()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_TOP, DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_BOTTOM)
+        layout.setSpacing(DIALOG_LAYOUT_SPACING)
 
         title = QLabel("✓ 参数校验器")
-        title.setStyleSheet(f"font-size:15px; font-weight:bold; color:{p.text_body};")
+        title.setStyleSheet(f"font-size:{DIALOG_TITLE_FONT_SIZE_PX}px; font-weight:bold; color:{p.text_body};")
         layout.addWidget(title)
 
         desc = QLabel("校验当前所有工艺参数是否在合法范围内（基于 PARAM_SPECS 唯一权威源）。")
-        desc.setStyleSheet(f"color:{p.text_muted}; font-size:12px;")
+        desc.setStyleSheet(f"color:{p.text_muted}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
         # 结果区
         self._txt_result = QTextEdit()
         self._txt_result.setReadOnly(True)
-        self._txt_result.setMinimumHeight(280)
-        self._txt_result.setStyleSheet(f"QTextEdit{{background:{p.bg_input}; color:{p.text_body}; border:1px solid {p.border_strong}; font-family:Consolas, monospace; font-size:11px;}}")
+        self._txt_result.setMinimumHeight(VALIDATOR_RESULT_MIN_HEIGHT_PX)
+        self._txt_result.setStyleSheet(f"QTextEdit{{background:{p.bg_input}; color:{p.text_body}; border:1px solid {p.border_strong}; font-family:Consolas, monospace; font-size:{DIALOG_LABEL_FONT_SIZE_PX}px;}}")
         layout.addWidget(self._txt_result)
 
         # 按钮
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         check_btn = QPushButton("立即校验")
-        check_btn.setMinimumWidth(120)
+        check_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH_LONG)
         check_btn.setStyleSheet(
             f"QPushButton{{background:{p.accent}; color:#FFFFFF; border:none;"
-            "border-radius:4px; padding:8px 16px; font-weight:bold;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px; font-weight:bold;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         check_btn.clicked.connect(self._on_check)
         btn_row.addWidget(check_btn)
         close_btn = QPushButton("关闭")
-        close_btn.setMinimumWidth(90)
+        close_btn.setMinimumWidth(DIALOG_BTN_MIN_WIDTH)
         close_btn.setStyleSheet(
             f"QPushButton{{background:{p.border_strong}; color:{p.text_primary}; border:none;"
-            "border-radius:4px; padding:8px 16px;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         close_btn.clicked.connect(self.reject)
@@ -1381,25 +1457,25 @@ class LicenseActivationDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("License 激活")
-        self.setMinimumWidth(480)
-        self.setFixedHeight(340)
+        self.setMinimumWidth(DIALOG_MIN_WIDTH_LICENSE)
+        self.setFixedHeight(DIALOG_FIXED_HEIGHT_LICENSE)
 
         p = ThemeManager.get_palette()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_TOP, DIALOG_LAYOUT_MARGIN_H, DIALOG_LAYOUT_MARGIN_V_BOTTOM)
+        layout.setSpacing(DIALOG_LAYOUT_SPACING)
 
         # 标题
         title = QLabel("License 激活")
-        title.setStyleSheet(f"font-size:15px; font-weight:bold; color:{p.text_body};")
+        title.setStyleSheet(f"font-size:{DIALOG_TITLE_FONT_SIZE_PX}px; font-weight:bold; color:{p.text_body};")
         layout.addWidget(title)
 
         desc = QLabel(
             "请将本机机器码发送给管理员以获取 License 文件。\n"
             "收到 license.key 后，点击下方按钮导入即可激活软件。"
         )
-        desc.setStyleSheet(f"color:{p.text_muted}; font-size:12px;")
+        desc.setStyleSheet(f"color:{p.text_muted}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
@@ -1407,7 +1483,7 @@ class LicenseActivationDialog(QDialog):
         grp_mid = QGroupBox("本机机器码")
         grp_mid.setStyleSheet(
             f"QGroupBox{{color:{p.text_body}; font-weight:bold; border:1px solid {p.border_strong};"
-            f"border-radius:4px; margin-top:8px; padding-top:12px;}}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; margin-top:{DIALOG_GROUP_BOX_MARGIN_TOP_PX}px; padding-top:{DIALOG_GROUP_BOX_PADDING_TOP_LICENSE_PX}px;}}"
             f"QGroupBox::title{{subcontrol-origin:margin; left:10px; padding:0 4px;}}"
         )
         gl = QVBoxLayout(grp_mid)
@@ -1420,7 +1496,7 @@ class LicenseActivationDialog(QDialog):
         self._le_mid.setReadOnly(True)
         self._le_mid.setStyleSheet(
             f"QLineEdit{{background:{p.bg_panel}; color:{p.accent};"
-            f"border:1px solid {p.border_strong}; border-radius:4px;"
+            f"border:1px solid {p.border_strong}; border-radius:{DIALOG_BORDER_RADIUS_PX}px;"
             "padding:6px 10px; font-family:Consolas,monospace; font-size:13px;"
             f"selection-background-color:{p.accent};}}"
         )
@@ -1429,7 +1505,7 @@ class LicenseActivationDialog(QDialog):
         btn_copy = QPushButton("复制机器码")
         btn_copy.setStyleSheet(
             f"QPushButton{{background:{p.accent}; color:#FFFFFF; border:none;"
-            "border-radius:4px; padding:5px 12px; font-size:12px;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:5px 12px; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;}}"
             f"QPushButton:hover{{background:{p.accent_hover};}}"
         )
         btn_copy.clicked.connect(self._on_copy_machine_id)
@@ -1441,17 +1517,17 @@ class LicenseActivationDialog(QDialog):
         grp_import = QGroupBox("导入 License 文件")
         grp_import.setStyleSheet(
             f"QGroupBox{{color:{p.text_body}; font-weight:bold; border:1px solid {p.border_strong};"
-            f"border-radius:4px; margin-top:8px; padding-top:12px;}}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; margin-top:{DIALOG_GROUP_BOX_MARGIN_TOP_PX}px; padding-top:{DIALOG_GROUP_BOX_PADDING_TOP_LICENSE_PX}px;}}"
             f"QGroupBox::title{{subcontrol-origin:margin; left:10px; padding:0 4px;}}"
         )
         gi = QHBoxLayout(grp_import)
         gi.setContentsMargins(12, 16, 12, 12)
 
         btn_import = QPushButton("选择并导入 license.key...")
-        btn_import.setMinimumHeight(36)
+        btn_import.setMinimumHeight(LICENSE_IMPORT_BTN_MIN_HEIGHT_PX)
         btn_import.setStyleSheet(
             f"QPushButton{{background:{p.success}; color:#FFFFFF; border:none;"
-            "border-radius:4px; padding:8px 16px; font-weight:bold; font-size:13px;}"
+            f"border-radius:{DIALOG_BORDER_RADIUS_PX}px; padding:{DIALOG_BTN_PADDING_V}px {DIALOG_BTN_PADDING_H}px; font-weight:bold; font-size:13px;}}"
             f"QPushButton:hover{{background:{p.success};}}"
         )
         btn_import.clicked.connect(self._on_import_license)
@@ -1461,7 +1537,7 @@ class LicenseActivationDialog(QDialog):
 
         # 状态提示
         self._lb_status = QLabel("")
-        self._lb_status.setStyleSheet(f"color:{p.text_muted}; font-size:12px;")
+        self._lb_status.setStyleSheet(f"color:{p.text_muted}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
         self._lb_status.setWordWrap(True)
         layout.addWidget(self._lb_status)
 
@@ -1472,7 +1548,7 @@ class LicenseActivationDialog(QDialog):
         from PySide6.QtWidgets import QApplication
         QApplication.clipboard().setText(self._le_mid.text())
         p = ThemeManager.get_palette()
-        self._lb_status.setStyleSheet(f"color:{p.success}; font-size:12px;")
+        self._lb_status.setStyleSheet(f"color:{p.success}; font-size:{DIALOG_DESC_FONT_SIZE_PX}px;")
         self._lb_status.setText("机器码已复制到剪贴板")
 
     def _on_import_license(self) -> None:

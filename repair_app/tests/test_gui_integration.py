@@ -108,19 +108,31 @@ def main_window(qapp, monkeypatch):
     mw = MainWindow()
     yield mw
 
-    # P2-9: 清理 ComputeController（含 ProgressSubscriber 线程），避免 access violation
-    compute_controller = getattr(mw, "_compute_controller", None)
-    if compute_controller is not None:
-        try:
-            compute_controller.cleanup()
-        except Exception:
-            pass
-    # 清理 ZMQ client
-    if hasattr(mw, "_zmq_client") and mw._zmq_client is not None:
-        try:
-            mw._zmq_client.close()
-        except Exception:
-            pass
+    # P5-1: 使用 ApplicationShutdownController 做完整清理（与生产 closeEvent 一致）
+    # 包含：autosave / timer / compute_controller / worker_threads /
+    #       progress_subscriber / lifecycle_manager / zmq_client / visualizer
+    # 关键：lifecycle_manager.stop() 会停止 launcher 的 stdout 读取线程，
+    # 避免 daemon 线程在测试 teardown 后写日志触发 logging 死锁
+    try:
+        from repair_app.ui.application_shutdown_controller import ApplicationShutdownController
+        controller = ApplicationShutdownController(
+            autosave_fn=None,
+            autosave_timer=getattr(mw, "_autosave_timer", None),
+            worker_threads=[
+                getattr(mw, '_path_thread', None),
+                getattr(mw, '_morph_thread', None),
+                getattr(mw, '_load_thread', None),
+                getattr(mw, '_report_thread', None),
+                getattr(mw, '_compute_thread', None),
+            ],
+            compute_controller=getattr(mw, '_compute_controller', None),
+            progress_subscriber=getattr(mw, '_progress_subscriber', None),
+            zmq_client=getattr(mw, '_zmq_client', None),
+            visualizer=getattr(mw, '_visualizer', None),
+        )
+        controller.shutdown()
+    except Exception:
+        pass
     # 停止所有定时器（避免 teardown 后回调）
     if hasattr(mw, "_timers"):
         for timer in mw._timers:
@@ -128,11 +140,6 @@ def main_window(qapp, monkeypatch):
                 timer.stop()
             except Exception:
                 pass
-    if hasattr(mw, "_autosave_timer"):
-        try:
-            mw._autosave_timer.stop()
-        except Exception:
-            pass
     mw.deleteLater()
     qapp.processEvents()
 

@@ -246,6 +246,13 @@ class TestMainWindowS3:
             assert hasattr(mw, "_visualizer"), "MainWindow 应有 _visualizer"
             assert hasattr(mw, "_zmq_client"), "MainWindow 应有 _zmq_client"
         finally:
+            # P3-9: 停止 _autosave_timer 避免 60s 周期回调访问已销毁对象
+            _timer = getattr(mw, "_autosave_timer", None)
+            if _timer is not None:
+                try:
+                    _timer.stop()
+                except Exception:
+                    pass
             # P2-9: 清理 ComputeController（含 ProgressSubscriber 线程），避免 access violation
             cc = getattr(mw, "_compute_controller", None)
             if cc is not None:

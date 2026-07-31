@@ -81,6 +81,15 @@ _MORPH_DIR = get_morph_dir()
 _POINTLIST_FILE = get_pointlist_file()
 _VELOCITYLIST_FILE = get_velocitylist_file()
 
+# ============================================================
+# UI 常量（避免 Magic Number 散落）
+# ============================================================
+STATUS_MSG_BRIEF_TIMEOUT_MS = 2000  # 简短状态栏消息（如"已取消"）
+STATUS_MSG_SHORT_TIMEOUT_MS = 3000  # 常规状态栏消息
+STATUS_MSG_LONG_TIMEOUT_MS = 5000  # 重要状态栏消息（如错误、完成提示）
+AUTO_CHAIN_DELAY_MS = 100  # 自动串联下一步延迟（如路径→形貌→报告）
+DEMO_DATA_POINT_COUNT = 8000  # 演示数据点数
+
 
 PAGE_PATH = _page_cfg.path
 PAGE_MORPH = _page_cfg.morph
@@ -719,10 +728,10 @@ class MainWindow(QMainWindow):
     def _switch_to_step(self, page: int) -> None:
 
         if page == PAGE_MORPH and not self._session.output.path_output_ready:
-            self._sb.showMessage("请先完成路径规划：加载点云 → 框选缺陷 → 点击「开始修复」", 5000)
+            self._sb.showMessage("请先完成路径规划：加载点云 → 框选缺陷 → 点击「开始修复」", STATUS_MSG_LONG_TIMEOUT_MS)
             return
         if page == PAGE_OUTPUT and not self._session.output.path_output_ready:
-            self._sb.showMessage("请先完成路径规划与形貌预测：加载点云 → 框选缺陷 → 点击「开始修复」", 5000)
+            self._sb.showMessage("请先完成路径规划与形貌预测：加载点云 → 框选缺陷 → 点击「开始修复」", STATUS_MSG_LONG_TIMEOUT_MS)
             return
         self._mode_stack.setCurrentIndex(page)
         self._update_step_buttons()
@@ -1006,14 +1015,14 @@ class MainWindow(QMainWindow):
 
         file_msg = "已保存到 形貌预测/ 目录" if self._session.output.files_saved else "仅保留在内存中（未存文件）"
         self._lb_prog.setText("✅ 路径规划完成，自动进入形貌预测...")
-        self._sb.showMessage(f"路径规划完成 – {n_wp} 个航点 – {file_msg}", 3000)
+        self._sb.showMessage(f"路径规划完成 – {n_wp} 个航点 – {file_msg}", STATUS_MSG_SHORT_TIMEOUT_MS)
 
         # Pipeline: 本地引擎路径推进（ZMQ 路径由 _on_compute_stage 管理）
         if metrics is None:
             _wfc_call(self,"set_step_done", 1)      # 路径规划完成
             _wfc_call(self,"set_step_running", 2)   # 形貌预测执行中
             # PR1-7: 本地引擎自动串联形貌预测
-            QTimer.singleShot(100, self._on_fix)
+            QTimer.singleShot(AUTO_CHAIN_DELAY_MS, self._on_fix)
 
     def _inspect_path_result(self, waypoint_layers: np.ndarray | None) -> None:
         """P2-2: 路径规划结果检查 — 连续性/法向稳定/层正确性。
@@ -1133,7 +1142,7 @@ class MainWindow(QMainWindow):
 
         # PR1-7: 形貌预测完成后自动生成 PDF 报告
         self._lb_prog.setText("✅ 形貌预测完成，正在自动生成报告...")
-        QTimer.singleShot(100, self._auto_generate_report)
+        QTimer.singleShot(AUTO_CHAIN_DELAY_MS, self._auto_generate_report)
 
     def _compute_defect_metrics(self, sel_mask: np.ndarray) -> dict:
         if self._session.point_cloud.xyz is None or not np.any(sel_mask):
@@ -1281,7 +1290,7 @@ class MainWindow(QMainWindow):
         p = ThemeManager.get_palette()
         sel_points = self._selector.get_selected_points()
         if len(sel_points) < 3:
-            self._sb.showMessage("请至少选取 3 个点再执行可行性检查", 5000)
+            self._sb.showMessage("请至少选取 3 个点再执行可行性检查", STATUS_MSG_LONG_TIMEOUT_MS)
             Toast.warning(self, "选区不足：请至少选取 3 个点")
             return
         params = self._collect_params()
@@ -1321,7 +1330,7 @@ class MainWindow(QMainWindow):
             "点云文件 (*.csv *.txt *.xyz *.asc);;所有文件 (*)"
         )
         if not fp:
-            self._sb.showMessage("已取消加载", 2000)
+            self._sb.showMessage("已取消加载", STATUS_MSG_BRIEF_TIMEOUT_MS)
             return
         # P0-1: 异步加载点云（避免大文件阻塞 UI）
         self._sb.showMessage(f"加载中: {os.path.basename(fp)}...")
@@ -1392,7 +1401,7 @@ class MainWindow(QMainWindow):
 
     def _load_demo(self) -> None:
         pts, normals, _, _ = _Coord.generate_sample_defect(
-            defect_types=["pit"], seed=self._session.latest_seed, n_points=8000
+            defect_types=["pit"], seed=self._session.latest_seed, n_points=DEMO_DATA_POINT_COUNT
         )
         self._session.point_cloud.xyz = pts
         self._session.point_cloud.normals = normals
@@ -1882,8 +1891,8 @@ class MainWindow(QMainWindow):
                         "计算结果已保存，但 PDF 报告自动生成失败，"
                         "可稍后在「输出交付」面板手动重新生成",
                     )
-                except Exception:
-                    pass
+                except Exception as toast_exc:
+                    log_error(f"Toast 通知失败: {toast_exc}")
             else:
                 self._prog.setValue(100)
                 self._lb_prog.setText("✅ 一键计算完成")
@@ -1948,7 +1957,7 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
         self._prog.setValue(0)
         self._lb_prog.setText("计算已取消")
-        self._sb.showMessage(message or "计算已取消", 5000)
+        self._sb.showMessage(message or "计算已取消", STATUS_MSG_LONG_TIMEOUT_MS)
         _wfc_call(self, "mark_running_as_failed")
         Toast.warning(self, message or "计算已取消")
 
@@ -2141,7 +2150,7 @@ class MainWindow(QMainWindow):
             # 同步状态栏提示
             stage = cached.get("stage_name", "")
             msg = cached.get("message", "")
-            self._sb.showMessage(f"Layer {layer_idx + 1} | {stage} | {msg}", 3000)
+            self._sb.showMessage(f"Layer {layer_idx + 1} | {stage} | {msg}", STATUS_MSG_SHORT_TIMEOUT_MS)
         except Exception as exc:
             log_error(f"逐层查看回放失败: {exc}")
 
@@ -2214,7 +2223,7 @@ class MainWindow(QMainWindow):
     def _on_report_finished(self, fp: str) -> None:
         """报告生成完成。"""
         info(f"报告已自动保存: {fp}")
-        self._sb.showMessage(f"修复完成 · 报告已保存: {fp}", 5000)
+        self._sb.showMessage(f"修复完成 · 报告已保存: {fp}", STATUS_MSG_LONG_TIMEOUT_MS)
         _wfc_call(self, "set_step_done", 3)
         _wfc_call(self, "set_step_running", 4)
         self._lb_prog.setText("✅ 修复完成，可导出 G-code / 报告")
@@ -2550,7 +2559,7 @@ class MainWindow(QMainWindow):
         if is_mock:
             from repair_app.utils.logger_config import info as _log_info
             _log_info("[Morphology] 输出为 mock 数据（本地启发式模型，非 MATLAB 物理模型）")
-            self._sb.showMessage("形貌预测: 本地启发式模型（mock）", 3000)
+            self._sb.showMessage("形貌预测: 本地启发式模型（mock）", STATUS_MSG_SHORT_TIMEOUT_MS)
         self._finish_morphology(repair_pts, sel_mask)
 
     @Slot(str, str, str, object)
@@ -2647,7 +2656,7 @@ class MainWindow(QMainWindow):
                 if hasattr(self, "_lb_prog"):
                     self._prog.setValue(100)
                     self._lb_prog.setText(f"✅ {exporter.display_name} 导出完成")
-                self._sb.showMessage(f"{exporter.display_name} 已保存: {result.output_path}", 5000)
+                self._sb.showMessage(f"{exporter.display_name} 已保存: {result.output_path}", STATUS_MSG_LONG_TIMEOUT_MS)
                 msg = f"{exporter.display_name} 已保存: {result.output_path}"
                 if result.warnings:
                     msg += "\n（含安全检查警告，详见日志）"
@@ -2762,7 +2771,7 @@ class MainWindow(QMainWindow):
             log_error(f"自动保存失败: {exc}")
 
     def _check_recovery(self) -> None:
-        """启动时检查是否存在崩溃恢复数据。"""
+        """启动时检查是否存在崩溃恢复数据（非阻塞自动恢复）。"""
         try:
             if not self._auto_recovery.has_pending_recovery:
                 return
@@ -2776,19 +2785,15 @@ class MainWindow(QMainWindow):
                 saved_at = payload.get("saved_at", "")
             except Exception as e:
                 log_error(f"读取自动保存时间戳失败: {e}")
-            reply = QMessageBox.question(
-                self, "恢复未保存的会话",
-                f"检测到上次会话未正常关闭（自动保存于 {saved_at}）。\n\n"
-                f"是否恢复以下状态？\n"
-                f"  点云: {state.get('point_cloud_path') or '无'}\n"
-                f"  模式: {'修复' if state.get('repair_mode', 1) == 1 else '增材'}\n\n"
-                f"选择「Yes」恢复，「No」放弃恢复并删除快照。",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            # P3-1: 改为非阻塞自动恢复 + Toast 通知（原 QMessageBox.question 阻塞主线程）
+            info(f"检测到未保存的会话（{saved_at}），已自动恢复")
+            Toast.info(
+                self,
+                f"已自动恢复上次会话（保存于 {saved_at}）\n"
+                f"点云: {state.get('point_cloud_path') or '无'}  "
+                f"模式: {'修复' if state.get('repair_mode', 1) == 1 else '增材'}",
             )
-            if reply == QMessageBox.Yes:
-                self._apply_recovered_state(state)
-            else:
-                self._auto_recovery.clear()
+            self._apply_recovered_state(state)
         except Exception as exc:
             log_error(f"恢复检查失败: {exc}")
 
@@ -2952,7 +2957,7 @@ class MainWindow(QMainWindow):
                     self._pp_fields[ui_key].setValue(float(params[spec_key]))
             if "num_layers" in params:
                 self._sp_pp_layers.setValue(int(params["num_layers"]))
-            self._sb.showMessage("预设参数已加载", 3000)
+            self._sb.showMessage("预设参数已加载", STATUS_MSG_SHORT_TIMEOUT_MS)
         except Exception as exc:
             _show_error(self, "预设加载失败", exc)
 
@@ -2986,7 +2991,7 @@ class MainWindow(QMainWindow):
             self._recent_projects.add(self._project_manager.current_name, str(path))
             self._refresh_recent_menu()
             self._lb_project.setText(f"项目: {self._project_manager.current_name}")
-            self._sb.showMessage(f"项目已保存: {path}", 5000)
+            self._sb.showMessage(f"项目已保存: {path}", STATUS_MSG_LONG_TIMEOUT_MS)
             info(f"项目已保存: {path}")
             Toast.success(self, f"项目已保存: {path}")
         except Exception as exc:
@@ -3080,14 +3085,14 @@ class MainWindow(QMainWindow):
         """P3-3: MATLAB 崩溃回调。"""
         from repair_app.utils.error_manager import ErrorCode, ErrorManager
         log_error(f"MATLAB 进程崩溃: {reason}")
-        self._sb.showMessage("MATLAB 进程崩溃，正在尝试自动恢复...", 5000)
+        self._sb.showMessage("MATLAB 进程崩溃，正在尝试自动恢复...", STATUS_MSG_LONG_TIMEOUT_MS)
         Toast.error(self, "MATLAB 进程崩溃，系统正在尝试自动恢复")
 
     @Slot(int)
     def _on_matlab_restarted(self, restart_count: int = 0) -> None:
         """P3-3: MATLAB 重启成功回调。"""
         info(f"MATLAB 已自动重启（第 {restart_count} 次）")
-        self._sb.showMessage("MATLAB 已自动恢复", 3000)
+        self._sb.showMessage("MATLAB 已自动恢复", STATUS_MSG_SHORT_TIMEOUT_MS)
         Toast.success(self, "MATLAB 已自动恢复，可继续操作")
 
     @Slot()
@@ -3104,7 +3109,7 @@ class MainWindow(QMainWindow):
         try:
             result_path = export_logs(fp)
             Toast.success(self, f"日志已导出: {result_path}")
-            self._sb.showMessage(f"日志已导出: {result_path}", 5000)
+            self._sb.showMessage(f"日志已导出: {result_path}", STATUS_MSG_LONG_TIMEOUT_MS)
         except Exception as exc:
             _show_error(self, "日志导出失败", exc)
 
@@ -3168,6 +3173,7 @@ class MainWindow(QMainWindow):
                 getattr(self, '_morph_thread', None),
                 getattr(self, '_load_thread', None),
                 getattr(self, '_report_thread', None),
+                getattr(self, '_compute_thread', None),  # P3-4: 旧版回退路径的线程也需清理
             ],
             compute_controller=getattr(self, '_compute_controller', None),
             progress_subscriber=getattr(self, '_progress_subscriber', None),

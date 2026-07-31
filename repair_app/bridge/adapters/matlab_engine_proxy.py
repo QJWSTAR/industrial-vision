@@ -36,6 +36,15 @@ logger = logging.getLogger("csam.bridge.matlab_engine")
 # 共享会话名称（与 matlab_bridge_server.m 中的 shareEngine 一致）
 DEFAULT_SHARED_NAME = "matlab_bridge"
 
+# ============================================================
+# 模块常量（避免 Magic Number 散落）
+# ============================================================
+DEFAULT_CALL_TIMEOUT_S = 60.0  # 默认单次 MATLAB 调用超时
+DEFAULT_CONNECT_RETRY_COUNT = 3  # 默认连接重试次数
+DEFAULT_CONNECT_INTERVAL_S = 2.0  # 默认连接重试间隔
+DEFAULT_PIPELINE_TIMEOUT_S = 180.0  # 默认管线超时 3 分钟
+ENGINE_QUIT_TIMEOUT_S = 10.0  # eng.quit() 超时
+
 
 def _safe_float(raw: dict, key: str, default: float) -> float:
     """安全读取浮点数，避免 `or` 短路覆盖合法 0.0 值。
@@ -77,10 +86,10 @@ class MatlabEngineProxy:
         self,
         shared_name: str = DEFAULT_SHARED_NAME,
         algo_dir: Optional[str] = None,
-        call_timeout_s: float = 60.0,
-        connect_retry: int = 3,
-        connect_interval_s: float = 2.0,
-        pipeline_timeout_s: float = 180.0,
+        call_timeout_s: float = DEFAULT_CALL_TIMEOUT_S,
+        connect_retry: int = DEFAULT_CONNECT_RETRY_COUNT,
+        connect_interval_s: float = DEFAULT_CONNECT_INTERVAL_S,
+        pipeline_timeout_s: float = DEFAULT_PIPELINE_TIMEOUT_S,
     ) -> None:
         # __init__ 可能因单例被多次调用，只初始化一次
         if getattr(self, "_initialized", False):
@@ -321,7 +330,7 @@ class MatlabEngineProxy:
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
                         future = ex.submit(eng.quit)
                         try:
-                            future.result(timeout=10.0)
+                            future.result(timeout=ENGINE_QUIT_TIMEOUT_S)
                             logger.info("独立启动的 MATLAB 引擎已退出")
                         except concurrent.futures.TimeoutError:
                             logger.warning(
@@ -462,8 +471,8 @@ class MatlabEngineProxy:
                 import matlab.engine as _me
                 if isinstance(exc, _me.EngineError):
                     is_engine_error = True
-            except Exception:
-                pass
+            except Exception as import_exc:
+                logger.debug("matlab.engine 导入检测失败: %s", import_exc)
             if (
                 is_engine_error
                 or isinstance(exc, (ConnectionError, BrokenPipeError, OSError))
@@ -509,8 +518,8 @@ class MatlabEngineProxy:
             compute_time = 0.0
             try:
                 compute_time = float(meta_out.get("compute_time_s", 0)) if isinstance(meta_out, dict) else 0.0
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("解析 compute_time_s 失败: %s", exc)
             logger.info(
                 "MATLAB 路径规划完成: %d 航点, 耗时 %.2fs",
                 len(waypoints), compute_time,
@@ -615,8 +624,8 @@ class MatlabEngineProxy:
             pp_time = 0.0
             try:
                 pp_time = float(meta_out.get("compute_time_s", 0)) if isinstance(meta_out, dict) else 0.0
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("解析 compute_time_s 失败: %s", exc)
             logger.info(
                 "MATLABPipeline 路径规划完成: %d 航点, 耗时 %.2fs",
                 len(waypoints), pp_time,
@@ -630,7 +639,16 @@ class MatlabEngineProxy:
             )
             result = self._parse_profile_result(raw)
             result["waypoints"] = waypoints
-            result["layer_indices"] = np.asarray(layer_indices, dtype=np.int32)
+            # P3-8: layer_indices 可能是 matlab.double 的 object dtype 数组，
+            # 复用 _assemble_waypoints 中的 object dtype fallback 逻辑
+            _li_arr = np.asarray(layer_indices)
+            if _li_arr.dtype == object:
+                _li_arr = np.array(
+                    [int(float(x)) for x in _li_arr.ravel()], dtype=np.int32
+                ).reshape(_li_arr.shape)
+            else:
+                _li_arr = _li_arr.astype(np.int32)
+            result["layer_indices"] = _li_arr
             logger.info(
                 "MATLABPipeline 形貌预测完成: mesh=%d 三角形, 航点=%d, 总耗时 %.2fs",
                 len(result.get("mesh", [])),

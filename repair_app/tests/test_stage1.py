@@ -268,6 +268,13 @@ class TestUIStructure:
             assert hasattr(mw, "_visualizer") or hasattr(mw, "_defect_selector"), \
                 "MainWindow 应有可视化或选区组件"
         finally:
+            # P3-9: 停止 _autosave_timer 避免 60s 周期回调访问已销毁对象
+            _timer = getattr(mw, "_autosave_timer", None)
+            if _timer is not None:
+                try:
+                    _timer.stop()
+                except Exception:
+                    pass
             # P2-9: 清理 ComputeController（含 ProgressSubscriber 线程），避免 access violation
             cc = getattr(mw, "_compute_controller", None)
             if cc is not None:

@@ -627,15 +627,17 @@ class TestComputeSlots:
 
     def test_on_compute_thread_finished_clears_references(self):
         """_on_compute_thread_finished 清空 worker/thread 引用。"""
+        # P3-11: 绑定真实 _stop_progress_subscriber（有 _compute_controller 时为 no-op）
         stub = _make_stub(
             _compute_thread="sentinel",
             _compute_worker="sentinel",
-            _stop_progress_subscriber=MagicMock(),
+            _compute_controller=MagicMock(),  # 模拟生产环境
+            _progress_subscriber=MagicMock(),
         )
+        stub._stop_progress_subscriber = lambda: MainWindow._stop_progress_subscriber(stub)
         MainWindow._on_compute_thread_finished(stub)
         assert stub._compute_thread is None
         assert stub._compute_worker is None
-        stub._stop_progress_subscriber.assert_called_once()
 
     def test_on_compute_failed_marks_pipeline_failed(self, monkeypatch):
         """_on_compute_failed 标记 pipeline 失败并显示对话框。"""
@@ -646,19 +648,21 @@ class TestComputeSlots:
         import repair_app.bridge.lifecycle_manager as lm_mod
         monkeypatch.setattr(lm_mod.MatlabLifecycleManager, "get_instance", classmethod(lambda cls: MagicMock()))
 
+        # P3-11: 绑定真实 _stop_progress_subscriber（有 _compute_controller 时为 no-op）
         stub = _make_stub(
             _set_busy=MagicMock(),
             _prog=MagicMock(),
             _lb_prog=MagicMock(),
             _sb=MagicMock(),
-            _stop_progress_subscriber=MagicMock(),
+            _compute_controller=MagicMock(),  # 模拟生产环境
+            _progress_subscriber=MagicMock(),
             _workflow_controller=MagicMock(),
         )
+        stub._stop_progress_subscriber = lambda: MainWindow._stop_progress_subscriber(stub)
         MainWindow._on_compute_failed(stub, "E_TEST", "friendly msg", "detail")
         stub._set_busy.assert_called_with(False)
         stub._prog.setValue.assert_called_with(0)
         stub._workflow_controller.mark_running_as_failed.assert_called_once()
-        stub._stop_progress_subscriber.assert_called_once()
 
     def test_on_compute_result_not_success_shows_error(self, monkeypatch):
         """_on_compute_result 接收非成功结果时显示错误。"""
@@ -668,11 +672,14 @@ class TestComputeSlots:
         # Mock _show_error 避免对话框
         monkeypatch.setattr(mw_mod, "_show_error", lambda parent, ctx, exc: None)
 
+        # P3-11: 绑定真实 _stop_progress_subscriber（有 _compute_controller 时为 no-op）
         stub = _make_stub(
             _set_busy=MagicMock(),
-            _stop_progress_subscriber=MagicMock(),
+            _compute_controller=MagicMock(),
+            _progress_subscriber=MagicMock(),
             _workflow_controller=MagicMock(),
         )
+        stub._stop_progress_subscriber = lambda: MainWindow._stop_progress_subscriber(stub)
         result = {"status_name": "FAILED", "error_message": "matlab boom"}
         MainWindow._on_compute_result(stub, result)
         stub._set_busy.assert_called_with(False)
@@ -691,11 +698,13 @@ class TestProgressSlots:
         """_start_progress_subscriber 重置实时面板 + 启动订阅。"""
         sub = MagicMock()
         sub.is_running = False
+        # P3-11: 明确设置 _compute_controller=None 测试 fallback 路径（走 sub.start）
         stub = _make_stub(
             _realtime_stats=MagicMock(),
             _layer_player=MagicMock(),
             _session=RepairSession(),
             _progress_subscriber=sub,
+            _compute_controller=None,
         )
         MainWindow._start_progress_subscriber(stub)
         stub._realtime_stats.reset.assert_called_once()
@@ -726,25 +735,35 @@ class TestProgressSlots:
         MainWindow._start_progress_subscriber(stub)  # 不应抛
 
     def test_stop_progress_subscriber_running(self):
-        """运行中的订阅器应被停止。"""
+        """运行中的订阅器应被停止（无 _compute_controller 的 fallback 路径）。"""
         sub = MagicMock()
         sub.is_running = True
-        stub = _make_stub(_progress_subscriber=sub)
+        # P3-3: 明确设置 _compute_controller=None，测试 fallback 路径
+        stub = _make_stub(_progress_subscriber=sub, _compute_controller=None)
         MainWindow._stop_progress_subscriber(stub)
         sub.stop.assert_called_once()
 
     def test_stop_progress_subscriber_not_running(self):
-        """未运行的订阅器不会被停止。"""
+        """未运行的订阅器不会被停止（无 _compute_controller 的 fallback 路径）。"""
         sub = MagicMock()
         sub.is_running = False
-        stub = _make_stub(_progress_subscriber=sub)
+        stub = _make_stub(_progress_subscriber=sub, _compute_controller=None)
         MainWindow._stop_progress_subscriber(stub)
         sub.stop.assert_not_called()
 
     def test_stop_progress_subscriber_none_is_safe(self):
         """_progress_subscriber=None 时不抛。"""
-        stub = _make_stub(_progress_subscriber=None)
+        stub = _make_stub(_progress_subscriber=None, _compute_controller=None)
         MainWindow._stop_progress_subscriber(stub)  # 不应抛
+
+    def test_stop_progress_subscriber_skipped_with_controller(self):
+        """P3-3: 生产路径（有 _compute_controller）应跳过 stop，保持 application-scoped 订阅。"""
+        sub = MagicMock()
+        sub.is_running = True
+        controller = MagicMock()  # 模拟生产环境 ComputeController 存在
+        stub = _make_stub(_progress_subscriber=sub, _compute_controller=controller)
+        MainWindow._stop_progress_subscriber(stub)
+        sub.stop.assert_not_called()  # 有 controller 时不调用 stop
 
     def test_on_progress_received_caches_layer(self):
         """进度槽缓存层数据；mesh 由限帧后的独立信号刷新。"""
@@ -1469,6 +1488,7 @@ class TestCheckRecoveryExtra:
         MainWindow._check_recovery(stub)
 
     def test_applies_when_user_yes(self, tmp_path, monkeypatch):
+        """P3-1: 有恢复文件时自动应用状态（非阻塞，无需用户确认）。"""
         from repair_app.software.project_manager import AutoRecovery
         from repair_app.software.path_manager import PathManager
         monkeypatch.setenv("CSAM_USER_DATA", str(tmp_path))
@@ -1476,11 +1496,14 @@ class TestCheckRecoveryExtra:
         ar = AutoRecovery(pm)
         ar.save({"point_cloud_path": "/x", "repair_mode": 1})
         stub, apply_calls = self._make_stub(ar)
-        monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.StandardButton.Yes)
+        # Mock Toast.info 避免依赖真实 GUI（新流程用 Toast 替代 QMessageBox）
+        from repair_app.ui import main_window as mw_mod
+        monkeypatch.setattr(mw_mod.Toast, "info", lambda *a, **kw: None)
         MainWindow._check_recovery(stub)
         assert len(apply_calls) == 1
 
     def test_clears_when_user_no(self, tmp_path, monkeypatch):
+        """P3-1: 新流程为自动恢复，无 No 分支；pending 状态保留（不再清除）。"""
         from repair_app.software.project_manager import AutoRecovery
         from repair_app.software.path_manager import PathManager
         monkeypatch.setenv("CSAM_USER_DATA", str(tmp_path))
@@ -1488,10 +1511,13 @@ class TestCheckRecoveryExtra:
         ar = AutoRecovery(pm)
         ar.save({"x": 1})
         stub, apply_calls = self._make_stub(ar)
-        monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.StandardButton.No)
+        from repair_app.ui import main_window as mw_mod
+        monkeypatch.setattr(mw_mod.Toast, "info", lambda *a, **kw: None)
         MainWindow._check_recovery(stub)
-        assert apply_calls == []
-        assert not ar.has_pending_recovery
+        # 新流程自动应用 state
+        assert len(apply_calls) == 1
+        # pending 状态保留（自动恢复不再清除文件）
+        assert ar.has_pending_recovery
 
 
 # ============================================================
@@ -2313,7 +2339,9 @@ class TestCloseAndResize:
         mw._path_thread = None
         mw._morph_thread = None
         mw._compute_thread = None
-        mw._stop_progress_subscriber = MagicMock()
+        # P3-11: 移除 _stop_progress_subscriber mock，closeEvent 已委托 ApplicationShutdownController
+        mw._load_thread = None
+        mw._report_thread = None
         mw._compute_worker = None
         mw._zmq_client = None
         mw._visualizer = None
@@ -2784,6 +2812,7 @@ class TestLoadDemoAndLoad:
         mw._sp_max_layers.value.return_value = 5
         mw._sb = MagicMock()
         mw._lb_prog = MagicMock()
+        mw._prog = MagicMock()  # P3-12: _on_report_failed 调用 _prog.setValue(0)
         mw._workflow_controller = MagicMock()
         mw._export_service = ExportService()
         mw._cs_fields = {k: MagicMock(value=MagicMock(return_value=500.0)) for k in [
@@ -3339,10 +3368,12 @@ class TestFeasibilityCheckAndLoad:
     def test_on_load_exception(self, qapp, monkeypatch):
         """加载失败时显示错误。"""
         import repair_app.ui.main_window as mw_mod
+        from repair_app.ui.dialogs import ErrorDialog
         monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **kw: ("/test.xyz", ""))
         from repair_app.service.file_service import FileService
         monkeypatch.setattr(FileService, "load_point_cloud", lambda self, fp: (_ for _ in ()).throw(RuntimeError("load fail")))
-        # Prevent error dialog from hanging
+        # Prevent error dialog from hanging（_on_load_failed 直接调用 ErrorDialog.show）
+        monkeypatch.setattr(ErrorDialog, "show", lambda *a, **kw: None)
         monkeypatch.setattr(mw_mod, "_show_error", lambda *a, **kw: None)
 
         mw = _make_main_window_new()
@@ -3350,6 +3381,23 @@ class TestFeasibilityCheckAndLoad:
         mw._sb = MagicMock()
         mw._file_service = FileService()
         mw._on_load()  # should handle exception gracefully
+        # P3-2: _on_load 启动异步 _load_thread，必须等待并清理，避免线程泄漏
+        load_thread = getattr(mw, "_load_thread", None)
+        if load_thread is not None:
+            load_thread.wait(5000)
+            try:
+                load_thread.quit()
+                load_thread.wait(1000)
+            except Exception:
+                pass
+        load_worker = getattr(mw, "_load_worker", None)
+        if load_worker is not None:
+            try:
+                load_worker.deleteLater()
+            except Exception:
+                pass
+        for _ in range(5):
+            qapp.processEvents()
         mw.deleteLater()
         qapp.processEvents()
 

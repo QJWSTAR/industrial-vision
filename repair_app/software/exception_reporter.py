@@ -209,8 +209,10 @@ def install_exception_reporter(
         if show_dialog:
             try:
                 _show_crash_dialog(path)
-            except Exception:
-                pass
+            except Exception as exc:
+                import sys as _sys
+                if _sys.stderr is not None:
+                    _sys.stderr.write(f"[exception_reporter] 显示崩溃对话框失败: {exc}\n")
 
     # 安装底层 crash_handler（写 crash_*.log）
     install_crash_handler(log_dir=str(pm.logs_dir), on_crash=on_crash)
@@ -222,8 +224,16 @@ def install_exception_reporter(
         try:
             report_path = reporter.report_exception(exc_type, exc_value, exc_tb)
             on_reported(report_path)
-        except Exception:
-            pass
+        except Exception as report_exc:
+            # P3-6: 钩子自身失败时至少记录到 stderr，避免丢失崩溃诊断信息
+            import sys as _sys
+            if _sys.stderr is not None:
+                try:
+                    _sys.stderr.write(
+                        f"[exception_reporter] 生成崩溃报告失败: {report_exc}\n"
+                    )
+                except Exception:
+                    pass
         # 调用前一个钩子（crash_handler 的）
         prev_hook(exc_type, exc_value, exc_tb)
 
